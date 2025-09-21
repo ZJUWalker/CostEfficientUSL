@@ -1,2 +1,2 @@
-# CostEfficientUSL
-A simple realistic  u-shaped split framework for LLM finetine in resource-efficient env.
+# uslV3
+u shape federated learning for LLM

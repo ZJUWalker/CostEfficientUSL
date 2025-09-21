@@ -1,0 +1,146 @@
+from dataclasses import dataclass, field
+import matplotlib.pyplot as plt
+from typing import List, Dict, Optional
+
+
+@dataclass
+class GanttChartData:
+    mini_batch_idx: int = 0
+    head_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    head_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_fwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    head_bwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+
+    @staticmethod
+    def to_aligned_ms(data_list: List["GanttChartData"]) -> List[Dict[str, List[Optional[int]]]]:
+        """
+        把一组 GanttChartData 转成毫秒整数，并以全局最小值为 0 对齐。
+
+        Args:
+            data_list: 多个 GanttChartData 对象
+
+        Returns:
+            List[Dict]，每个元素对应一个对齐后的 GanttChartData 的字段字典
+        """
+        # 收集所有有效时间戳
+        all_vals = []
+        for data in data_list:
+            for field_name, value in data.__dict__.items():
+                if isinstance(value, list):
+                    for v in value:
+                        if v is not None:
+                            all_vals.append(v)
+
+        if not all_vals:
+            return []
+
+        min_val = min(all_vals)
+
+        aligned_list: List[Dict[str, List[Optional[int]]]] = []
+        for data in data_list:
+            aligned: Dict[str, List[Optional[int]]] = {}
+            for field_name, value in data.__dict__.items():
+                if isinstance(value, list):
+                    new_list = []
+                    for v in value:
+                        if v is None:
+                            new_list.append(None)
+                        else:
+                            ms = int(round((v - min_val) * 1000, 2))
+                            new_list.append(ms)
+                    aligned[field_name] = new_list
+                else:
+                    aligned[field_name] = value
+            aligned_list.append(aligned)
+
+        return aligned_list
+
+
+# 阶段名字和颜色
+STAGE_COLOR = {
+    "head_fwd_timestamp": ("Head Fwd", "tab:blue"),
+    "head_fwd_send_timestamp": ("Head Send", "tab:purple"),
+    "tail_fwd_recv_timestamp": ("Tail Recv", "tab:green"),
+    "tail_fwd_timestamp": ("Tail Fwd", "tab:olive"),
+    "tail_bwd_timestamp": ("Tail Bwd", "tab:red"),
+    "tail_bwd_send_timestamp": ("Tail Send", "tab:pink"),
+    "head_bwd_recv_timestamp": ("Head Recv", "tab:cyan"),
+    "head_bwd_timestamp": ("Head Bwd", "tab:orange"),
+}
+
+
+def plot_gantt_per_batch(
+    mini_batch_time_gantt: List[GanttChartData],
+    fp: str = "default.png",
+    alpha: float = 0.3,
+    show: bool = False,
+):
+    """
+    把多个 GanttChartData 绘制成甘特图。
+    每个 mini-batch 一行，不同阶段在同一行上用不同颜色表示。
+
+    Args:
+        mini_batch_time_gantt: GanttChartData 列表
+        fp: 保存文件名
+        alpha: 条形透明度，默认 0.6
+        show: 是否直接 plt.show()
+    """
+    if not mini_batch_time_gantt:
+        print("没有数据")
+        return
+
+    # 一次性对齐所有 batch
+    aligned_list = GanttChartData.to_aligned_ms(mini_batch_time_gantt)
+
+    # 收集全局时间范围
+    all_times = []
+    for aligned in aligned_list:
+        for key in STAGE_COLOR:
+            interval = aligned.get(key)
+            if interval and interval[0] is not None:
+                all_times.extend(interval)
+    if not all_times:
+        print("没有有效的时间戳")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for idx, aligned in enumerate(aligned_list):
+        mb_idx = aligned["mini_batch_idx"]
+
+        for key, (label, color) in STAGE_COLOR.items():
+            interval = aligned.get(key)
+            if not interval or interval[0] is None or interval[1] is None:
+                continue
+
+            start, end = interval
+            duration = end - start
+            ax.barh(
+                y=idx,
+                width=duration,
+                left=start,
+                height=0.5,
+                color=color,
+                edgecolor="black",
+                alpha=alpha,
+                label=label if idx == 0 else "",  # 避免重复图例
+            )
+
+    ax.set_xlabel("Time (ms, aligned)")
+    ax.set_ylabel("Mini-batch")
+    ax.set_yticks(range(len(aligned_list)))
+    ax.set_yticklabels([f"MB{d['mini_batch_idx']}" for d in aligned_list])
+    ax.set_title("Gantt Chart per Mini-Batch (One Row Each)")
+    ax.grid(True, axis="x", linestyle="--", alpha=alpha)
+    ax.legend()
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+    else:
+        plt.savefig(fp, dpi=200)
+        # print(f"Gantt 图已保存到 {fp}")
