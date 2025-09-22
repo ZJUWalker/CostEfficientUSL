@@ -52,7 +52,7 @@ class IOJob:
     micro_total: int
 
 
-class AsyncClient(Client):
+class AsyncClient:
     def __init__(
         self,
         client_args: ClientArgs,
@@ -66,9 +66,20 @@ class AsyncClient(Client):
         num_workers: int = 4,
         normalize_loss: bool = True,  # NEW: 按 accum_steps 归一化 loss
     ):
-        super().__init__(
-            client_args, head_model, tail_model, tokenizer, client_device, train_logger, dataset_train, dataset_test
-        )
+        self.client_device = client_device
+        self.client_args = client_args
+        self.head_model = head_model.to(self.client_device)
+        self.tail_model = tail_model.to(self.client_device)
+        self.tokenizer = tokenizer
+        self.train_logger = train_logger
+        self.train_loader = dataset_train
+        self.test_loader = dataset_test
+        self.local_ep = client_args.epoch  # ✅ 点操作符访问
+        self.lr = client_args.learning_rate  # ✅ 点操作符访问
+        self.optimizer_head = torch.optim.Adam(self.head_model.parameters(), lr=self.lr)
+        self.optimizer_tail = torch.optim.Adam(self.tail_model.parameters(), lr=self.lr)
+        self.avg_loss = AverageMeter()
+        self.compute_time = 0
         self.io_pool = ThreadPoolExecutor(max_workers=num_workers)
         self.normalize_loss = normalize_loss
         self.mini_batch_time_gantt: List[GanttChartData] = []  # used for profiling
@@ -86,11 +97,7 @@ class AsyncClient(Client):
     ) -> Dict:
         act_cpu = head_outs[0].detach().cpu()
         attn_cpu = head_outs[1].detach().cpu() if head_outs[1] is not None else None
-        pos_cpu = (
-            tuple([t.float().cpu() for t in head_outs[2]])
-            if (len(head_outs) > 2 and head_outs[2] is not None)
-            else None
-        )
+        pos_cpu = tuple([t.float().cpu() for t in head_outs[2]]) if (len(head_outs) > 2 and head_outs[2] is not None) else None
         payload = {
             "activation": act_cpu,
             "is_training": True,
@@ -161,9 +168,7 @@ class AsyncClient(Client):
 
         total_bs = input_ids.size(0)
         micro_bs, grad_accum_steps = self._resolve_micro_bs(total_bs)
-        self.train_logger.info(
-            f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}"
-        )
+        self.train_logger.info(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
         print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
         self.mini_batch_time_gantt = [GanttChartData(mini_batch_idx=i) for i in range(grad_accum_steps)]
         # —— 每个“大 batch”一次 step —— 梯度先清零
@@ -187,9 +192,7 @@ class AsyncClient(Client):
         for mi in range(grad_accum_steps):
 
             # 当前 micro：先做 head forward + 异步 I/O（与前一个 micro 的等待重叠）
-            job = self._head_fwd_micro(
-                client_conn, group_id, mi, grad_accum_steps, micro_inputs[mi], micro_masks[mi], micro_labels[mi]
-            )
+            job = self._head_fwd_micro(client_conn, group_id, mi, grad_accum_steps, micro_inputs[mi], micro_masks[mi], micro_labels[mi])
             fwd_pending.append(job)
             # 等待所有的 0..N-1 micro tail BWD 完成
             # print(f'size of fwd_pending: {len(fwd_pending)}')

@@ -1,2 +1,1 @@
-# uslV3
-u shape federated learning for LLM
+U-shaped Split Learning for Cost-Efficient LLM Training
