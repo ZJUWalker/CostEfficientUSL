@@ -310,7 +310,7 @@ class SingleServer:
             has_fwd = False
             try:
                 fwd_wait_start = time.time()
-                data: Payload = self.activation_from_head_queue.get(timeout=0.05)
+                data: Payload = self.activation_from_head_queue.get_nowait()
                 self.idle_time += time.time() - fwd_wait_start
 
                 token = data.token
@@ -361,7 +361,7 @@ class SingleServer:
             try:
 
                 bwd_wait_start = time.time()
-                data = self.gradient_from_tail_queue.get(timeout=0.01)
+                data = self.gradient_from_tail_queue.get_nowait()
                 self.idle_time += time.time() - bwd_wait_start
 
                 token = data.token
