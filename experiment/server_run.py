@@ -3,8 +3,7 @@ import time
 import torch
 import argparse
 from transformers import AutoConfig
-from usl.server.server_base import ServerArgs
-from usl.server.single_server import SingleServer
+from usl.server.single_server import SingleServer, ServerArgs
 from usl.utils.exp import set_seed
 from usl.utils.load_utils import *
 from usl.utils.log_utils import create_logger
@@ -45,7 +44,7 @@ if __name__ == "__main__":
     parser.add_argument("-SP", "--split_point", type=int, default=2)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--mbps", type=int, default=100)
+    parser.add_argument("--mbps", type=int, default=0)
     args = parser.parse_args()
     args = ServerArgs(
         port=args.port,

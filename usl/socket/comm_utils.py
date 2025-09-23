@@ -71,9 +71,8 @@ class SocketCommunicator:
             raise Exception("连接服务端失败")
 
     def accept_client(self):
-        self.conn, addr = self.sock.accept()
-        print(f"[服务端] 已连接来自 {addr}")
-        return self.conn, addr
+        self.conn, self.addr = self.sock.accept()
+        print(f"[服务端] 已连接来自 {self.addr}")
 
     def _sendall_with_rate(self, sock: socket.socket, data: bytes, chunk_bytes: int, rate_mbps: float):
         """分片发送 + 限速"""
@@ -104,7 +103,7 @@ class SocketCommunicator:
             self.conn.sendall(length.to_bytes(4, "big"))
             self._sendall_with_rate(self.conn, data, self.buffer_size, self.rate_limit_mbps)
         except socket.error as e:
-            print(f"[错误] 发送失败: {e}")
+            print(f"发送失败或结束训练")
             raise
 
     def receive(self):
@@ -112,7 +111,7 @@ class SocketCommunicator:
         if not self.conn:
             raise Exception("未建立连接，无法接收")
 
-        self.conn.settimeout(self.timeout)
+        # self.conn.settimeout(self.timeout)
         try:
             length_bytes = self.conn.recv(4)
             if not length_bytes:
@@ -128,14 +127,13 @@ class SocketCommunicator:
 
             return pickle.loads(data)
         except Exception as e:
-            print(f"[错误] 接收失败: {e}")
-            return None
-        finally:
-            self.conn.settimeout(None)
+            print(f"接受失败或结束训练")
+            raise e
 
     def close(self):
         """关闭连接"""
         if self.conn:
+            self.conn.shutdown(socket.SHUT_RDWR)
             self.conn.close()
         if self.sock and self.sock is not self.conn:
             self.sock.close()

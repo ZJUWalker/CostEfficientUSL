@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import json
 import matplotlib.pyplot as plt
 from typing import List, Dict, Optional
 
@@ -8,73 +9,103 @@ class GanttChartData:
     mini_batch_idx: int = 0
     head_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    server_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_fwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    server_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_bwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
 
-    @staticmethod
-    def to_aligned_ms(data_list: List["GanttChartData"]) -> List[Dict[str, List[Optional[int]]]]:
-        """
-        把一组 GanttChartData 转成毫秒整数，并以全局最小值为 0 对齐。
 
-        Args:
-            data_list: 多个 GanttChartData 对象
+def merge_cs_json(server_data: List[Dict], client_data: List[Dict], save_fp: str = 'merged.json', save: bool = False) -> List[Dict]:
+    # 使用字典形式合并每个 mini_batch_idx 对应的数据
 
-        Returns:
-            List[Dict]，每个元素对应一个对齐后的 GanttChartData 的字段字典
-        """
-        # 收集所有有效时间戳
-        all_vals = []
-        for data in data_list:
-            for field_name, value in data.__dict__.items():
-                if isinstance(value, list):
-                    for v in value:
-                        if v is not None:
-                            all_vals.append(v)
+    for server_item, client_item in zip(server_data, client_data):
+        # 通过 mini_batch_idx 进行合并
+        if server_item['mini_batch_idx'] == client_item['mini_batch_idx']:
+            # 合并：server 的非空数据覆盖 client 的空数据
+            client_item["server_fwd_timestamp"] = server_item["server_fwd_timestamp"]
+            client_item["server_bwd_timestamp"] = server_item["server_bwd_timestamp"]
 
-        if not all_vals:
-            return []
+        # 将合并后的数据写入 JSON 文件
+    if save:
+        with open(save_fp, 'w') as f:
+            json.dump(client_data, f, indent=4)
+    return client_data
 
-        min_val = min(all_vals)
 
-        aligned_list: List[Dict[str, List[Optional[int]]]] = []
-        for data in data_list:
-            aligned: Dict[str, List[Optional[int]]] = {}
-            for field_name, value in data.__dict__.items():
-                if isinstance(value, list):
-                    new_list = []
-                    for v in value:
-                        if v is None:
-                            new_list.append(None)
-                        else:
-                            ms = int(round((v - min_val) * 1000, 2))
-                            new_list.append(ms)
-                    aligned[field_name] = new_list
-                else:
-                    aligned[field_name] = value
-            aligned_list.append(aligned)
+def _to_aligned_ms(data_list: List[Dict]) -> List[Dict[str, List[Optional[int]]]]:
+    """
+    把一组 GanttChartData 转成毫秒整数，并以全局最小值为 0 对齐。
 
-        return aligned_list
+    Args:
+        data_list: 多个 GanttChartData 对象
+
+    Returns:
+        List[Dict]，每个元素对应一个对齐后的 GanttChartData 的字段字典
+    """
+    # 收集所有有效时间戳
+    all_vals = []
+    for data in data_list:
+        for field_name, value in data.items():
+            if isinstance(value, list):
+                for v in value:
+                    if v is not None:
+                        all_vals.append(v)
+
+    if not all_vals:
+        return []
+
+    min_val = min(all_vals)
+
+    aligned_list: List[Dict[str, List[Optional[int]]]] = []
+    for data in data_list:
+        aligned: Dict[str, List[Optional[int]]] = {}
+        for field_name, value in data.items():
+            if isinstance(value, list):
+                new_list = []
+                for v in value:
+                    if v is None:
+                        new_list.append(None)
+                    else:
+                        ms = int(round((v - min_val) * 1000, 2))
+                        new_list.append(ms)
+                aligned[field_name] = new_list
+            else:
+                aligned[field_name] = value
+        aligned_list.append(aligned)
+
+    return aligned_list
+
+
+def save_gantt_chart_data(gantt_data: List[GanttChartData], filename: str):
+    # 将List[GanttChartData]转换为字典列表
+    gantt_data_dict = [asdict(data) for data in gantt_data]
+
+    # 写入到JSON文件
+    with open(filename, 'w') as f:
+        json.dump(gantt_data_dict, f, indent=4)
 
 
 # 阶段名字和颜色
 STAGE_COLOR = {
     "head_fwd_timestamp": ("Head Fwd", "tab:blue"),
     "head_fwd_send_timestamp": ("Head Send", "tab:purple"),
+    "server_fwd_timestamp": ("Server Fwd", "tab:green"),
     "tail_fwd_recv_timestamp": ("Tail Recv", "tab:green"),
     "tail_fwd_timestamp": ("Tail Fwd", "tab:olive"),
     "tail_bwd_timestamp": ("Tail Bwd", "tab:red"),
     "tail_bwd_send_timestamp": ("Tail Send", "tab:pink"),
+    "server_bwd_timestamp": ("Server Bwd", "tab:brown"),
     "head_bwd_recv_timestamp": ("Head Recv", "tab:cyan"),
     "head_bwd_timestamp": ("Head Bwd", "tab:orange"),
 }
 
 
 def plot_gantt_per_batch(
-    mini_batch_time_gantt: List[GanttChartData],
+    mini_batch_time_gantt: List[Dict],
     fp: str = "default.png",
     alpha: float = 0.3,
     show: bool = False,
@@ -94,7 +125,7 @@ def plot_gantt_per_batch(
         return
 
     # 一次性对齐所有 batch
-    aligned_list = GanttChartData.to_aligned_ms(mini_batch_time_gantt)
+    aligned_list = _to_aligned_ms(mini_batch_time_gantt)
 
     # 收集全局时间范围
     all_times = []

@@ -1,17 +1,21 @@
+from concurrent.futures import ThreadPoolExecutor, Future
+from dataclasses import dataclass
 import logging
+from queue import Queue, Empty
+import socket
+import threading
 import time
+import uuid
+from typing import Any, Dict, Optional, Tuple, List
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
-
-from usl.socket import SocketCommunicator
-from usl.utils.dataset.exp import AverageMeter
-from typing import Dict, List, Optional, Tuple
+from usl.socket import SocketCommunicator, Payload
+from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data
 from usl.utils.tensor_utils import pad_inputs
-from dataclasses import dataclass
-import argparse
 
 
 @dataclass
@@ -30,11 +34,10 @@ class ClientArgs:
     async_io: bool = False
 
 
-class Client(object):
-
+class Client:
     def __init__(
         self,
-        client_args: ClientArgs,  # ✅ 改成 ClientArgs 类型
+        client_args: ClientArgs,
         head_model: nn.Module,
         tail_model: nn.Module,
         tokenizer: AutoTokenizer,
@@ -42,125 +45,397 @@ class Client(object):
         train_logger: logging.Logger,
         dataset_train: Dataset,
         dataset_test: Dataset,
+        num_workers: int = 4,
+        normalize_loss: bool = True,  # NEW: 按 accum_steps 归一化 loss
     ):
+        # ---- Model & optimizer
         self.client_device = client_device
         self.client_args = client_args
         self.head_model = head_model.to(self.client_device)
         self.tail_model = tail_model.to(self.client_device)
         self.tokenizer = tokenizer
-        self.train_logger = train_logger
+        self.logger = train_logger
         self.train_loader = dataset_train
         self.test_loader = dataset_test
         self.local_ep = client_args.epoch  # ✅ 点操作符访问
         self.lr = client_args.learning_rate  # ✅ 点操作符访问
-
-        print(
-            f"[Client] after model loaded, cuda memory: {torch.cuda.memory_allocated(device=client_device) / 1024**3:.4f} GB, "
-            f"max memory: {torch.cuda.max_memory_allocated(device=client_device) / 1024**3:.4f} GB"
-        )
-
         self.optimizer_head = torch.optim.Adam(self.head_model.parameters(), lr=self.lr)
         self.optimizer_tail = torch.optim.Adam(self.tail_model.parameters(), lr=self.lr)
-        self.avg_loss = AverageMeter()
+
+        # ---- Communicator
+        self.communicator = SocketCommunicator(
+            is_server=False,
+            port=client_args.port,
+            buffer_size=1024 * 1024,  # 1MB
+            rate_limit_mbps=client_args.rate_mbps,
+        )
+
+        # ---- Metrics
         self.compute_time = 0
+        self.normalize_loss = normalize_loss
+        # ---- Executors & coordination
+        self.main_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=2)
+        self.compute_future: Optional[Future] = None
+        self.server_future: Optional[Future] = None
+        self.stop_event = threading.Event()
+        self.losses = []
+        self.profile_data: List[GanttChartData] = []
 
-    def _forward(
-        self, client_conn: SocketCommunicator, input_ids: torch.Tensor, attention_mask: torch.Tensor, labels: torch.Tensor
-    ) -> Tuple[CausalLMOutputWithPast, torch.Tensor, torch.Tensor]:
-        # forward head
-        head_outs: Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor]]] = self.head_model.forward(input_ids, attention_mask)
+        # ---- Queues (compute pipeline)
+        self.activation_to_server_queue: Queue[Payload] = Queue()  # used for serve fwd
+        self.activation_from_server_queue: Queue[Payload] = Queue()  # used for tail fwd
+        self.gradient_to_server_queue: Queue[Payload] = Queue()  # used for server bwd
+        self.gradient_from_server_queue: Queue[Payload] = Queue()  # used for head bwd
+
+        # -----Other args used to save tensors
+        self.head_fwd_activation_dict: Dict[int, torch.Tensor] = {}
+        self.pos_embedding_dict: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self.atten_mask_dict: Dict[int, torch.Tensor] = {}
+        self.labels_dict: Dict[int, torch.Tensor] = {}
+
+    @torch.no_grad()
+    # @timeit()
+    def _to_cpu_payload(
+        self,
+        output: Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor]]],
+        *,
+        token: str,
+        group_id: str,
+        mb_idx: int,
+        mb_total: int,
+        is_activation: bool,  # activation or gradient
+    ) -> Dict:
+        # save essential tensors to dict for tail and bwd phase to use
+        attn_gpu = output[1] if (len(output) > 1 and output[1] is not None) else None
+        self.atten_mask_dict[mb_idx] = attn_gpu
+        pos_gpu = output[2] if (len(output) > 2 and output[2] is not None) else None
+        self.pos_embedding_dict[mb_idx] = pos_gpu
+        # send essential tensors to server
+        act_cpu = output[0].clone().detach().cpu()
+        attn_cpu = attn_gpu.detach().cpu() if attn_gpu is not None else None
+        pos_cpu = tuple([t.cpu() for t in pos_gpu]) if pos_gpu is not None else None
+        payload = Payload(
+            tensor=act_cpu,
+            is_activation=is_activation,
+            is_training=True,
+            # —— 元信息 ——（server 将用 token 作为上下文 key）
+            token=token,
+            group_id=group_id,
+            mb_idx=mb_idx,
+            mb_total=mb_total,
+            attention_mask=attn_cpu,
+            position_embeddings=pos_cpu,
+        )
+        return payload
+
+    def _payload_nbytes(self, payload: Dict[str, Any]) -> int:
+        """计算 payload 中所有 tensor 的占用字节数（单位: Byte）"""
+        total = 0
+
+        def tensor_nbytes(t: torch.Tensor) -> int:
+            return t.numel() * t.element_size()
+
+        for key, val in payload.items():
+            if isinstance(val, torch.Tensor):
+                total += tensor_nbytes(val)
+            elif isinstance(val, (list, tuple)):
+                for v in val:
+                    if isinstance(v, torch.Tensor):
+                        total += tensor_nbytes(v)
+        return total
+
+    def _split_micro(self, tensor: torch.Tensor, micro_bs: int) -> List[torch.Tensor]:
+        # 假设 dim=0 为 batch 维
+        chunks = []
+        total = tensor.size(0)
+        for start in range(0, total, micro_bs):
+            end = min(start + micro_bs, total)
+            chunks.append(tensor[start:end])
+        return chunks
+
+    def _resolve_micro_bs(self, total_bs: int) -> Tuple[int, int]:
+        # 兼容没有 micro_batch_size 的 ClientArgs
+        micro_bs = getattr(self.client_args, "micro_batch_size", None) or self.client_args.batch_size
+        if micro_bs <= 0:
+            micro_bs = self.client_args.batch_size
+        if micro_bs > total_bs:
+            micro_bs = total_bs
+        grad_accum_steps = (total_bs + micro_bs - 1) // micro_bs
+        return micro_bs, grad_accum_steps
+
+    def _head_fwd_micro(
+        self,
+        group_id: str,
+        mb_idx: int,
+        grad_accum_steps: int,
+        x: torch.Tensor,
+        m: torch.Tensor,
+        y: torch.Tensor,
+    ):
+        self.profile_data[mb_idx].head_fwd_timestamp[0] = time.time()
+        head_outs = self.head_model.forward(x, m)
+        torch.cuda.synchronize()
         head_outs[0].requires_grad_(True)
-        attention_mask = head_outs[1].cpu() if head_outs[1] is not None else None
-        head_out_to_server = {
-            "activation": head_outs[0].cpu(),
-            "attention_mask": attention_mask,
-            "position_embeddings": ([ho.float().cpu() for ho in head_outs[2]] if len(head_outs) > 2 else None),
-            "is_training": True,
-        }
-        if head_out_to_server["attention_mask"] is None:
-            head_out_to_server.pop("attention_mask")
-        if head_out_to_server["position_embeddings"] is None:
-            head_out_to_server.pop("position_embeddings")
-        client_conn.send(head_out_to_server)
-        server_forward_output = client_conn.receive()
-
-        activation_to_tail = torch.tensor(
-            server_forward_output["server_activation"],
-            device=self.client_device,
-            dtype=head_outs[0].dtype,
-            requires_grad=True,
+        self.head_fwd_activation_dict[mb_idx] = head_outs[0]
+        token = uuid.uuid4().hex
+        payload = self._to_cpu_payload(
+            head_outs,
+            token=token,
+            group_id=group_id,
+            mb_idx=mb_idx,
+            mb_total=grad_accum_steps,
+            is_activation=True,
         )
-        output = self.tail_model.forward(
+        self.profile_data[mb_idx].head_fwd_timestamp[1] = time.time()
+        return payload
+
+    def _tail_fwd_bwd_micro(self, server_forward_output: Payload) -> Tuple[Payload, torch.Tensor]:
+        # print(f"[Client] micro {head_fwd.mb_idx} tial recv,future elapsed:[{head_fwd.recv_future.start}, {head_fwd.recv_future.end}]")
+        # token = server_forward_output.get("token")
+        # group_id = server_forward_output.get("group_id")
+        # mb_idx = int(server_forward_output.get("mb_idx"))
+        # mb_total = int(server_forward_output.get("mb_total"))
+        # 解析 server 传来的 payload
+        token = server_forward_output.token
+        group_id = server_forward_output.group_id
+        mb_idx = server_forward_output.mb_idx
+        mb_total = server_forward_output.mb_total
+
+        self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.time()
+        activation_cpu: torch.Tensor = server_forward_output.tensor
+        activation_to_tail = activation_cpu.to(self.client_device).requires_grad_(True)
+        # tail forward
+        output: CausalLMOutputWithPast = self.tail_model.forward(
             hidden_states=activation_to_tail,
-            attention_mask=head_outs[1] if head_outs[1] is not None else None,
-            position_embeddings=head_outs[2] if len(head_outs) > 2 else None,
-            labels=labels,
+            attention_mask=self.atten_mask_dict[mb_idx],
+            position_embeddings=self.pos_embedding_dict[mb_idx],
+            labels=self.labels_dict[mb_idx],
         )
-        return output, activation_to_tail, head_outs[0]
-
-    def _backward(self, client_conn: SocketCommunicator, loss: torch.Tensor, activation_to_tail: torch.Tensor, head_output_activation: torch.Tensor):
-        # tail model backward
+        torch.cuda.synchronize()
+        self.profile_data[mb_idx].tail_fwd_timestamp[1] = time.time()
+        # 可选：按 accum 步数归一化，保证与“单大 batch 一次性训练”的梯度数值一致
+        loss = output.loss / mb_total if self.normalize_loss else output.loss
+        self.losses.append(loss.item())
+        self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.time()
         loss.backward()
-        # get grads of tail model input activation
-        grads_to_server = activation_to_tail.grad.cpu()
-        # send grads to server for server backward
-        tail_grads_to_server = {"gradient": grads_to_server}
-        client_conn.send(tail_grads_to_server)
-        # receive server backward output grad
-        server_backward_output = client_conn.receive()
-        grads_from_server = torch.tensor(
-            server_backward_output["server_gradient"],
-            device=self.client_device,
-            dtype=activation_to_tail.dtype,
+        torch.cuda.synchronize()
+        grad_payload = self._to_cpu_payload(
+            output=(activation_to_tail.grad,),
+            token=token,
+            group_id=group_id,
+            mb_idx=mb_idx,
+            mb_total=mb_total,
+            is_activation=False,
         )
-        # head model backward
-        head_output_activation.backward(grads_from_server)
-        # optimizer step
-        self.optimizer_head.step()
-        self.optimizer_tail.step()
-        self.optimizer_head.zero_grad()
-        self.optimizer_tail.zero_grad()
+        self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.time()
+        return grad_payload, loss
+
+    def _head_bwd_micro(self, server_bwd_output: Payload):
+        assert server_bwd_output.is_activation == False, "should be gradient,but activation recieved"
+        mb_idx = server_bwd_output.mb_idx
+        grad_cpu: torch.Tensor = server_bwd_output.tensor
+        # load grad and activation
+        self.profile_data[mb_idx].head_bwd_timestamp[0] = time.time()
+        grad_to_head = grad_cpu.to(self.client_device)
+        head_activation = self.head_fwd_activation_dict[mb_idx]
+        # real head model backward
+        head_activation.backward(grad_to_head)
+        torch.cuda.synchronize()
+        self.profile_data[mb_idx].head_bwd_timestamp[1] = time.time()
+        # remove not needed tensors to save memory
+        del (
+            self.head_fwd_activation_dict[mb_idx],
+            self.pos_embedding_dict[mb_idx],
+            self.atten_mask_dict[mb_idx],
+            self.labels_dict[mb_idx],
+        )
         pass
 
-    def train_epoch(self):
-        """
-        Train the client model
-        """
-        torch.cuda.reset_peak_memory_stats(device=self.client_device)
-        self.avg_loss.reset()
-        # ❗注意：ClientArgs 里没有 batch_per_sync，需要加一个默认值或删掉
-        with SocketCommunicator(
-            host="localhost",
-            port=self.client_args.port,
-            is_server=False,
-            rate_limit_mbps=self.client_args.rate_mbps,
-        ) as client_conn:
-            start_time = time.time()
-            for epoch in range(self.local_ep):
-                self.train_logger.info(f"[Client] start train epoch {epoch+1}, data loader len: {len(self.train_loader)}")
-                for batch_idx, batch in enumerate(self.train_loader, 1):
-                    loss = self.train_batch(batch, client_conn, batch_idx)
-                    self.train_logger.info(f"[Client] train epoch {epoch+1}, batch {batch_idx}/{len(self.train_loader)}, loss: {loss:.4f}")
-                    if batch_idx == 20:
-                        break
-            end_time = time.time()
-            self.train_logger.info(f"[Client Finished] train epoch time: {end_time - start_time:.2f} s, compute time: {self.compute_time:.2f} s")
+    def _check_commuication(self):
+        # 异步 send
+        if not self.communicator.conn:
+            # Wait for run() to set a connection; this path is rarely hit.
+            while not self.stop_event.is_set() and not self.communicator.conn:
+                time.sleep(0.05)
+        return self.communicator.conn
 
-    def train_batch(self, batch: Dict, client_conn: SocketCommunicator, batch_idx: int):
+    # TODO:处理client端的send操作
+    def _head_client_send(self):
+        self._check_commuication()
+        while not self.stop_event.is_set():
+            try:
+                payload = self.activation_to_server_queue.get(timeout=0.01)
+                if payload is not None:  # 可能是 None（队列空）
+                    self.communicator.send(payload)
+                else:
+                    continue
+            except Empty:
+                pass
+            try:
+                payload = self.gradient_to_server_queue.get(timeout=0.01)
+                if payload is not None:  # 可能是 None（队列空）
+                    # print(f'send gradient payload')
+                    self.communicator.send(payload)
+                else:
+                    continue
+            except Empty:
+                pass
+        pass
+
+    # TODO: 处理recv操作
+    def _handle_server_send(self):
+        self._check_commuication()
+        self.communicator.conn.settimeout(60.0)
+        while not self.stop_event.is_set():
+            try:
+                data: Payload = self.communicator.receive()
+            except socket.timeout:
+                print("socket timeout")
+                continue
+            except Exception as e:
+                break
+            if data is None:
+                break
+            if data.is_activation:
+                self.activation_from_server_queue.put(data)
+            else:
+                self.gradient_from_server_queue.put(data)
+            # else:
+            #     self.logger.warning(f"Unknown data received: {data}")
+
+    def _do_pipeline(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+        # micro batch head fwd and send
+        for mb_idx in range(grad_accum_steps):
+            #  tail fwd and send
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
+            self.labels_dict[mb_idx] = micro_labels[mb_idx]
+            self.activation_to_server_queue.put(payload)
+            pass
+        # print(f'Global batch id -> {global_batch_idx} finished head forward')
+        batch_loss = 0
+        no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
+        while True:
+            if not all(no_tail_fwd_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_activation_payload = self.activation_from_server_queue.get(timeout=0.01)
+                    if server_activation_payload is not None:
+                        mb_idx = server_activation_payload.mb_idx
+                        no_tail_fwd_bwd_mb_list[mb_idx] = True
+                        grad_payload, loss = self._tail_fwd_bwd_micro(server_activation_payload)
+                        batch_loss += loss.item()
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} tail forward and backward')
+                        self.gradient_to_server_queue.put(grad_payload)
+                except Empty:
+                    continue
+            else:
+                break
+            pass
+        # print(f'Global batch id -> {global_batch_idx} finished tail forward and backward')
+
+        no_head_bwd_mb_list = [False] * grad_accum_steps
+        while True:
+            if not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_grad_payload = self.gradient_from_server_queue.get(timeout=0.01)
+                    if server_grad_payload is not None:
+                        mb_idx = server_grad_payload.mb_idx
+                        no_head_bwd_mb_list[mb_idx] = True
+                        self._head_bwd_micro(server_grad_payload)
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} head backward')
+                except Empty:
+                    continue
+            else:
+                # print(f'exit global batch id -> {global_batch_idx}')
+                break
+            pass
+        return batch_loss
+
+    def _do_sequential(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+        # micro batch head fwd and send
+        batch_loss = 0
+        for mb_idx in range(grad_accum_steps):
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
+            self.labels_dict[mb_idx] = micro_labels[mb_idx]
+            self.activation_to_server_queue.put(payload)
+            # wait for server activation
+            server_activation_payload = self.activation_from_server_queue.get(block=True)
+            payload, loss = self._tail_fwd_bwd_micro(server_activation_payload)
+            batch_loss += loss.item()
+            self.gradient_to_server_queue.put(payload)
+            # wait for server gradient
+            server_grad_payload = self.gradient_from_server_queue.get(block=True)
+            self._head_bwd_micro(server_grad_payload)
+        return batch_loss
+
+    def train_large_batch_overlapped_accum(self, batch: Dict, global_batch_idx: int):
+        """
+        对一个大 batch:
+        1) 切分成多个 micro-batches
+        2) head forward + 异步 send/recv（通信-计算重叠）
+        3) 每个 micro 执行 tail forward + backward（只做反传，不 step）
+        4) 全部 micro 完成后，统一 optimizer.step()，再 zero_grad()
+        """
+        self.head_model.train()
+        self.tail_model.train()
+
+        # 解析与 pad（先 pad 再切 micro，保持序列对齐）
         input_ids = batch["input_ids"].to(self.client_device)
         attention_mask = batch["attention_mask"].to(self.client_device)
         input_ids, attention_mask = pad_inputs(input_ids, attention_mask, self.client_args.max_seq_len)
-        labels = input_ids
-        # forward
-        output, activation_to_tail, head_output_activation = self._forward(client_conn, input_ids, attention_mask, labels)
-        # backward
-        loss = output.loss
-        self.avg_loss.update(loss.item())
-        self._backward(
-            client_conn,
-            loss,
-            activation_to_tail,
-            head_output_activation,
-        )
-        torch.cuda.empty_cache()
-        return loss
+        labels_full = input_ids  # 自回归
+
+        total_bs = input_ids.size(0)
+        micro_bs, grad_accum_steps = self._resolve_micro_bs(total_bs)
+        self.logger.info(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
+        print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
+        self.profile_data = [GanttChartData(mini_batch_idx=i) for i in range(grad_accum_steps)]
+        # —— 每个“大 batch”一次 step —— 梯度先清零
+        self.optimizer_head.zero_grad(set_to_none=True)
+        self.optimizer_tail.zero_grad(set_to_none=True)
+
+        # 切分微批
+        micro_inputs = self._split_micro(input_ids, micro_bs)
+        micro_masks = self._split_micro(attention_mask, micro_bs)
+        micro_labels = self._split_micro(labels_full, micro_bs)
+
+        # 全局的 group_id（server 用它来做整批 step）
+        group_id = uuid.uuid4().hex
+        self.stop_event.clear()
+        # --------------------------------------------------------main loop--------------------------------------------------------
+        if self.client_args.async_io:
+            batch_loss = self._do_pipeline(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        else:
+            batch_loss = self._do_sequential(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        # --------------------------------------------------------main loop end--------------------------------------------------------
+        # do step
+        self.logger.info(f"[Client] big batch {global_batch_idx}: loss={batch_loss/grad_accum_steps:.4f}")
+        self.optimizer_head.step()
+        self.optimizer_tail.step()
+        self.optimizer_head.zero_grad(set_to_none=True)
+        self.optimizer_tail.zero_grad(set_to_none=True)
+        # print(self.profile_data)
+        if global_batch_idx == 5:
+            # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
+            save_gantt_chart_data(self.profile_data, 'log/profile/client.json')
+        # print(f'global batch id -> {global_batch_idx} finished training')
+        pass
+
+    def train_epoch(self):
+        torch.cuda.reset_peak_memory_stats(device=self.client_device)
+        start_time = time.time()
+        send_future = self.main_executor.submit(self._head_client_send)
+        recv_future = self.main_executor.submit(self._handle_server_send)
+        for epoch in range(self.local_ep):
+            self.logger.info(f"[Client] start (overlap+accum) epoch {epoch+1}, len: {len(self.train_loader)}")
+            for batch_idx, batch in enumerate(self.train_loader, 1):
+                self.train_large_batch_overlapped_accum(batch, batch_idx)
+                if batch_idx == self.client_args.step:
+                    break
+        self.stop_event.set()
+        # wait for send/recv to finish
+        self.communicator.close()
+        send_future.result()
+        recv_future.result()
+        self.main_executor.shutdown(wait=True)
+        end_time = time.time()
+        self.logger.info(f"[Client Finished] epoch time: {end_time - start_time:.2f} s")

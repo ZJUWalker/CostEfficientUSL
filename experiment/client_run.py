@@ -3,10 +3,8 @@ import argparse
 import warnings
 
 import torch
-import torch.multiprocessing as mp
 import torch
-from usl.client import Client, AsyncClient
-from usl.client.client import ClientArgs
+from usl.client import Client, ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
 from usl.utils.exp import set_seed
@@ -36,30 +34,17 @@ def run_client(args: ClientArgs):
     dataloader = client_dataloaders[0]  # 默认只取第一个客户端数据
 
     # -----------------create client----------
-    if args.async_io:
-        client = AsyncClient(
-            client_args=args,
-            head_model=head,
-            tail_model=tail,
-            tokenizer=tokenizer,
-            client_device=device,
-            train_logger=logger,
-            dataset_train=dataloader["train"],
-            dataset_test=dataloader["test"],
-            num_workers=args.micro_batch_size,
-        )
-    else:
-        # TODO remove sync client
-        client = Client(
-            client_args=args,
-            head_model=head,
-            tail_model=tail,
-            tokenizer=tokenizer,
-            client_device=device,
-            train_logger=logger,
-            dataset_train=dataloader["train"],
-            dataset_test=dataloader["test"],
-        )
+    client = Client(
+        client_args=args,
+        head_model=head,
+        tail_model=tail,
+        tokenizer=tokenizer,
+        client_device=device,
+        train_logger=logger,
+        dataset_train=dataloader["train"],
+        dataset_test=dataloader["test"],
+        num_workers=args.micro_batch_size,
+    )
     client.train_epoch()
 
 
@@ -74,7 +59,7 @@ def main():
     parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=2)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--mbps", type=int, default=100)
+    parser.add_argument("--mbps", type=int, default=0)
     parser.add_argument("--async_io", action="store_true", default=False)
     parser.add_argument("--micro_batch_size", type=int, default=4)
 
