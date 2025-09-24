@@ -7,6 +7,10 @@ from usl.client import Client, ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
 from usl.utils.exp import set_seed
+from deepspeed.ops.op_builder import AsyncIOBuilder
+
+
+nvme_handle = AsyncIOBuilder().load().aio_handle(block_size=2 * 1024 * 1024)
 
 SEED = 0
 warnings.filterwarnings("ignore", message="To copy construct from a tensor", category=UserWarning)
@@ -43,6 +47,7 @@ def run_client(args: ClientArgs):
         dataset_train=dataloader["train"],
         dataset_test=dataloader["test"],
         num_workers=args.micro_batch_size,
+        nvme_handle=nvme_handle,  # 外部传入nvme句柄
     )
     client.train_epoch()
 
@@ -59,7 +64,7 @@ def main():
     parser.add_argument("-SP", "--split_point", type=int, default=2)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--mbps", type=int, default=0)
-    parser.add_argument("--async_io", action="store_true", default=False)
+    parser.add_argument("--async_io", action="store_true", default=True)
     parser.add_argument("--micro_batch_size", type=int, default=4)
     parser.add_argument("--offload_activation", action="store_true", default=False)
     parser.add_argument("--offload_model_state", action="store_true", default=False)
