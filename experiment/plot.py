@@ -1,6 +1,7 @@
 import os
 import json
 from usl.utils.usl_gantt_plot import plot_gantt_per_batch, merge_cs_json
+import time
 
 
 def plot(dir='log/profile'):
@@ -11,7 +12,7 @@ def plot(dir='log/profile'):
     with open(server_fp, 'r') as f:
         server_data = json.load(f)
     merged_data = merge_cs_json(server_data, client_data, save=True, save_fp=os.path.join(dir, 'merged.json'))
-    plot_gantt_per_batch(merged_data, fp='log/img/gantt.png')
+    plot_gantt_per_batch(merged_data, fp=f'log/img/gantt_{time.time()}.png')
 
 
 if __name__ == '__main__':

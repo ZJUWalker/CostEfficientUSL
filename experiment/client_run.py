@@ -3,7 +3,6 @@ import argparse
 import warnings
 
 import torch
-import torch
 from usl.client import Client, ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
@@ -62,6 +61,8 @@ def main():
     parser.add_argument("--mbps", type=int, default=0)
     parser.add_argument("--async_io", action="store_true", default=False)
     parser.add_argument("--micro_batch_size", type=int, default=4)
+    parser.add_argument("--offload_activation", action="store_true", default=False)
+    parser.add_argument("--offload_model_state", action="store_true", default=False)
 
     args = parser.parse_args()
     args = ClientArgs(
@@ -77,6 +78,8 @@ def main():
         rate_mbps=args.mbps,
         async_io=args.async_io,
         micro_batch_size=args.micro_batch_size,
+        offload_activation=args.offload_activation,
+        offload_model_state=args.offload_model_state,
     )
 
     run_client(args)

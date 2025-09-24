@@ -16,6 +16,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data
 from usl.utils.tensor_utils import pad_inputs
+from usl.offload.activation_offload import ActivationCollector
 
 
 @dataclass
@@ -32,6 +33,8 @@ class ClientArgs:
     rate_mbps: float = 10  # rate in Mbps
     micro_batch_size: int = 1
     async_io: bool = False
+    offload_activation: bool = False
+    offload_model_state: bool = False
 
 
 class Client:
@@ -81,6 +84,15 @@ class Client:
         self.losses = []
         self.profile_data: List[GanttChartData] = []
 
+        # ----Parameter Efficient Offloading
+        if self.client_args.offload_activation:
+            self.head_activation_collector = ActivationCollector(
+                base_model=self.head_model,
+                offload_threshold=1024,
+                device=self.client_device,
+            )
+            self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
+
         # ---- Queues (compute pipeline)
         self.activation_to_server_queue: Queue[Payload] = Queue()  # used for serve fwd
         self.activation_from_server_queue: Queue[Payload] = Queue()  # used for tail fwd
@@ -107,9 +119,13 @@ class Client:
     ) -> Dict:
         # save essential tensors to dict for tail and bwd phase to use
         attn_gpu = output[1] if (len(output) > 1 and output[1] is not None) else None
+        if attn_gpu is not None:
+            self.pin_on_gpu_tensors_idx.append(attn_gpu.data_ptr())  # pos_embedding和attn_mask在tail fwd的时候需要，所以不能卸载
         self.atten_mask_dict[mb_idx] = attn_gpu
         pos_gpu = output[2] if (len(output) > 2 and output[2] is not None) else None
         self.pos_embedding_dict[mb_idx] = pos_gpu
+        if pos_gpu is not None:
+            self.pin_on_gpu_tensors_idx.extend([t.data_ptr() for t in pos_gpu])
         # send essential tensors to server
         act_cpu = output[0].clone().detach().cpu()
         attn_cpu = attn_gpu.detach().cpu() if attn_gpu is not None else None
@@ -228,6 +244,7 @@ class Client:
             is_activation=False,
         )
         self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.time()
+
         return grad_payload, loss
 
     def _head_bwd_micro(self, server_bwd_output: Payload):
@@ -251,7 +268,7 @@ class Client:
         )
         pass
 
-    def _check_commuication(self):
+    def _check_communication(self):
         # 异步 send
         if not self.communicator.conn:
             # Wait for run() to set a connection; this path is rarely hit.
@@ -261,7 +278,7 @@ class Client:
 
     # TODO:处理client端的send操作
     def _head_client_send(self):
-        self._check_commuication()
+        self._check_communication()
         while not self.stop_event.is_set():
             try:
                 payload = self.activation_to_server_queue.get(timeout=0.01)
@@ -284,7 +301,7 @@ class Client:
 
     # TODO: 处理recv操作
     def _handle_server_send(self):
-        self._check_commuication()
+        self._check_communication()
         self.communicator.conn.settimeout(60.0)
         while not self.stop_event.is_set():
             try:
@@ -304,6 +321,7 @@ class Client:
             #     self.logger.warning(f"Unknown data received: {data}")
 
     def _do_pipeline(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+        offload_activation = self.client_args.offload_activation
         # micro batch head fwd and send
         for mb_idx in range(grad_accum_steps):
             #  tail fwd and send
@@ -311,6 +329,9 @@ class Client:
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
             pass
+        # offload all activations created by head model fwd
+        if offload_activation:
+            self.head_activation_collector.offload(except_tensor_idx_list=self.pin_on_gpu_tensors_idx)
         # print(f'Global batch id -> {global_batch_idx} finished head forward')
         batch_loss = 0
         no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
@@ -331,7 +352,9 @@ class Client:
                 break
             pass
         # print(f'Global batch id -> {global_batch_idx} finished tail forward and backward')
-
+        if offload_activation:
+            self.head_activation_collector.reload()
+        # micro batch head bwd and recv
         no_head_bwd_mb_list = [False] * grad_accum_steps
         while True:
             if not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
@@ -348,6 +371,8 @@ class Client:
                 # print(f'exit global batch id -> {global_batch_idx}')
                 break
             pass
+        if offload_activation:
+            self.head_activation_collector.clear()
         return batch_loss
 
     def _do_sequential(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
