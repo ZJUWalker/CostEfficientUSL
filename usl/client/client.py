@@ -91,7 +91,7 @@ class Client:
                 offload_threshold=1024,
                 device=self.client_device,
             )
-            self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
+        self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
 
         # ---- Queues (compute pipeline)
         self.activation_to_server_queue: Queue[Payload] = Queue()  # used for serve fwd
