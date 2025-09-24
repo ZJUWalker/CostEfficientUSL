@@ -3,17 +3,16 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Queue, Empty
-import socket
 import threading
 import logging
 import time
-from typing import Tuple, Dict, Any, Optional, List, Tuple as TTuple, Type
+from typing import Dict, Any, Optional, List, Tuple as TTuple, Type, Union
 
 import torch
 import torch.nn as nn
 
 from usl.socket import SocketCommunicator, Payload
-from usl.utils.usl_gantt_plot import GanttChartData, plot_gantt_per_batch, save_gantt_chart_data
+from usl.utils.usl_gantt_plot import GanttChartData
 
 
 # -------------------------------
@@ -30,12 +29,12 @@ class ServerArgs:
     dataset: str = "gsm8k"
     learning_rate: float = 5e-4
     # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
-    rete_limit_mbps: float = 10
+    rate_limit_mbps: float = 10
     rate_limit_mbps: Optional[float] = None
 
     def effective_rate_limit(self) -> float:
         # Prefer the correctly spelled one if provided
-        return self.rate_limit_mbps if self.rate_limit_mbps is not None else self.rete_limit_mbps
+        return self.rate_limit_mbps if self.rate_limit_mbps is not None else self.rate_limit_mbps
 
 
 # -------------------------------
@@ -122,6 +121,7 @@ class SingleServer:
     def shutdown(self):
         """Graceful shutdown for loops, sockets, and executor."""
         if not self.stop_event.is_set():
+            print("Shutting down server...")
             self.stop_event.set()
             try:
                 self.communicator.close()
@@ -129,8 +129,8 @@ class SingleServer:
                 self.logger.error(f"Error during shutdown: {e}")
 
             if self.main_executor:
-                self.main_executor.shutdown(wait=False, cancel_futures=True)
-            save_gantt_chart_data(self.profile_data, "log/profile/server.json")
+                self.main_executor.shutdown(wait=True, cancel_futures=True)
+            # save_gantt_chart_data(self.profile_data, "log/profile/server.json")
 
     # --------------- Internal wrappers (robust logging) ---------------
     def _client_send_loop_wrapper(self):
@@ -281,13 +281,17 @@ class SingleServer:
             self.communicator.conn.settimeout(60.0)
             while not self.stop_event.is_set():
 
-                data: Payload = self.communicator.receive()
+                data: Union[Payload, Dict] = self.communicator.receive()
                 if data is None:
                     self.logger.info(f"Client {self.communicator.addr} disconnected")
                     break
+                if isinstance(data, dict) and 'stop' in data.keys():
+                    print('Client requested stop')
+                    self.communicator.send({'profile': self.profile_data})
+                    self.logger.info(f"Client {self.communicator.addr} requested profile data and finished training")
+                    break
                 if data.is_activation:
                     self.activation_from_head_queue.put(data)
-
                 else:
                     self.gradient_from_tail_queue.put(data)
 
