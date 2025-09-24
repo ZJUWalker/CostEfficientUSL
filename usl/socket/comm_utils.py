@@ -29,6 +29,7 @@ class SocketCommunicator:
         self.rate_limit_mbps = rate_limit_mbps
         self.max_retry = kwargs.get("max_retry", 10)
         self.timeout = kwargs.get("timeout", 600)
+        self.addr = None
 
         if self.is_server:
             self._init_server()
@@ -44,6 +45,14 @@ class SocketCommunicator:
     def _init_server(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # ✅ 启用端口复用
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except AttributeError:
+                # Windows 或旧内核不支持
+                pass
+
             self.sock.settimeout(self.timeout)
             self.sock.bind((self.host, self.port))
             self.sock.listen(1)
@@ -55,6 +64,12 @@ class SocketCommunicator:
 
     def _init_client(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except AttributeError:
+            pass
+
         self.sock.settimeout(self.timeout)
         retry_count = 0
         while retry_count < self.max_retry:
@@ -102,7 +117,7 @@ class SocketCommunicator:
             length = len(data)
             self.conn.sendall(length.to_bytes(4, "big"))
             self._sendall_with_rate(self.conn, data, self.buffer_size, self.rate_limit_mbps)
-        except socket.error as e:
+        except socket.error:
             print(f"发送失败或结束训练")
             raise
 
@@ -111,7 +126,6 @@ class SocketCommunicator:
         if not self.conn:
             raise Exception("未建立连接，无法接收")
 
-        # self.conn.settimeout(self.timeout)
         try:
             length_bytes = self.conn.recv(4)
             if not length_bytes:
@@ -126,14 +140,26 @@ class SocketCommunicator:
                 data.extend(packet)
 
             return pickle.loads(data)
-        except Exception as e:
+        except Exception:
             print(f"接受失败或结束训练")
-            raise e
+            raise
 
     def close(self):
         """关闭连接"""
-        if self.conn:
-            self.conn.shutdown(socket.SHUT_RDWR)
-            self.conn.close()
-        if self.sock and self.sock is not self.conn:
-            self.sock.close()
+        try:
+            if self.conn:
+                try:
+                    self.conn.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                self.conn.close()
+                self.conn = None
+            if self.sock and self.sock is not self.conn:
+                try:
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                self.sock.close()
+                self.sock = None
+        except Exception as e:
+            print(f"关闭 socket 出错: {e}")

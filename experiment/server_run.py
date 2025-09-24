@@ -40,7 +40,7 @@ if __name__ == "__main__":
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--use_lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
-    parser.add_argument("-SD", "--server_device", type=str, default="cuda:0", help="Device for server model")
+    parser.add_argument("-SD", "--server_device", type=str, default="cuda:1", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=2)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         split_point=args.split_point,
         dataset=args.dataset,
         learning_rate=args.learning_rate,
-        rete_limit_mbps=args.mbps,
+        rate_limit_mbps=args.mbps,
     )
 
     set_seed(SEED)

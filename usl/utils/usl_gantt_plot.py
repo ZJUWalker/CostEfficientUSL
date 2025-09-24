@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 @dataclass
 class GanttChartData:
     mini_batch_idx: int = 0
+    train_time_duration_ms: float = 0.0
     head_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
@@ -80,10 +81,7 @@ def _to_aligned_ms(data_list: List[Dict]) -> List[Dict[str, List[Optional[int]]]
     return aligned_list
 
 
-def save_gantt_chart_data(gantt_data: List[GanttChartData], filename: str):
-    # 将List[GanttChartData]转换为字典列表
-    gantt_data_dict = [asdict(data) for data in gantt_data]
-
+def save_gantt_chart_data(gantt_data_dict: Dict, filename: str):
     # 写入到JSON文件
     with open(filename, 'w') as f:
         json.dump(gantt_data_dict, f, indent=4)
@@ -105,7 +103,7 @@ STAGE_COLOR = {
 
 
 def plot_gantt_per_batch(
-    mini_batch_time_gantt: List[Dict],
+    mini_batch_time_gantt: Optional[List[Dict] | List[GanttChartData]] = None,
     fp: str = "default.png",
     alpha: float = 0.3,
     show: bool = False,
@@ -123,7 +121,8 @@ def plot_gantt_per_batch(
     if not mini_batch_time_gantt:
         print("没有数据")
         return
-
+    if isinstance(mini_batch_time_gantt[0], GanttChartData):
+        mini_batch_time_gantt = [asdict(data) for data in mini_batch_time_gantt]
     # 一次性对齐所有 batch
     aligned_list = _to_aligned_ms(mini_batch_time_gantt)
 

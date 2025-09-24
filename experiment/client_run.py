@@ -52,7 +52,7 @@ def main():
     parser.add_argument("-P", "--port", type=int, default=8000, help="port to listen")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=4, help="batch size")
-    parser.add_argument("-SL", "--max_seq_len", type=int, default=128, help="max sequence length")
+    parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
     parser.add_argument("-S", "--step", type=int, default=5)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
