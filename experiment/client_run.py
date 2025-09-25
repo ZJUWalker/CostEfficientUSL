@@ -7,10 +7,10 @@ from usl.client import Client, ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
 from usl.utils.exp import set_seed
-from deepspeed.ops.op_builder import AsyncIOBuilder
+# from deepspeed.ops.op_builder import AsyncIOBuilder
 
 
-nvme_handle = AsyncIOBuilder().load().aio_handle(block_size=2 * 1024 * 1024)
+# nvme_handle = AsyncIOBuilder().load().aio_handle(block_size=2 * 1024 * 1024)
 
 SEED = 0
 warnings.filterwarnings("ignore", message="To copy construct from a tensor", category=UserWarning)
@@ -47,14 +47,13 @@ def run_client(args: ClientArgs):
         dataset_train=dataloader["train"],
         dataset_test=dataloader["test"],
         num_workers=args.micro_batch_size,
-        nvme_handle=nvme_handle,  # 外部传入nvme句柄
     )
     client.train_epoch()
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8000, help="port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8100, help="port to listen")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=4, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
@@ -68,6 +67,7 @@ def main():
     parser.add_argument("--micro_batch_size", type=int, default=4)
     parser.add_argument("--offload_activation", action="store_true", default=False)
     parser.add_argument("--offload_model_state", action="store_true", default=False)
+    parser.add_argument("--sort_batch", action="store_true", default=False)
 
     args = parser.parse_args()
     args = ClientArgs(
@@ -85,6 +85,7 @@ def main():
         micro_batch_size=args.micro_batch_size,
         offload_activation=args.offload_activation,
         offload_model_state=args.offload_model_state,
+        sort_batch=args.sort_batch,
     )
 
     run_client(args)

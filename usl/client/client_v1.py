@@ -1,6 +1,5 @@
-import os
 from concurrent.futures import ThreadPoolExecutor, Future
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import logging
 from queue import Queue, Empty
 import socket
@@ -15,11 +14,11 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from usl.socket import SocketCommunicator, Payload
-from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch
+from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data
 from usl.utils.tensor_utils import pad_inputs
-from usl.offload.activation_offload import ActivationCollector
+from usl.offload import ActivationOffload
+import os
 from deepspeed.ops.op_builder import AsyncIOBuilder
-
 
 @dataclass
 class ClientArgs:
@@ -38,7 +37,7 @@ class ClientArgs:
     offload_activation: bool = False
     offload_model_state: bool = False
 
-
+# nvme_handle = AsyncIOBuilder().load().aio_handle()  # 初始化句柄
 class Client:
     def __init__(
         self,
@@ -58,57 +57,35 @@ class Client:
         self.client_device = client_device
         self.client_args = client_args
         self.head_model = head_model.to(self.client_device)
-        self.tail_model = tail_model  # 直接为None，不用加载
-        self.lr = client_args.learning_rate  # ✅ 点操作符访问
-
         # self.tail_model = tail_model.to(self.client_device)
-        self.nvme_paths = {}  # 记录卸载路径
-        
+        # if nvme_handle is not None:
+        #     self.nvme_handle = nvme_handle
+        # else:
+        #     self.nvme_handle = AsyncIOBuilder().load().aio_handle()
+        # print("Using NVMe handle block_size:", self.nvme_handle.get_block_size())
         self.nvme_handle = nvme_handle  #初始化句柄
-        block_size = self.nvme_handle.get_block_size()
-        # print(self.nvme_handle.get_block_size())
         # tail model卸载到SSD：模型参数
         self.tail_offload_dir = "local_nvme/tail_model"
         os.makedirs(self.tail_offload_dir, exist_ok=True)
         self.tail_model_paths = {}
-        for name, param in self.tail_model.named_parameters():
-            param:torch.Tensor
-            path_prefix = os.path.join(self.tail_offload_dir, f"{name}.pt")
-            # 分块写入
-            self.nvme_handle.sync_pwrite(param,path_prefix)
-            chunk_paths = []
-            chunks = param.split(block_size)
-            for i, chunk in enumerate(chunks):
-                path = f"{path_prefix}_part{i}"  # 每块独立文件
-                self.nvme_handle.sync_pwrite(chunk, path)
-                # fut.wait()
-                chunk_paths.append(path)
-            param.data=torch.empty(0,device='cpu')  # 释放内存
-        for name, param in tail_model.named_parameters():
-            param:torch.Tensor
-            # 卸载参数到NVMe SSD
-            print(f'param data : {param},device : {param.device}')
-        # 记录原始形状和 dtype，方便后续加载
-        # 使用 self.nvme_paths 记录每个参数的分块路径、原始形状和 dtype
-        self.nvme_paths[name] = {
-            "paths": chunk_paths,
-            "shape": param.shape,
-            "dtype": param.dtype
-        }
-                # path = os.path.join(self.tail_offload_dir, f"{name}.pt")
-                # fut = self.nvme_handle.async_pwrite(param.detach().cpu(), path)
-                # fut.wait()
-                # self.tail_model_paths[name] = (path, param.shape, param.dtype)
-
+        for name, param in tail_model.state_dict().items():
+            path = os.path.join(self.tail_offload_dir, f"{name}.pt")
+            fut = self.nvme_handle.async_pwrite(param.detach().cpu(), path)
+            fut.wait()
+            self.tail_model_paths[name] = (path, param.shape, param.dtype)
+        self.tail_model = None  # 直接为None，不用加载
         
         self.tokenizer = tokenizer
         self.logger = train_logger
         self.train_loader = dataset_train
         self.test_loader = dataset_test
         self.local_ep = client_args.epoch  # ✅ 点操作符访问
-        # self.lr = client_args.learning_rate  # ✅ 点操作符访问
+        self.lr = client_args.learning_rate  # ✅ 点操作符访问
         self.optimizer_head = torch.optim.Adam(self.head_model.parameters(), lr=self.lr)
         self.optimizer_tail = torch.optim.Adam(self.tail_model.parameters(), lr=self.lr)
+        # self.nvme_handle = nvme_handle  #初始化句柄
+        # self.nvme_handle = AsyncIOBuilder().load().aio_handle()  # 初始化句柄
+        self.nvme_paths = {}  # 记录卸载路径
 
         # ---- Communicator
         self.communicator = SocketCommunicator(
@@ -120,8 +97,6 @@ class Client:
 
         # ---- Metrics
         self.compute_time = 0
-        self.max_mem_allocated_mb = 0
-        self.batch_train_time_ms = 0
         self.normalize_loss = normalize_loss
         # ---- Executors & coordination
         self.main_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=2)
@@ -133,7 +108,7 @@ class Client:
 
         # ----Parameter Efficient Offloading
         if self.client_args.offload_activation:
-            self.head_activation_collector = ActivationCollector(
+            self.head_activation_collector = ActivationOffload(
                 base_model=self.head_model,
                 offload_threshold=1024,
                 device=self.client_device,
@@ -283,7 +258,7 @@ class Client:
                     path = self.nvme_paths[tokenid]   # 从字典查路径
                     loaded = self._load_from_nvme(path, inner_val.shape, inner_val.dtype, device)
                     inner_val.data.copy_(loaded)
-
+    
     def _head_fwd_micro(
         self,
         group_id: str,
@@ -386,19 +361,15 @@ class Client:
         self._check_communication()
         while not self.stop_event.is_set():
             try:
-                payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
+                payload = self.activation_to_server_queue.get(timeout=0.01)
                 if payload is not None:  # 可能是 None（队列空）
                     self.communicator.send(payload)
-                    if isinstance(payload, dict) and 'stop' in payload:
-                        time.sleep(1)
-                        print('send stop flag')
-                        break
                 else:
                     continue
             except Empty:
                 pass
             try:
-                payload = self.gradient_to_server_queue.get(timeout=0.001)
+                payload = self.gradient_to_server_queue.get(timeout=0.01)
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
                     self.communicator.send(payload)
@@ -414,18 +385,13 @@ class Client:
         self.communicator.conn.settimeout(60.0)
         while not self.stop_event.is_set():
             try:
-                data: Optional[Dict | Payload] = self.communicator.receive()
+                data: Payload = self.communicator.receive()
             except socket.timeout:
                 print("socket timeout")
                 continue
             except Exception as e:
                 break
             if data is None:
-                break
-            if isinstance(data, dict) and 'profile' in data:
-                print(f'get profile data')
-                self._save_profile_res(data['profile'])
-                self.stop_event.set()
                 break
             if data.is_activation:
                 self.activation_from_server_queue.put(data)
@@ -439,6 +405,7 @@ class Client:
         # choose a GPU device if available, else cpu
         def _prefer_gpu_device():
             return torch.device(self.client_device) if torch.cuda.is_available() else torch.device("cpu")
+        
         # micro batch head fwd and send
         for mb_idx in range(grad_accum_steps):
             #  tail fwd and send
@@ -487,7 +454,7 @@ class Client:
         while True:
             if not all(no_tail_fwd_bwd_mb_list) and not self.stop_event.is_set():
                 try:
-                    server_activation_payload = self.activation_from_server_queue.get(timeout=0.001)
+                    server_activation_payload = self.activation_from_server_queue.get(timeout=0.01)
                     if server_activation_payload is not None:
                         mb_idx = server_activation_payload.mb_idx
                         no_tail_fwd_bwd_mb_list[mb_idx] = True
@@ -527,13 +494,13 @@ class Client:
             self._load_optimizer(self.optimizer_head, prefix="head", device=str(target_head_device))
         except Exception as e:
             raise RuntimeError(f"Failed to load head model/optimizer from NVMe to {target_head_device}: {e}")
-
+        
         # micro batch head bwd and recv
         no_head_bwd_mb_list = [False] * grad_accum_steps
         while True:
             if not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
                 try:
-                    server_grad_payload = self.gradient_from_server_queue.get(timeout=0.001)
+                    server_grad_payload = self.gradient_from_server_queue.get(timeout=0.01)
                     if server_grad_payload is not None:
                         mb_idx = server_grad_payload.mb_idx
                         no_head_bwd_mb_list[mb_idx] = True
@@ -559,9 +526,7 @@ class Client:
                 torch.cuda.empty_cache()
         except Exception as e:
             raise RuntimeError(f"Failed to offload head optimizer state to NVMe: {e}")
-
-        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
-        torch.cuda.reset_peak_memory_stats(self.client_device)
+        
         return batch_loss
 
     def _do_sequential(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
@@ -580,67 +545,6 @@ class Client:
             server_grad_payload = self.gradient_from_server_queue.get(block=True)
             self._head_bwd_micro(server_grad_payload)
         return batch_loss
-
-    def _save_profile_res(self, server_profile_data: List[GanttChartData]):
-        local_compute_time_ms = 0
-        server_compute_time_ms = 0
-        for client_item, server_item in zip(self.profile_data, server_profile_data):
-            client_item.server_fwd_timestamp = server_item.server_fwd_timestamp
-            client_item.server_bwd_timestamp = server_item.server_bwd_timestamp
-            client_item.train_time_duration_ms = round((client_item.head_bwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000, 2)
-            local_compute_time_ms += (
-                client_item.head_fwd_timestamp[1]
-                - client_item.head_fwd_timestamp[0]
-                + client_item.tail_fwd_timestamp[1]
-                - client_item.tail_fwd_timestamp[0]
-                + client_item.tail_bwd_timestamp[1]
-                - client_item.tail_bwd_timestamp[0]
-                + client_item.head_bwd_timestamp[1]
-                - client_item.head_bwd_timestamp[0]
-            ) * 1000
-            server_compute_time_ms += (
-                server_item.server_fwd_timestamp[1]
-                - server_item.server_fwd_timestamp[0]
-                + server_item.server_bwd_timestamp[1]
-                - server_item.server_bwd_timestamp[0]
-            ) * 1000
-
-        # 计算batch训练时间
-        self.batch_train_time_ms = round((self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2)
-        # 计算本地计算时间
-
-        # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
-        save_dir = f'log/profile/{self.client_args.model}'
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        data_dict = {
-            'max_mem_allocated_MB': self.max_mem_allocated_mb,
-            'batch_train_time_ms': self.batch_train_time_ms,
-            'client_compute_time_ms': round(local_compute_time_ms, 2),
-            'server_compute_time_ms': round(server_compute_time_ms, 2),
-            'client_idle_rate': round((1 - local_compute_time_ms / self.batch_train_time_ms) * 100, 2),
-            'server_idle_rate': round((1 - server_compute_time_ms / self.batch_train_time_ms) * 100, 2),
-            'mini_batch_data': [asdict(item) for item in self.profile_data],
-        }
-
-        save_gantt_chart_data(
-            data_dict,
-            os.path.join(
-                save_dir,
-                f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}.json',
-            ),
-        )
-        png_save_dir = f'log/img/{self.client_args.model}'
-        if not os.path.exists(png_save_dir):
-            os.makedirs(png_save_dir)
-        plot_gantt_per_batch(
-            self.profile_data,
-            fp=os.path.join(
-                png_save_dir,
-                f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}.png',
-            ),
-        )
-        self.stop_event.set()
 
     def train_large_batch_overlapped_accum(self, batch: Dict, global_batch_idx: int):
         """
@@ -683,51 +587,34 @@ class Client:
             batch_loss = self._do_sequential(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
         # --------------------------------------------------------main loop end--------------------------------------------------------
         # do step
+        self.logger.info(f"[Client] big batch {global_batch_idx}: loss={batch_loss/grad_accum_steps:.4f}")
         self.optimizer_head.step()
         self.optimizer_tail.step()
         self.optimizer_head.zero_grad(set_to_none=True)
         self.optimizer_tail.zero_grad(set_to_none=True)
-        self.logger.info(
-            f'[Client] big batch {global_batch_idx}: loss={batch_loss/grad_accum_steps:.4f},max mem alloc: {torch.cuda.max_memory_allocated(device=self.client_device)/1024**2:.2f} MB',
-        )
-        torch.cuda.reset_peak_memory_stats(device=self.client_device)
         # print(self.profile_data)
         if global_batch_idx == 5:
-            print(f'client finished training and need reduce profile data')
-            self.activation_to_server_queue.put({'stop': True})
+            # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
+            save_gantt_chart_data(self.profile_data, 'log/profile/client.json')
         # print(f'global batch id -> {global_batch_idx} finished training')
         pass
 
-    def train_epoch(self, profile: bool = False):
+    def train_epoch(self):
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
         start_time = time.time()
         send_future = self.main_executor.submit(self._head_client_send)
         recv_future = self.main_executor.submit(self._handle_server_send)
         for epoch in range(self.local_ep):
             self.logger.info(f"[Client] start (overlap+accum) epoch {epoch+1}, len: {len(self.train_loader)}")
-            with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-                schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
-                on_trace_ready=(
-                    torch.profiler.tensorboard_trace_handler("./log/trace", worker_name="client") if profile else None
-                ),  # 保存到 TensorBoard
-                # on_trace_ready=None,
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-                with_flops=True,
-            ) as prof:
-                for batch_idx, batch in enumerate(self.train_loader, 1):
-                    self.train_large_batch_overlapped_accum(batch, batch_idx)
-                    if profile:
-                        prof.step()
-                    if batch_idx == self.client_args.step:
-                        break
+            for batch_idx, batch in enumerate(self.train_loader, 1):
+                self.train_large_batch_overlapped_accum(batch, batch_idx)
+                if batch_idx == self.client_args.step:
+                    break
         self.stop_event.set()
         # wait for send/recv to finish
+        self.communicator.close()
         send_future.result()
         recv_future.result()
-        self.communicator.close()
         self.main_executor.shutdown(wait=True)
         end_time = time.time()
         self.logger.info(f"[Client Finished] epoch time: {end_time - start_time:.2f} s")

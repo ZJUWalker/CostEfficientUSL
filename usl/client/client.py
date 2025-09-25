@@ -36,6 +36,7 @@ class ClientArgs:
     async_io: bool = False
     offload_activation: bool = False
     offload_model_state: bool = False
+    sort_batch: bool = False
 
 
 class Client:
@@ -172,6 +173,51 @@ class Client:
             chunks.append(tensor[start:end])
         return chunks
 
+    def _split_micro_with_mask(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        micro_bs: int,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        pad_token_id = self.tokenizer.pad_token_id
+        n, seq_len = input_ids.size()
+        sequences = []
+
+        # 逐行处理，跳过空序列
+        for i in range(n):
+            valid_len = attention_mask[i].sum().item()
+            if valid_len == 0:
+                continue  # 跳过空序列
+            
+            ids_row = input_ids[i][:valid_len]
+            mask_row = attention_mask[i][:valid_len]
+            sequences.append((ids_row, mask_row))
+
+        if not sequences:  # 所有序列都为空
+            return []
+
+        # 按长度排序和分块
+        sequences.sort(key=lambda x: x[0].size(0), reverse=True)
+        
+        chunks = []
+        for start in range(0, len(sequences), micro_bs):
+            batch = sequences[start:start + micro_bs]
+            max_len = max(seq[0].size(0) for seq in batch)
+
+            # 更高效的批处理方式
+            ids_batch = torch.full((len(batch), max_len), pad_token_id,
+                                dtype=input_ids.dtype, device=input_ids.device)
+            mask_batch = torch.zeros(len(batch), max_len,
+                                    dtype=attention_mask.dtype, device=attention_mask.device)
+            
+            for i, (ids, mask) in enumerate(batch):
+                ids_batch[i, :ids.size(0)] = ids
+                mask_batch[i, :mask.size(0)] = mask
+                
+            chunks.append((ids_batch, mask_batch))
+
+        return chunks
+
     def _resolve_micro_bs(self, total_bs: int) -> Tuple[int, int]:
         # 兼容没有 micro_batch_size 的 ClientArgs
         micro_bs = getattr(self.client_args, "micro_batch_size", None) or self.client_args.batch_size
@@ -289,7 +335,7 @@ class Client:
                     self.communicator.send(payload)
                     if isinstance(payload, dict) and 'stop' in payload:
                         print('send stop flag')
-                        break
+                        continue
                 else:
                     continue
             except Empty:
@@ -451,7 +497,8 @@ class Client:
             data_dict,
             os.path.join(
                 save_dir,
-                f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}.json',
+                f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_'
+                f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}.json',
             ),
         )
         png_save_dir = f'log/img/{self.client_args.model}'
@@ -461,7 +508,8 @@ class Client:
             self.profile_data,
             fp=os.path.join(
                 png_save_dir,
-                f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}.png',
+                f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_'
+                f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}png',
             ),
         )
         self.stop_event.set()
@@ -491,11 +539,23 @@ class Client:
         # —— 每个“大 batch”一次 step —— 梯度先清零
         self.optimizer_head.zero_grad(set_to_none=True)
         self.optimizer_tail.zero_grad(set_to_none=True)
-
-        # 切分微批
-        micro_inputs = self._split_micro(input_ids, micro_bs)
-        micro_masks = self._split_micro(attention_mask, micro_bs)
-        micro_labels = self._split_micro(labels_full, micro_bs)
+        
+        if self.client_args.sort_batch:
+            micro_batches = self._split_micro_with_mask(
+                input_ids,
+                attention_mask,
+                micro_bs,
+            )
+            # 拆分成两个列表
+            micro_inputs = [ids for ids, _ in micro_batches]
+            micro_masks  = [mask for _, mask in micro_batches]
+            # 自回归任务时，labels = inputs
+            micro_labels = micro_inputs
+        else:
+            # 切分微批
+            micro_inputs = self._split_micro(input_ids, micro_bs)
+            micro_masks = self._split_micro(attention_mask, micro_bs)
+            micro_labels = self._split_micro(labels_full, micro_bs)
 
         # 全局的 group_id（server 用它来做整批 step）
         group_id = uuid.uuid4().hex
@@ -547,7 +607,7 @@ class Client:
                         prof.step()
                     if batch_idx == self.client_args.step:
                         break
-        self.stop_event.set()
+        # self.stop_event.set()
         # wait for send/recv to finish
         send_future.result()
         recv_future.result()

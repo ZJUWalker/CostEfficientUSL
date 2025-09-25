@@ -36,7 +36,7 @@ def run_server(server_args: ServerArgs):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8000, help="Port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8100, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--use_lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
