@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from usl.offload.activation_offload import ActivationCollector
+from usl.offload import ActivationOffload
 
 
 class Net(nn.Module):
@@ -26,18 +26,20 @@ def test_activation_offload():
     torch.cuda.set_device(device)
     model = Net().to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
-    collector = ActivationCollector(model, offload_threshold=0, device=device)
+    collector = ActivationOffload(model, offload_threshold=0, device=device)
     print('init', _get_memory_usage_mb(), 'MB')
     for i in range(5):
         print('step-------------------', i, '----------------')
         print('before forward', _get_memory_usage_mb(), 'MB')
-        input = torch.randn(100, 500).to(device)
+        input = torch.randn(1000, 500).to(device)
         output = model(input)
         loss = output.sum()
         print('before offload', _get_memory_usage_mb(), 'MB')
-        collector.offload()
+        collector.offload(async_offload=True)
+        collector.wait_offload()
         print('after offload', _get_memory_usage_mb(), 'MB')
-        collector.reload()
+        collector.reload(async_reload=True)
+        collector.wait_reload()
         print('after reload', _get_memory_usage_mb(), 'MB')
         loss.backward()
         optimizer.step()
