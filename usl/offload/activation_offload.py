@@ -3,14 +3,18 @@ import torch.nn as nn
 from typing import List, Tuple, Dict, Union
 
 
-class ActivationCollector:
+class ActivationOffload:
 
-    def __init__(self, base_model: nn.Module, offload_threshold: int = 1024, device=None):
+    def __init__(self, base_model: nn.Module, offload_threshold: int = 1024, device=None, swap_stream=None):
+
         self.base_model = base_model
         self.activations_on_gpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> activation on gpu
         self.activations_on_cpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> activation on cpu DRAM
         self.offload_threshold = offload_threshold  # Byte
         self.device = device
+        self.swap_stream = torch.cuda.Stream(device) if swap_stream is None else swap_stream
+        self.offload_event = torch.cuda.Event(enable_timing=True)
+        self.reload_event = torch.cuda.Event(enable_timing=True)
         self._register_fwd_hook()
 
     def _register_fwd_hook(self):
@@ -45,18 +49,33 @@ class ActivationCollector:
             self.hooks.append(hk)
 
     # offload activations from GPU to CPU,except for tensors in except_tensor_idx_list
-    def offload(self, except_tensor_idx_list: List[str] = []):
+    def offload(self, except_tensor_idx_list: List[int] = [], async_offload=False):
+        stream = self.swap_stream if self.swap_stream else torch.cuda.current_stream()
+        with torch.cuda.stream(stream):
+            for idx, tensor in self.activations_on_gpu.items():
+                if self.device is None:
+                    self.device = tensor.device
+                if idx in except_tensor_idx_list:
+                    continue
+                t_cpu = torch.empty_like(tensor, device='cpu', pin_memory=True)
+                t_cpu.data.copy_(tensor.data, non_blocking=True)
+                self.activations_on_cpu[idx] = t_cpu
+        if async_offload:
+            # record offload event
+            self.offload_event.record(stream)
+        else:
+            # wait for all tensor offloaded
+            torch.cuda.synchronize(self.device)
+            # release GPU memory
+            self._release_tensor_on_gpu(except_tensor_idx_list)
 
-        for idx, tensor in self.activations_on_gpu.items():
-            if self.device is None:
-                self.device = tensor.device
-            if idx in except_tensor_idx_list:
-                continue
-            t_cpu = torch.empty_like(tensor, device='cpu', pin_memory=True)
-            t_cpu.data.copy_(tensor.data, non_blocking=True)
-            self.activations_on_cpu[idx] = t_cpu
-        torch.cuda.synchronize(self.device)
-        # release GPU memory
+    # wait for all activations offloaded to CPU,except for tensors in except_tensor_idx_list
+    def wait_offload(self, except_tensor_idx_list: List[int] = []):
+        if self.swap_stream != torch.cuda.current_stream():
+            torch.cuda.current_stream().wait_event(self.offload_event)
+            self._release_tensor_on_gpu(except_tensor_idx_list)
+
+    def _release_tensor_on_gpu(self, except_tensor_idx_list: List[int] = []):
         for idx in self.activations_on_gpu.keys():
             if idx in except_tensor_idx_list:
                 continue
@@ -64,15 +83,28 @@ class ActivationCollector:
         torch.cuda.empty_cache()
 
     # reload activations from CPU to GPU
-    def reload(self):
-        for idx, tensor in self.activations_on_cpu.items():
-            t_gpu = torch.empty_like(tensor, device=self.device)  # no pin_memory on GPU
-            t_gpu.data.copy_(tensor.data, non_blocking=True)
-            self.activations_on_gpu[idx].data = t_gpu.data
-        torch.cuda.synchronize(self.device)
-        # release CPU memory
-        self.activations_on_cpu.clear()
-        torch.cuda.empty_cache()
+    def reload(self, async_reload=False):
+        stream = self.swap_stream if self.swap_stream else torch.cuda.current_stream()
+        with torch.cuda.stream(stream):
+            for idx, tensor in self.activations_on_cpu.items():
+                t_gpu = torch.empty_like(tensor, device=self.device)  # no pin_memory on GPU
+                t_gpu.data.copy_(tensor.data, non_blocking=True)
+                self.activations_on_gpu[idx].data = t_gpu.data
+        if async_reload:
+            # record reload event
+            self.reload_event.record(stream)
+        else:
+            # wait for all tensor reloaded
+            torch.cuda.synchronize(self.device)
+            # release CPU memory
+            self.activations_on_cpu.clear()
+            torch.cuda.empty_cache()
+
+    def wait_reload(self):
+        if self.swap_stream != torch.cuda.current_stream():
+            torch.cuda.current_stream().wait_event(self.reload_event)
+            self.activations_on_cpu.clear()
+            torch.cuda.empty_cache()
 
     # clear all activations on CPU and GPU,called after batch bwd
     def clear(self):
