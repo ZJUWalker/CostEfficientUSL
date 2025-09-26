@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from usl.socket import SocketCommunicator, Payload
-from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch
+from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_gantt_grouped
 from usl.utils.tensor_utils import pad_inputs
 from usl.offload import ActivationOffload, ModelParamOffload, OptimizerStateOffload
 
@@ -601,6 +601,17 @@ class Client:
             fp=os.path.join(
                 png_save_dir,
                 f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_'
+                f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}_offms_{self.client_args.offload_model_state}.png',
+            ),
+        )
+        png_save_dir_c = f'log/img/grouped/{self.client_args.model}'
+        if not os.path.exists(png_save_dir_c):
+            os.makedirs(png_save_dir_c)
+        plot_gantt_grouped(
+            self.profile_data,
+            fp=os.path.join(
+                png_save_dir_c,
+                f'grouped_sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_'
                 f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}_offms_{self.client_args.offload_model_state}.png',
             ),
         )
