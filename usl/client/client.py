@@ -18,6 +18,7 @@ from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch
 from usl.utils.tensor_utils import pad_inputs
 from usl.offload import ActivationOffload, ModelParamOffload, OptimizerStateOffload
+from transformers import PreTrainedModel
 
 
 @dataclass
@@ -43,8 +44,8 @@ class Client:
     def __init__(
         self,
         client_args: ClientArgs,
-        head_model: nn.Module,
-        tail_model: nn.Module,
+        head_model: PreTrainedModel,
+        tail_model: PreTrainedModel,
         tokenizer: AutoTokenizer,
         client_device: str,
         train_logger: logging.Logger,
@@ -70,14 +71,6 @@ class Client:
         self.optimizer_head = torch.optim.Adam(self.head_model.parameters(), lr=self.lr)
         self.optimizer_tail = torch.optim.Adam(self.tail_model.parameters(), lr=self.lr)
 
-        # ---- Communicator
-        self.communicator = SocketCommunicator(
-            is_server=False,
-            port=client_args.port,
-            buffer_size=1024 * 1024,  # 1MB
-            rate_limit_mbps=client_args.rate_mbps,
-        )
-
         # ---- Metrics
         self.compute_time = 0
         self.max_mem_allocated_mb = 0
@@ -99,11 +92,12 @@ class Client:
                 device=self.client_device,
             )
         if self.client_args.offload_model_state:
+            # embedding layer shares the same parameters with lm_head layer in tail model, so we need to exclude it from offloading
+            embedding: nn.Embedding = self.head_model.get_input_embeddings()
+            except_tensor_idx_list = [id(p) for p in embedding.parameters()]
             # Head model的模型参数和优化器状态卸载器
             self.head_model_param_collector = ModelParamOffload(
-                base_model=self.head_model,
-                offload_threshold=1024,
-                device=self.client_device,
+                base_model=self.head_model, offload_threshold=1024, device=self.client_device, except_tensor_idx_list=except_tensor_idx_list
             )
             self.head_model_optimizer_collector = OptimizerStateOffload(
                 optimizer=self.optimizer_head,
@@ -112,9 +106,7 @@ class Client:
             )
             # Tail model的模型参数和优化器状态卸载器
             self.tail_model_param_collector = ModelParamOffload(
-                base_model=self.tail_model,
-                offload_threshold=1024,
-                device=self.client_device,
+                base_model=self.tail_model, offload_threshold=1024, device=self.client_device, except_tensor_idx_list=except_tensor_idx_list
             )
             self.tail_model_optimizer_collector = OptimizerStateOffload(
                 optimizer=self.optimizer_tail,
@@ -123,6 +115,14 @@ class Client:
             )
             self.tail_model_optimizer_collector.offload()  # 先把tail的优化器状态也放在cpu
         self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
+
+        # ---- Communicator
+        self.communicator = SocketCommunicator(
+            is_server=False,
+            port=client_args.port,
+            buffer_size=1024 * 1024,  # 1MB
+            rate_limit_mbps=client_args.rate_mbps,
+        )
 
         # ---- Queues (compute pipeline)
         self.activation_to_server_queue: Queue[Payload] = Queue()  # used for serve fwd
@@ -429,7 +429,7 @@ class Client:
         if offload_activation:
             self.head_activation_collector.offload(except_tensor_idx_list=self.pin_on_gpu_tensors_idx)
         # print(f'Global batch id -> {global_batch_idx} finished head forward')
-        
+
         # TODO head模型参数和优化器状态卸载至CPU
         # TODO 从CPU加载tail模型参数和优化器状态到GPU
         if offload_model_state:
@@ -437,7 +437,7 @@ class Client:
             self.head_model_optimizer_collector.offload()
             self.tail_model_param_collector.reload()
             self.tail_model_optimizer_collector.reload()
-        
+
         batch_loss = 0
         no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
         while True:
@@ -459,7 +459,7 @@ class Client:
         # print(f'Global batch id -> {global_batch_idx} finished tail forward and backward')
         if offload_activation:
             self.head_activation_collector.reload()
-        
+
         # TODO tail模型参数和优化器状态卸载至CPU
         # TODO 从CPU加载head模型参数和优化器状态到GPU
         if offload_model_state:
@@ -467,7 +467,7 @@ class Client:
             self.tail_model_optimizer_collector.offload()
             self.head_model_param_collector.reload()
             self.head_model_optimizer_collector.reload()
-        
+
         # micro batch head bwd and recv
         no_head_bwd_mb_list = [False] * grad_accum_steps
         while True:
@@ -490,7 +490,7 @@ class Client:
         # TODO head模型优化器状态卸载至CPU
         if offload_model_state:
             self.head_model_optimizer_collector.offload()
-        
+
         self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss

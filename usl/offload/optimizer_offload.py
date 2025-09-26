@@ -5,21 +5,27 @@ from typing import List, Dict, Tuple
 
 class OptimizerStateOffload:
 
-    def __init__(self, optimizer: torch.optim.Optimizer, offload_threshold: int = 0, device='cuda', swap_stream=None):
+    def __init__(
+        self, optimizer: torch.optim.Optimizer, offload_threshold: int = 0, device='cuda', swap_stream=None, except_tensor_idx_list: List[int] = []
+    ):
         self.optimizer = optimizer
         self.offload_threshold = offload_threshold  # Byte
         self.device = device
         self.curr_optimizer_state = 'cpu'  # 'cpu' or 'cuda'
         self.swap_stream = swap_stream if swap_stream else torch.cuda.Stream(device)  # create a new stream for offload/reload
+        self.except_tensor_idx_list = except_tensor_idx_list  # list of tensor index to be excluded from offload/reload
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
 
     def _offload(self):
         for param, state in self.optimizer.state.items():
+            if id(param) in self.except_tensor_idx_list:
+                print(f"Skip offload for tensor {id(param)}")
+                continue
             state: Dict[str, torch.Tensor]
             for k, v in state.items():
                 v: torch.Tensor
-                if isinstance(v, torch.Tensor) and v.dim() > 0:
+                if isinstance(v, torch.Tensor) and v.dim() > 0 and v.numel() * v.element_size() > self.offload_threshold:
                     if v.device.type == 'cuda':  # move tensor to CPU memory
                         t_cpu = torch.empty_like(v, device='cpu', pin_memory=True)
                         t_cpu.data.copy_(v.data, non_blocking=True)
@@ -28,6 +34,9 @@ class OptimizerStateOffload:
 
     def _reload(self):
         for param, state in self.optimizer.state.items():
+            if id(param) in self.except_tensor_idx_list:
+                print(f"Skip tensor {id(param)}")
+                continue
             state: Dict[str, torch.Tensor]
             for k, v in state.items():
                 v: torch.Tensor
