@@ -17,7 +17,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch
 from usl.utils.tensor_utils import pad_inputs
-from usl.offload.activation_offload import ActivationCollector
+from usl.offload import ActivationOffload, ModelParamOffload, OptimizerStateOffload
 
 
 @dataclass
@@ -57,7 +57,10 @@ class Client:
         self.client_device = client_device
         self.client_args = client_args
         self.head_model = head_model.to(self.client_device)
-        self.tail_model = tail_model.to(self.client_device)
+        if self.client_args.offload_model_state:
+            self.tail_model = tail_model.to("cpu")  # 初始化状态：把tail_model放在cpu中
+        else:
+            self.tail_model = tail_model.to(self.client_device)  # 初始化状态：把tail_model放在cuda中
         self.tokenizer = tokenizer
         self.logger = train_logger
         self.train_loader = dataset_train
@@ -90,11 +93,36 @@ class Client:
 
         # ----Parameter Efficient Offloading
         if self.client_args.offload_activation:
-            self.head_activation_collector = ActivationCollector(
+            # Head model的激活量卸载器
+            self.head_activation_collector = ActivationOffload(
                 base_model=self.head_model,
                 offload_threshold=1024,
                 device=self.client_device,
             )
+        if self.client_args.offload_model_state:
+            # Head model的模型参数和优化器状态卸载器
+            self.head_model_param_collector = ModelParamOffload(
+                base_model=self.head_model,
+                offload_threshold=1024,
+                device=self.client_device,
+            )
+            self.head_model_optimizer_collector = OptimizerStateOffload(
+                optimizer=self.optimizer_head,
+                offload_threshold=1024,
+                device=self.client_device,
+            )
+            # Tail model的模型参数和优化器状态卸载器
+            self.tail_model_param_collector = ModelParamOffload(
+                base_model=self.tail_model,
+                offload_threshold=1024,
+                device=self.client_device,
+            )
+            self.tail_model_optimizer_collector = OptimizerStateOffload(
+                optimizer=self.optimizer_tail,
+                offload_threshold=1024,
+                device=self.client_device,
+            )
+            self.tail_model_optimizer_collector.offload()  # 先把tail的优化器状态也放在cpu
         self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
 
         # ---- Queues (compute pipeline)
@@ -379,6 +407,7 @@ class Client:
 
     def _do_pipeline(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         offload_activation = self.client_args.offload_activation
+        offload_model_state = self.client_args.offload_model_state
         # micro batch head fwd and send
         for mb_idx in range(grad_accum_steps):
             #  tail fwd and send
@@ -390,6 +419,15 @@ class Client:
         if offload_activation:
             self.head_activation_collector.offload(except_tensor_idx_list=self.pin_on_gpu_tensors_idx)
         # print(f'Global batch id -> {global_batch_idx} finished head forward')
+        
+        # TODO head模型参数和优化器状态卸载至CPU
+        # TODO 从CPU加载tail模型参数和优化器状态到GPU
+        if offload_model_state:
+            self.head_model_param_collector.offload()
+            self.head_model_optimizer_collector.offload()
+            self.tail_model_param_collector.reload()
+            self.tail_model_optimizer_collector.reload()
+        
         batch_loss = 0
         no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
         while True:
@@ -411,6 +449,15 @@ class Client:
         # print(f'Global batch id -> {global_batch_idx} finished tail forward and backward')
         if offload_activation:
             self.head_activation_collector.reload()
+        
+        # TODO tail模型参数和优化器状态卸载至CPU
+        # TODO 从CPU加载head模型参数和优化器状态到GPU
+        if offload_model_state:
+            self.tail_model_param_collector.offload()
+            self.tail_model_optimizer_collector.offload()
+            self.head_model_param_collector.reload()
+            self.head_model_optimizer_collector.reload()
+        
         # micro batch head bwd and recv
         no_head_bwd_mb_list = [False] * grad_accum_steps
         while True:
@@ -430,6 +477,10 @@ class Client:
             pass
         if offload_activation:
             self.head_activation_collector.clear()
+        # TODO head模型优化器状态卸载至CPU
+        if offload_model_state:
+            self.head_model_optimizer_collector.offload()
+        
         self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss
@@ -498,7 +549,7 @@ class Client:
             os.path.join(
                 save_dir,
                 f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_'
-                f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}.json',
+                f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}_offms_{self.client_args.offload_model_state}.json',
             ),
         )
         png_save_dir = f'log/img/{self.client_args.model}'
@@ -509,7 +560,7 @@ class Client:
             fp=os.path.join(
                 png_save_dir,
                 f'sp_{self.client_args.split_point}_b_{self.client_args.batch_size}_mb_{self.client_args.micro_batch_size}_s_'
-                f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}png',
+                f'{self.client_args.max_seq_len}_off_{self.client_args.offload_activation}_mbps_{self.client_args.rate_mbps}_sort_{self.client_args.sort_batch}_offms_{self.client_args.offload_model_state}.png',
             ),
         )
         self.stop_event.set()
