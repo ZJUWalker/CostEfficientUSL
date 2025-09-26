@@ -11,12 +11,14 @@ class GanttChartData:
     head_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
-    tail_fwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    server_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    # tail_fwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
-    head_bwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    server_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    # head_bwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
 
 
@@ -89,16 +91,16 @@ def save_gantt_chart_data(gantt_data_dict: Dict, filename: str):
 
 # 阶段名字和颜色
 STAGE_COLOR = {
-    "head_fwd_timestamp": ("Head Fwd", "tab:blue"),
-    "head_fwd_send_timestamp": ("Head Send", "tab:purple"),
-    "server_fwd_timestamp": ("Server Fwd", "tab:green"),
-    "tail_fwd_recv_timestamp": ("Tail Recv", "tab:green"),
-    "tail_fwd_timestamp": ("Tail Fwd", "tab:olive"),
-    "tail_bwd_timestamp": ("Tail Bwd", "tab:red"),
-    "tail_bwd_send_timestamp": ("Tail Send", "tab:pink"),
-    "server_bwd_timestamp": ("Server Bwd", "tab:brown"),
-    "head_bwd_recv_timestamp": ("Head Recv", "tab:cyan"),
-    "head_bwd_timestamp": ("Head Bwd", "tab:orange"),
+    "head_fwd_timestamp": ("(C)Head Fwd", "#1f77b4"),  # 蓝色
+    "head_fwd_send_timestamp": ("(C)Head Fwd Send", "#ff7f0e"),  # 橙色
+    "server_fwd_timestamp": ("(S)Server Fwd", "#2ca02c"),  # 绿色
+    "server_fwd_send_timestamp": ("(S)Server Fwd Send", "#d62728"),  # 红色
+    "tail_fwd_timestamp": ("(C)Tail Fwd", "#9467bd"),  # 紫色
+    "tail_bwd_timestamp": ("(C)Tail Bwd", "#8c564b"),  # 棕色
+    "tail_bwd_send_timestamp": ("(C)Tail Bwd Send", "#e377c2"),  # 粉色
+    "server_bwd_timestamp": ("(S)Server Bwd", "#7f7f7f"),  # 灰色
+    "server_bwd_send_timestamp": ("(S)Server Bwd Send", "#bcbd22"),  # 黄绿色
+    "head_bwd_timestamp": ("(C)Head Bwd", "#17becf"),  # 青色
 }
 
 

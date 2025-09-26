@@ -154,18 +154,6 @@ class SingleServer:
             self.logger.exception(f"Compute loop crashed: {e}")
             self.shutdown()
 
-    # --------------- Communication helper ---------------
-    def _send_to_client(self, response: Dict) -> bool:
-        if not self.communicator.conn:
-            self.logger.error("No active client connection")
-            return False
-        try:
-            self.communicator.send(response)
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to send message to client (addr={self.communicator.addr}): {e}")
-            return False
-
     # --------------- Forward / Backward ---------------
     def _forward(
         self,
@@ -247,21 +235,30 @@ class SingleServer:
                 return
             while not self.stop_event.is_set():
                 try:
-                    response: Dict = self.activation_to_tail_queue.get(timeout=0.01)
+                    response: Payload = self.activation_to_tail_queue.get(timeout=0.01)
                     if response is not None:
+                        start_send_time = time.time()
                         self.communicator.send(response)
+                        end_send_time = time.time()
+                        self.profile_data[response.mb_idx].server_fwd_send_timestamp[0] = start_send_time
+                        self.profile_data[response.mb_idx].server_fwd_send_timestamp[1] = end_send_time
                     else:
                         continue
                 except Empty:
                     pass
                 try:
-                    response = self.gradient_to_head_queue.get(timeout=0.01)
+                    response: Payload = self.gradient_to_head_queue.get(timeout=0.01)
                     if response is not None:  # 可能是 None（队列空）
+                        start_send_time = time.time()
                         self.communicator.send(response)
+                        end_send_time = time.time()
+                        self.profile_data[response.mb_idx].server_bwd_send_timestamp[0] = start_send_time
+                        self.profile_data[response.mb_idx].server_bwd_send_timestamp[1] = end_send_time
                     else:
                         continue
                 except Empty:
                     pass
+            print('_handle_server_send finished')
         except Exception as e:
             self.logger.error(f"Client {self.communicator.addr} error: {e}")
         finally:
@@ -294,6 +291,7 @@ class SingleServer:
                     self.activation_from_head_queue.put(data)
                 else:
                     self.gradient_from_tail_queue.put(data)
+            print('_handle_client_send finished')
 
         except Exception as e:
             self.logger.error(f"Client {self.communicator.addr} error: {e}")
@@ -314,7 +312,10 @@ class SingleServer:
             has_fwd = False
             try:
                 fwd_wait_start = time.time()
-                data: Payload = self.activation_from_head_queue.get_nowait()
+                data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait()
+                if isinstance(data, dict) and 'stop' in data.keys():
+                    print('Server requested stop')
+                    break
                 self.idle_time += time.time() - fwd_wait_start
 
                 token = data.token
