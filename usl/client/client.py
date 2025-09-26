@@ -81,19 +81,18 @@ class Client:
         # ---- Metrics
         self.compute_time = 0
         self.max_mem_allocated_mb = 0
-        self.batch_train_time_ms = 0
         self.normalize_loss = normalize_loss
+        self.losses = []
+        self.profile_data: List[GanttChartData] = []
         # ---- Executors & coordination
         self.main_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=2)
         self.compute_future: Optional[Future] = None
         self.server_future: Optional[Future] = None
         self.stop_event = threading.Event()
-        self.losses = []
-        self.profile_data: List[GanttChartData] = []
+        torch.cuda.set_stream(torch.cuda.Stream(self.client_device))  # set cuda compute stream
 
         # ----Parameter Efficient Offloading
         if self.client_args.offload_activation:
-            # Head model的激活量卸载器
             self.head_activation_collector = ActivationOffload(
                 base_model=self.head_model,
                 offload_threshold=1024,
@@ -216,7 +215,7 @@ class Client:
             valid_len = attention_mask[i].sum().item()
             if valid_len == 0:
                 continue  # 跳过空序列
-            
+
             ids_row = input_ids[i][:valid_len]
             mask_row = attention_mask[i][:valid_len]
             sequences.append((ids_row, mask_row))
@@ -226,22 +225,20 @@ class Client:
 
         # 按长度排序和分块
         sequences.sort(key=lambda x: x[0].size(0), reverse=True)
-        
+
         chunks = []
         for start in range(0, len(sequences), micro_bs):
-            batch = sequences[start:start + micro_bs]
+            batch = sequences[start : start + micro_bs]
             max_len = max(seq[0].size(0) for seq in batch)
 
             # 更高效的批处理方式
-            ids_batch = torch.full((len(batch), max_len), pad_token_id,
-                                dtype=input_ids.dtype, device=input_ids.device)
-            mask_batch = torch.zeros(len(batch), max_len,
-                                    dtype=attention_mask.dtype, device=attention_mask.device)
-            
+            ids_batch = torch.full((len(batch), max_len), pad_token_id, dtype=input_ids.dtype, device=input_ids.device)
+            mask_batch = torch.zeros(len(batch), max_len, dtype=attention_mask.dtype, device=attention_mask.device)
+
             for i, (ids, mask) in enumerate(batch):
-                ids_batch[i, :ids.size(0)] = ids
-                mask_batch[i, :mask.size(0)] = mask
-                
+                ids_batch[i, : ids.size(0)] = ids
+                mask_batch[i, : mask.size(0)] = mask
+
             chunks.append((ids_batch, mask_batch))
 
         return chunks
@@ -360,10 +357,16 @@ class Client:
             try:
                 payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
+                    start_send = time.time()
                     self.communicator.send(payload)
+                    end_time = time.time()
                     if isinstance(payload, dict) and 'stop' in payload:
                         print('send stop flag')
                         continue
+                    else:
+                        mb_idx = payload.mb_idx
+                        self.profile_data[mb_idx].head_fwd_send_timestamp[0] = start_send
+                        self.profile_data[mb_idx].head_fwd_send_timestamp[1] = end_time
                 else:
                     continue
             except Empty:
@@ -372,11 +375,17 @@ class Client:
                 payload = self.gradient_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
+                    start_send = time.time()
                     self.communicator.send(payload)
+                    end_time = time.time()
+                    mb_idx = payload.mb_idx
+                    self.profile_data[mb_idx].tail_bwd_send_timestamp[0] = start_send
+                    self.profile_data[mb_idx].tail_bwd_send_timestamp[1] = end_time
                 else:
                     continue
             except Empty:
                 pass
+        print("client send thread exit")
         pass
 
     # TODO: 处理recv操作
@@ -402,8 +411,9 @@ class Client:
                 self.activation_from_server_queue.put(data)
             else:
                 self.gradient_from_server_queue.put(data)
-            # else:
-            #     self.logger.warning(f"Unknown data received: {data}")
+        print("server send thread exit")
+        # else:
+        #     self.logger.warning(f"Unknown data received: {data}")
 
     def _do_pipeline(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         offload_activation = self.client_args.offload_activation
@@ -503,11 +513,21 @@ class Client:
         return batch_loss
 
     def _save_profile_res(self, server_profile_data: List[GanttChartData]):
+        batch_train_time_ms = 0
         local_compute_time_ms = 0
         server_compute_time_ms = 0
+        head_fwd_time_avg = 0
+        head_bwd_time_avg = 0
+        server_fwd_time_avg = 0
+        server_bwd_time_avg = 0
+        tail_fwd_time_avg = 0
+        tail_bwd_time_avg = 0
+        assert len(self.profile_data) == len(server_profile_data), 'error in profile data length between client and server'
         for client_item, server_item in zip(self.profile_data, server_profile_data):
             client_item.server_fwd_timestamp = server_item.server_fwd_timestamp
             client_item.server_bwd_timestamp = server_item.server_bwd_timestamp
+            client_item.server_bwd_send_timestamp = server_item.server_bwd_send_timestamp
+            client_item.server_fwd_send_timestamp = server_item.server_fwd_send_timestamp
             client_item.train_time_duration_ms = round((client_item.head_bwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000, 2)
             local_compute_time_ms += (
                 client_item.head_fwd_timestamp[1]
@@ -525,9 +545,25 @@ class Client:
                 + server_item.server_bwd_timestamp[1]
                 - server_item.server_bwd_timestamp[0]
             ) * 1000
+            # 计算 每个sub model的训练时间
+            head_fwd_time_avg += (client_item.head_fwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000
+            head_bwd_time_avg += (client_item.head_bwd_timestamp[1] - client_item.head_bwd_timestamp[0]) * 1000
+            server_fwd_time_avg += (server_item.server_fwd_timestamp[1] - server_item.server_fwd_timestamp[0]) * 1000
+            server_bwd_time_avg += (server_item.server_bwd_timestamp[1] - server_item.server_bwd_timestamp[0]) * 1000
+            tail_fwd_time_avg += (client_item.tail_fwd_timestamp[1] - client_item.tail_fwd_timestamp[0]) * 1000
+            tail_bwd_time_avg += (client_item.tail_bwd_timestamp[1] - client_item.tail_bwd_timestamp[0]) * 1000
+        # 计算平均时间
+        grad_accum_steps = len(self.profile_data)
+        head_fwd_time_avg /= grad_accum_steps
+        head_bwd_time_avg /= grad_accum_steps
+        server_fwd_time_avg /= grad_accum_steps
+        server_bwd_time_avg /= grad_accum_steps
+        tail_fwd_time_avg /= grad_accum_steps
+        tail_bwd_time_avg /= grad_accum_steps
+        # 计算平均通信时间
 
         # 计算batch训练时间
-        self.batch_train_time_ms = round((self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2)
+        batch_train_time_ms = round((self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2)
         # 计算本地计算时间
 
         # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
@@ -536,14 +572,19 @@ class Client:
             os.makedirs(save_dir)
         data_dict = {
             'max_mem_allocated_MB': self.max_mem_allocated_mb,
-            'batch_train_time_ms': self.batch_train_time_ms,
+            'batch_train_time_ms': batch_train_time_ms,
+            'head_fwd_time_avg_ms': round(head_fwd_time_avg, 2),
+            'head_bwd_time_avg_ms': round(head_bwd_time_avg, 2),
+            'server_fwd_time_avg_ms': round(server_fwd_time_avg, 2),
+            'server_bwd_time_avg_ms': round(server_bwd_time_avg, 2),
+            'tail_fwd_time_avg_ms': round(tail_fwd_time_avg, 2),
+            'tail_bwd_time_avg_ms': round(tail_bwd_time_avg, 2),
             'client_compute_time_ms': round(local_compute_time_ms, 2),
             'server_compute_time_ms': round(server_compute_time_ms, 2),
-            'client_idle_rate': round((1 - local_compute_time_ms / self.batch_train_time_ms) * 100, 2),
-            'server_idle_rate': round((1 - server_compute_time_ms / self.batch_train_time_ms) * 100, 2),
+            'client_idle_rate': round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
+            'server_idle_rate': round((1 - server_compute_time_ms / batch_train_time_ms) * 100, 2),
             'mini_batch_data': [asdict(item) for item in self.profile_data],
         }
-
         save_gantt_chart_data(
             data_dict,
             os.path.join(
@@ -590,7 +631,7 @@ class Client:
         # —— 每个“大 batch”一次 step —— 梯度先清零
         self.optimizer_head.zero_grad(set_to_none=True)
         self.optimizer_tail.zero_grad(set_to_none=True)
-        
+
         if self.client_args.sort_batch:
             micro_batches = self._split_micro_with_mask(
                 input_ids,
@@ -599,7 +640,7 @@ class Client:
             )
             # 拆分成两个列表
             micro_inputs = [ids for ids, _ in micro_batches]
-            micro_masks  = [mask for _, mask in micro_batches]
+            micro_masks = [mask for _, mask in micro_batches]
             # 自回归任务时，labels = inputs
             micro_labels = micro_inputs
         else:

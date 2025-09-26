@@ -3,6 +3,8 @@ import pickle
 import time
 from typing import Any, Optional
 
+from usl.utils.log_utils import timeit
+
 
 class SocketCommunicator:
     """
@@ -96,7 +98,7 @@ class SocketCommunicator:
             return
 
         bytes_per_sec = rate_mbps * 1024 * 1024 / 8.0  # Mbps → B/s
-        start = time.perf_counter()
+        start = time.time()
         sent = 0
 
         for i in range(0, len(data), chunk_bytes):
@@ -104,10 +106,11 @@ class SocketCommunicator:
             sock.sendall(part)
             sent += len(part)
             expected_elapsed = sent / bytes_per_sec
-            now = time.perf_counter()
+            now = time.time()
             if expected_elapsed > (now - start):
                 time.sleep(expected_elapsed - (now - start))
 
+    # @timeit(info='send info')
     def send(self, obj: Any):
         """发送对象，带长度前缀 + 限速"""
         if not self.conn:
