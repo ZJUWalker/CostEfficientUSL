@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from usl.socket import SocketCommunicator, Payload
-from usl.utils.usl_gantt_plot import GanttChartData, plot_gantt_grouped, save_gantt_chart_data, plot_gantt_per_batch
+from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_gantt_grouped
 from usl.utils.tensor_utils import pad_inputs
 from usl.offload import ActivationOffload, ModelParamOffload, OptimizerStateOffload
 from transformers import PreTrainedModel

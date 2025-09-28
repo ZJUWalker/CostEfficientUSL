@@ -12,13 +12,11 @@ class GanttChartData:
     head_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
-    # tail_fwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
-    # head_bwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
 
 
