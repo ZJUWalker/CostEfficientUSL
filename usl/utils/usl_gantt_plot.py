@@ -215,10 +215,11 @@ def plot_gantt_grouped(
 
     # 四个分组的映射
     GROUP_MAPPING = {
-        "Client Compute": ["head_fwd_timestamp", "head_bwd_timestamp", "tail_fwd_timestamp", "tail_bwd_timestamp"],
+        "Client Head Compute": ["head_fwd_timestamp", "head_bwd_timestamp"],
         "Client Send": ["head_fwd_send_timestamp", "tail_bwd_send_timestamp"],
         "Server Compute": ["server_fwd_timestamp", "server_bwd_timestamp"],
         "Server Send": ["server_fwd_send_timestamp", "server_bwd_send_timestamp"],
+        "Client Tail Compute": ["tail_fwd_timestamp", "tail_bwd_timestamp"],
     }
 
     groups = list(GROUP_MAPPING.keys())
