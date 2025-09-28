@@ -6,13 +6,19 @@ from typing import List, Dict, Tuple
 class OptimizerStateOffload:
 
     def __init__(
-        self, optimizer: torch.optim.Optimizer, offload_threshold: int = 0, device='cuda', swap_stream=None, except_tensor_idx_list: List[int] = []
+        self,
+        optimizer: torch.optim.Optimizer,
+        offload_threshold: int = 0,
+        device='cuda',
+        load_stream=None,
+        offload_stream=None,
+        except_tensor_idx_list: List[int] = [],
     ):
         self.optimizer = optimizer
         self.offload_threshold = offload_threshold  # Byte
         self.device = device
-        self.curr_optimizer_state = 'cpu'  # 'cpu' or 'cuda'
-        self.swap_stream = swap_stream if swap_stream else torch.cuda.Stream(device)  # create a new stream for offload/reload
+        self.load_stream = load_stream if load_stream else torch.cuda.Stream(device)  # create a new stream for offload/reload
+        self.offload_stream = offload_stream if offload_stream else torch.cuda.Stream(device)  # create a new stream for offload/reload
         self.except_tensor_idx_list = except_tensor_idx_list  # list of tensor index to be excluded from offload/reload
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
@@ -25,7 +31,7 @@ class OptimizerStateOffload:
             state: Dict[str, torch.Tensor]
             for k, v in state.items():
                 v: torch.Tensor
-                if isinstance(v, torch.Tensor) and v.dim() > 0 and v.numel() * v.element_size() > self.offload_threshold:
+                if isinstance(v, torch.Tensor) and v.dim() > 0 and v.numel() * v.element_size() >= self.offload_threshold:
                     if v.device.type == 'cuda':  # move tensor to CPU memory
                         t_cpu = torch.empty_like(v, device='cpu', pin_memory=True)
                         t_cpu.data.copy_(v.data, non_blocking=True)
@@ -49,9 +55,7 @@ class OptimizerStateOffload:
 
     # offload optimizer state from GPU to CPU
     def offload(self, async_offload=False):
-        if self.curr_optimizer_state == 'cpu':
-            return  # no need to offload again
-        stream = self.swap_stream if self.swap_stream else torch.cuda.current_stream(self.device)
+        stream = self.offload_stream if self.offload_stream else torch.cuda.current_stream(self.device)
         with torch.cuda.stream(stream):
             self._offload()
 
@@ -62,21 +66,15 @@ class OptimizerStateOffload:
             # wait for all optimizer state offloaded
             torch.cuda.synchronize(self.device)
             # release GPU memory for optimizer state
-            self.curr_optimizer_state = 'cpu'
 
     # wait for all optimizer state offloaded to finish
     def wait_offload(self):
-        if self.swap_stream != torch.cuda.current_stream(self.device):
+        if self.offload_stream != torch.cuda.current_stream(self.device):
             torch.cuda.current_stream(self.device).wait_event(self.offload_event)
-            self.curr_optimizer_state = 'cpu'
 
     # reload optimizer state from CPU to GPU
     def reload(self, async_reload=False):
-        # if not self.inited:
-        # self._lazy_init_optimizer_state_dict()
-        if self.curr_optimizer_state == 'cuda':
-            return  # no need to reload again
-        stream = self.swap_stream if self.swap_stream else torch.cuda.current_stream(self.device)
+        stream = self.load_stream if self.load_stream else torch.cuda.current_stream(self.device)
         with torch.cuda.stream(stream):
             self._reload()
 
@@ -88,11 +86,9 @@ class OptimizerStateOffload:
             torch.cuda.synchronize(self.device)
             # release CPU memory for optimizer states
             torch.cuda.empty_cache()
-            self.curr_optimizer_state = 'cuda'
 
     def wait_reload(self):
-        if self.swap_stream != torch.cuda.current_stream(self.device):
+        if self.load_stream != torch.cuda.current_stream(self.device):
             torch.cuda.current_stream(self.device).wait_event(self.reload_event)
             # self.optimizer_state_on_cpu.clear()
             torch.cuda.empty_cache()
-            self.curr_optimizer_state = 'cuda'

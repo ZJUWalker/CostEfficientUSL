@@ -5,14 +5,15 @@ from typing import List, Tuple, Dict, Union
 
 class ActivationOffload:
 
-    def __init__(self, base_model: nn.Module, offload_threshold: int = 1024, device=None, swap_stream=None):
+    def __init__(self, base_model: nn.Module, offload_threshold: int = 1024, device=None, load_stream=None, offload_stream=None):
 
         self.base_model = base_model
         self.activations_on_gpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> activation on gpu
         self.activations_on_cpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> activation on cpu DRAM
         self.offload_threshold = offload_threshold  # Byte
         self.device = device
-        self.swap_stream = torch.cuda.Stream(device) if swap_stream is None else swap_stream
+        self.load_stream = load_stream if load_stream is not None else torch.cuda.default_stream()
+        self.offload_stream = offload_stream if offload_stream is not None else torch.cuda.default_stream()
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
         self._register_fwd_hook()
@@ -22,7 +23,7 @@ class ActivationOffload:
 
         def after_fwd_hook(module: nn.Module, input: Tuple[torch.Tensor], output: Union[torch.Tensor, Tuple[torch.Tensor]]):
             if isinstance(output, torch.Tensor):
-                if output.numel() * output.element_size() > self.offload_threshold:
+                if output.numel() * output.element_size() >= self.offload_threshold:
                     tensor_ptr = output.data_ptr()
                     if tensor_ptr not in self.activations_on_gpu:
                         self.activations_on_gpu[tensor_ptr] = output
@@ -31,7 +32,7 @@ class ActivationOffload:
             elif isinstance(output, List) or isinstance(output, Tuple) or isinstance(output, Dict):
                 for tensor in output:
                     if isinstance(tensor, torch.Tensor):
-                        if tensor.numel() * tensor.element_size() > self.offload_threshold:
+                        if tensor.numel() * tensor.element_size() >= self.offload_threshold:
                             tensor_ptr = tensor.data_ptr()
                             if tensor_ptr not in self.activations_on_gpu:
                                 self.activations_on_gpu[tensor_ptr] = tensor
@@ -50,7 +51,7 @@ class ActivationOffload:
 
     # offload activations from GPU to CPU,except for tensors in except_tensor_idx_list
     def offload(self, except_tensor_idx_list: List[int] = [], async_offload=False):
-        stream = self.swap_stream if self.swap_stream else torch.cuda.current_stream()
+        stream = self.offload_stream if self.offload_stream else torch.cuda.current_stream()
         with torch.cuda.stream(stream):
             for idx, tensor in self.activations_on_gpu.items():
                 if self.device is None:
@@ -71,7 +72,7 @@ class ActivationOffload:
 
     # wait for all activations offloaded to CPU,except for tensors in except_tensor_idx_list
     def wait_offload(self, except_tensor_idx_list: List[int] = []):
-        if self.swap_stream != torch.cuda.current_stream():
+        if self.offload_stream != torch.cuda.current_stream():
             torch.cuda.current_stream().wait_event(self.offload_event)
             self._release_tensor_on_gpu(except_tensor_idx_list)
 
@@ -84,7 +85,7 @@ class ActivationOffload:
 
     # reload activations from CPU to GPU
     def reload(self, async_reload=False):
-        stream = self.swap_stream if self.swap_stream else torch.cuda.current_stream()
+        stream = self.load_stream if self.load_stream else torch.cuda.current_stream()
         with torch.cuda.stream(stream):
             for idx, tensor in self.activations_on_cpu.items():
                 t_gpu = torch.empty_like(tensor, device=self.device)  # no pin_memory on GPU
@@ -101,7 +102,7 @@ class ActivationOffload:
             torch.cuda.empty_cache()
 
     def wait_reload(self):
-        if self.swap_stream != torch.cuda.current_stream():
+        if self.load_stream != torch.cuda.current_stream():
             torch.cuda.current_stream().wait_event(self.reload_event)
             self.activations_on_cpu.clear()
             torch.cuda.empty_cache()

@@ -20,6 +20,7 @@ from usl.offload import ActivationOffload
 import os
 from deepspeed.ops.op_builder import AsyncIOBuilder
 
+
 @dataclass
 class ClientArgs:
     port: int = 8000
@@ -36,6 +37,7 @@ class ClientArgs:
     async_io: bool = False
     offload_activation: bool = False
     offload_model_state: bool = False
+
 
 # nvme_handle = AsyncIOBuilder().load().aio_handle()  # 初始化句柄
 class Client:
@@ -63,7 +65,7 @@ class Client:
         # else:
         #     self.nvme_handle = AsyncIOBuilder().load().aio_handle()
         # print("Using NVMe handle block_size:", self.nvme_handle.get_block_size())
-        self.nvme_handle = nvme_handle  #初始化句柄
+        self.nvme_handle = nvme_handle  # 初始化句柄
         # tail model卸载到SSD：模型参数
         self.tail_offload_dir = "local_nvme/tail_model"
         os.makedirs(self.tail_offload_dir, exist_ok=True)
@@ -74,7 +76,7 @@ class Client:
             fut.wait()
             self.tail_model_paths[name] = (path, param.shape, param.dtype)
         self.tail_model = None  # 直接为None，不用加载
-        
+
         self.tokenizer = tokenizer
         self.logger = train_logger
         self.train_loader = dataset_train
@@ -155,7 +157,7 @@ class Client:
         payload = Payload(
             tensor=act_cpu,
             is_activation=is_activation,
-            is_training=True,
+            phase=True,
             # —— 元信息 ——（server 将用 token 作为上下文 key）
             token=token,
             group_id=group_id,
@@ -202,7 +204,7 @@ class Client:
         return micro_bs, grad_accum_steps
 
     def _offload_to_nvme(self, tensor, tokenid):
-        path = f"local_nvme/{tokenid}.pt"   # NVMe SSD 路径
+        path = f"local_nvme/{tokenid}.pt"  # NVMe SSD 路径
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # 使用 DeepNVMe aio 接口异步写出
         fut = self.nvme_handle.async_pwrite(tensor, path)
@@ -212,9 +214,9 @@ class Client:
     def _load_from_nvme(self, path, shape, dtype, device):
         tensor = torch.empty(shape, dtype=dtype, device=device, pin_memory=True)
         fut = self.nvme_handle.async_pread(tensor, path)
-        fut.wait()   # 等待读取完成
+        fut.wait()  # 等待读取完成
         return tensor
-    
+
     def _offload_model(self, model, prefix: str):
         """
         将模型参数和优化器状态从 GPU 卸载到 NVMe
@@ -225,7 +227,7 @@ class Client:
             tokenid = f"{prefix}_param_{name}"
             path = self._offload_to_nvme(param.detach().cpu(), tokenid)
             self.nvme_paths[tokenid] = path  # 保存路径
-            
+
     def _offload_optimizer(self, optimizer, prefix: str):
         # 卸载优化器状态
         for state_key, state_val in optimizer.state.items():
@@ -234,7 +236,7 @@ class Client:
                     tokenid = f"{prefix}_optim_{state_key}_{inner_key}"
                     path = self._offload_to_nvme(inner_val.detach().cpu(), tokenid)
                     self.nvme_paths[tokenid] = path  # 保存路径
-    
+
     def _load_model(self, model, prefix: str, device: str):
         """
         从 NVMe 读取模型参数和优化器状态到 GPU
@@ -245,7 +247,7 @@ class Client:
         state_dict = model.state_dict()
         for name, param in state_dict.items():
             tokenid = f"{prefix}_param_{name}"
-            path = self.nvme_paths[tokenid]   # 从字典查路径
+            path = self.nvme_paths[tokenid]  # 从字典查路径
             loaded = self._load_from_nvme(path, param.shape, param.dtype, device)
             param.data.copy_(loaded)
 
@@ -255,10 +257,10 @@ class Client:
             for inner_key, inner_val in state_val.items():
                 if torch.is_tensor(inner_val):
                     tokenid = f"{prefix}_optim_{state_key}_{inner_key}"
-                    path = self.nvme_paths[tokenid]   # 从字典查路径
+                    path = self.nvme_paths[tokenid]  # 从字典查路径
                     loaded = self._load_from_nvme(path, inner_val.shape, inner_val.dtype, device)
                     inner_val.data.copy_(loaded)
-    
+
     def _head_fwd_micro(
         self,
         group_id: str,
@@ -402,10 +404,11 @@ class Client:
 
     def _do_pipeline(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         offload_activation = self.client_args.offload_activation
+
         # choose a GPU device if available, else cpu
         def _prefer_gpu_device():
             return torch.device(self.client_device) if torch.cuda.is_available() else torch.device("cpu")
-        
+
         # micro batch head fwd and send
         for mb_idx in range(grad_accum_steps):
             #  tail fwd and send
@@ -447,7 +450,7 @@ class Client:
             self._load_optimizer(self.optimizer_tail, prefix="tail", device=str(target_tail_device))
         except Exception as e:
             raise RuntimeError(f"Failed to load tail model/optimizer from NVMe to {target_tail_device}: {e}")
-        
+
         # print(f'Global batch id -> {global_batch_idx} finished head forward')
         batch_loss = 0
         no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
@@ -494,7 +497,7 @@ class Client:
             self._load_optimizer(self.optimizer_head, prefix="head", device=str(target_head_device))
         except Exception as e:
             raise RuntimeError(f"Failed to load head model/optimizer from NVMe to {target_head_device}: {e}")
-        
+
         # micro batch head bwd and recv
         no_head_bwd_mb_list = [False] * grad_accum_steps
         while True:
@@ -526,7 +529,7 @@ class Client:
                 torch.cuda.empty_cache()
         except Exception as e:
             raise RuntimeError(f"Failed to offload head optimizer state to NVMe: {e}")
-        
+
         return batch_loss
 
     def _do_sequential(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):

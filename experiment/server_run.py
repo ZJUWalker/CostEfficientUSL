@@ -36,7 +36,7 @@ def run_server(server_args: ServerArgs):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8100, help="Port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--use_lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
@@ -45,6 +45,7 @@ if __name__ == "__main__":
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--mbps", type=int, default=0)
+    parser.add_argument("--pmode", type=str, default="strict", help='mode of pipeline, "strict" or "loose" or "1f1b"')
     args = parser.parse_args()
     args = ServerArgs(
         port=args.port,
@@ -56,6 +57,7 @@ if __name__ == "__main__":
         dataset=args.dataset,
         learning_rate=args.learning_rate,
         rate_limit_mbps=args.mbps,
+        pipeline_mode=args.pmode,
     )
 
     set_seed(SEED)

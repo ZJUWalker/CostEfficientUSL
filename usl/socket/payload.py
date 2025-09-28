@@ -7,7 +7,7 @@ import torch
 class Payload:
     tensor: torch.Tensor  # `Any` 适用于 tensor 类型，可以根据具体的类型进行调整
     is_activation: bool = True
-    is_training: bool = True
+    phase: str = Literal["FWD", "BWD"]
     token: str = ""
     group_id: str = ""
     mb_idx: int = 0
