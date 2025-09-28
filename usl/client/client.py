@@ -462,6 +462,8 @@ class Client:
 
         # TODO tail模型参数和优化器状态卸载至CPU
         # TODO 从CPU加载head模型参数和优化器状态到GPU
+        self.optimizer_tail.step()
+        self.optimizer_tail.zero_grad(set_to_none=True)
         if offload_model_state:
             self.tail_model_param_collector.offload()
             self.tail_model_optimizer_collector.offload()
@@ -488,6 +490,9 @@ class Client:
         if offload_activation:
             self.head_activation_collector.clear()
         # TODO head模型优化器状态卸载至CPU
+        # do head model step
+        self.optimizer_head.step()
+        self.optimizer_head.zero_grad(set_to_none=True)
         if offload_model_state:
             self.head_model_optimizer_collector.offload()
 
@@ -669,11 +674,7 @@ class Client:
         else:
             batch_loss = self._do_sequential(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
         # --------------------------------------------------------main loop end--------------------------------------------------------
-        # do step
-        self.optimizer_head.step()
-        self.optimizer_tail.step()
-        self.optimizer_head.zero_grad(set_to_none=True)
-        self.optimizer_tail.zero_grad(set_to_none=True)
+        # self.optimizer_tail.zero_grad(set_to_none=True)
         self.logger.info(
             f'[Client] big batch {global_batch_idx}: loss={batch_loss/grad_accum_steps:.4f},max mem alloc: {torch.cuda.max_memory_allocated(device=self.client_device)/1024**2:.2f} MB',
         )
