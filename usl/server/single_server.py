@@ -28,6 +28,7 @@ class ServerArgs:
     split_point: int = 2
     dataset: str = "gsm8k"
     learning_rate: float = 5e-4
+    pipeline_mode: str = "strict"  # "strict" or "loose"
     # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
     rate_limit_mbps: float = 10
     rate_limit_mbps: Optional[float] = None
@@ -149,7 +150,14 @@ class SingleServer:
 
     def _compute_loop_wrapper(self):
         try:
-            self._compute_task()
+            if self.server_args.pipeline_mode == "strict":
+                self._compute_task_strict_all_fwd_all_bwd()
+            elif self.server_args.pipeline_mode == "loose":
+                self._compute_task_loose()
+            elif self.server_args.pipeline_mode == "1f1b":
+                self._compute_task_one_fwd_one_bwd()
+            else:
+                raise ValueError(f"Unknown pipeline mode: {self.server_args.pipeline_mode}")
         except Exception as e:
             self.logger.exception(f"Compute loop crashed: {e}")
             self.shutdown()
@@ -298,116 +306,171 @@ class SingleServer:
         finally:
             self.shutdown()
 
-    # --------------- Compute loop ---------------
-    def _compute_task(self):
+    def _do_one_fwd_task(self) -> Payload:
+        fwd_wait_start = time.time()
+        data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait()
+        # if isinstance(data, dict) and 'stop' in data.keys():
+        #     print('Server requested stop')
+        #     return data
+        self.idle_time += time.time() - fwd_wait_start
+
+        token = data.token
+        group_id = data.group_id
+        mb_total = data.mb_total
+        mb_idx = data.mb_idx
+        # group_id = str(data.get("group_id", "default"))
+        # mb_total = int(data.get("mb_total", 1))
+        # mb_idx = int(data.get("mb_idx", 0))
+        if self.profile_data == []:
+            self.profile_data = [GanttChartData(mini_batch_idx=i) for i in range(mb_total)]
+        # Group init / maintenance
+        gs = self.group_state.get(group_id)
+        if gs is None:
+            self.group_state[group_id] = {"total": mb_total, "done": 0, "zeroed": True}
+            self.optimizer.zero_grad(set_to_none=True)
+        else:
+            if mb_total is not None:
+                # tolerate late info
+                self.group_state[group_id]["total"] = int(data.mb_total)
+
+        server_activation = self._forward(
+            data.tensor,
+            data.attention_mask,
+            data.position_embeddings,
+            token=token,
+            mb_idx=mb_idx,
+        )
+        self.activation_to_tail_queue.put(
+            Payload(
+                tensor=server_activation,
+                token=token,
+                group_id=group_id,
+                mb_idx=mb_idx,
+                mb_total=mb_total,
+                is_activation=True,
+            )
+        )
+        # has_fwd = True
+        return data
+
+    def _do_one_bwd_task(self) -> Payload:
+        bwd_wait_start = time.time()
+        data: Payload = self.gradient_from_tail_queue.get_nowait()
+        self.idle_time += time.time() - bwd_wait_start
+
+        token = data.token
+        group_id = data.group_id
+        mb_idx = data.mb_idx
+        # group_id = str(data.get("group_id", "default"))
+        # mb_idx = int(data.get("mb_idx", 0))
+        grad_to_client = self._backward(data.tensor, token=token, mb_idx=mb_idx)
+
+        gs = self.group_state.setdefault(group_id, {"total": 1, "done": 0, "zeroed": True})
+        gs["done"] += 1
+        total = int(gs.get("total", 1))
+        done = int(gs["done"])
+
+        if done >= total:
+            torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+            self.group_state.pop(group_id, None)
+
+        self.gradient_to_head_queue.put(
+            Payload(
+                tensor=grad_to_client,
+                is_activation=False,
+                token=token,
+                group_id=group_id,
+                mb_idx=mb_idx,
+                mb_total=total,
+            )
+        )
+        return data
+
+    def _init_cuda(self):
         # 绑定 CUDA 设备并预热上下文（如果可用）
         if torch.cuda.is_available() and str(self.server_device).startswith("cuda"):
             dev = torch.device(self.server_device)
             torch.cuda.set_device(dev.index or 0)  # 绑定当前线程的设备
             torch.empty(0, device=dev)  # 触发一次轻量 CUDA 调用
 
+    # --------------- Compute loop ---------------
+    def _compute_task_loose(self):
+
+        self._init_cuda()
+
         """Non-busy compute loop using queue.get(timeout) for backpressure."""
         while not self.stop_event.is_set():
             # --- Forward path ---
             has_fwd = False
             try:
-                fwd_wait_start = time.time()
-                data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait()
-                if isinstance(data, dict) and 'stop' in data.keys():
-                    print('Server requested stop')
-                    break
-                self.idle_time += time.time() - fwd_wait_start
-
-                token = data.token
-                group_id = data.group_id
-                mb_total = data.mb_total
-                mb_idx = data.mb_idx
-                # group_id = str(data.get("group_id", "default"))
-                # mb_total = int(data.get("mb_total", 1))
-                # mb_idx = int(data.get("mb_idx", 0))
-                if self.profile_data == []:
-                    self.profile_data = [GanttChartData(mini_batch_idx=i) for i in range(mb_total)]
-                # Group init / maintenance
-                gs = self.group_state.get(group_id)
-                if gs is None:
-                    self.group_state[group_id] = {"total": mb_total, "done": 0, "zeroed": True}
-                    self.optimizer.zero_grad(set_to_none=True)
-                else:
-                    if mb_total is not None:
-                        # tolerate late info
-                        self.group_state[group_id]["total"] = int(data.mb_total)
-
-                server_activation = self._forward(
-                    data.tensor,
-                    data.attention_mask,
-                    data.position_embeddings,
-                    token=token,
-                    mb_idx=mb_idx,
-                )
-                self.activation_to_tail_queue.put(
-                    Payload(
-                        tensor=server_activation,
-                        token=token,
-                        group_id=group_id,
-                        mb_idx=mb_idx,
-                        mb_total=mb_total,
-                        is_activation=True,
-                    )
-                )
+                _ = self._do_one_fwd_task()
                 has_fwd = True
             except Empty:
                 pass
-
             # Small cooperative yield
             if has_fwd:
                 continue
-
             # --- Backward path ---
             try:
-
-                bwd_wait_start = time.time()
-                data = self.gradient_from_tail_queue.get_nowait()
-                self.idle_time += time.time() - bwd_wait_start
-
-                token = data.token
-                group_id = data.group_id
-                mb_idx = data.mb_idx
-                # group_id = str(data.get("group_id", "default"))
-                # mb_idx = int(data.get("mb_idx", 0))
-                grad_to_client = self._backward(data.tensor, token=token, mb_idx=mb_idx)
-
-                gs = self.group_state.setdefault(group_id, {"total": 1, "done": 0, "zeroed": True})
-                gs["done"] += 1
-                total = int(gs.get("total", 1))
-                done = int(gs["done"])
-
-                if done >= total:
-                    torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
-                    self.optimizer.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-                    self.group_state.pop(group_id, None)
-
-                self.gradient_to_head_queue.put(
-                    # {
-                    #     "tensor": grad_to_client,
-                    #     "is_activation": False,
-                    #     "token": token,
-                    #     "group_id": group_id,
-                    #     "mb_idx": mb_idx,
-                    #     "mb_total": total,
-                    #     "group_done": done,
-                    # }
-                    Payload(
-                        tensor=grad_to_client,
-                        is_activation=False,
-                        token=token,
-                        group_id=group_id,
-                        mb_idx=mb_idx,
-                        mb_total=total,
-                    )
-                )
+                self._do_one_bwd_task()
             except Empty:
                 pass
 
             # Small cooperative yield
             time.sleep(0.001)
+        print('Server finished training')
+
+    # --------------- Compute loop ---------------
+    def _compute_task_strict_all_fwd_all_bwd(self):
+
+        self._init_cuda()
+
+        """Non-busy compute loop using queue.get(timeout) for backpressure."""
+        curr_phase = 'FWD'
+        while not self.stop_event.is_set():
+            # --- Forward one minibatch ---
+            if curr_phase == 'FWD':
+                try:
+                    data = self._do_one_fwd_task()
+                    curr_phase = data.phase
+                except Empty:
+                    pass
+            else:
+                # --- Backward one minibatch ---
+                try:
+                    data = self._do_one_bwd_task()
+                    curr_phase = data.phase
+                except Empty:
+                    pass
+
+            # Small cooperative yield
+            time.sleep(0.001)
+        print('Server finished training')
+
+    def _compute_task_one_fwd_one_bwd(self):
+
+        self._init_cuda()
+
+        """Non-busy compute loop using queue.get(timeout) for backpressure."""
+        while not self.stop_event.is_set():
+            # --- Forward one minibatch ---
+            while not self.stop_event.is_set():
+                try:
+                    _ = self._do_one_fwd_task()
+                    break
+                except Empty:
+                    time.sleep(0.001)
+                    continue
+            # --- Backward one minibatch ---
+            while not self.stop_event.is_set():
+                try:
+                    self._do_one_bwd_task()
+                    break
+                except Empty:
+                    time.sleep(0.001)
+                    continue
+            # Small cooperative yield
+            time.sleep(0.001)
+        print('Server finished training')

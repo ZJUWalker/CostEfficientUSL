@@ -7,6 +7,7 @@ from usl.client import Client, ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
 from usl.utils.exp import set_seed
+
 # from deepspeed.ops.op_builder import AsyncIOBuilder
 
 
@@ -31,7 +32,7 @@ def run_client(args: ClientArgs):
     logger.info(f"client start with args: {args}")
 
     # ---------------load model and tokenizer --------------------------
-    head, tail, tokenizer = load_client(model_dir, model_name, split_point, use_lora=True, use_qlora_4bit=False, use_qlora_8bit=False)
+    head, tail, tokenizer = load_client(model_dir, model_name, split_point, use_lora=False, use_qlora_4bit=False, use_qlora_8bit=False)
     # ---------------load dataset------------------------------------
     client_dataloaders = load_dataset(dataset_name, tokenizer, [0], batch_size, max_seq_len)
     dataloader = client_dataloaders[0]  # 默认只取第一个客户端数据
@@ -53,7 +54,7 @@ def run_client(args: ClientArgs):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8100, help="port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8888, help="port to listen")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=4, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
@@ -68,6 +69,7 @@ def main():
     parser.add_argument("--offload_activation", action="store_true", default=False)
     parser.add_argument("--offload_model_state", action="store_true", default=False)
     parser.add_argument("--sort_batch", action="store_true", default=False)
+    parser.add_argument("--pmode", type=str, default="strict", help='mode of pipeline, "strict" or "loose"')
 
     args = parser.parse_args()
     args = ClientArgs(
@@ -86,6 +88,7 @@ def main():
         offload_activation=args.offload_activation,
         offload_model_state=args.offload_model_state,
         sort_batch=args.sort_batch,
+        pipeline_mode=args.pmode,
     )
 
     run_client(args)

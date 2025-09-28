@@ -81,9 +81,9 @@ def _to_aligned_ms(data_list: List[Dict]) -> List[Dict[str, List[Optional[int]]]
     return aligned_list
 
 
-def save_gantt_chart_data(gantt_data_dict: Dict, filename: str):
+def save_gantt_chart_data(gantt_data_dict: Dict, fp: str):
     # 写入到JSON文件
-    with open(filename, 'w') as f:
+    with open(fp, 'w') as f:
         json.dump(gantt_data_dict, f, indent=4)
 
 
@@ -164,7 +164,7 @@ def plot_gantt_per_batch(
     ax.set_ylabel("Mini-batch")
     ax.set_yticks(range(len(aligned_list)))
     ax.set_yticklabels([f"MB{d['mini_batch_idx']}" for d in aligned_list])
-    ax.set_title("Gantt Chart per Mini-Batch (One Row Each)")
+    ax.set_title(f"Gantt Chart per Mini-Batch (One Row Each)(Config:{fp.split('/')[-1].split('.')[0]})")
     ax.grid(True, axis="x", linestyle="--", alpha=alpha)
     ax.legend()
     plt.tight_layout()
@@ -174,7 +174,7 @@ def plot_gantt_per_batch(
     else:
         plt.savefig(fp, dpi=200)
         # print(f"Gantt 图已保存到 {fp}")
-    
+
 
 def plot_gantt_grouped(
     mini_batch_time_gantt: Optional[List[Dict] | List[GanttChartData]] = None,
@@ -246,7 +246,7 @@ def plot_gantt_grouped(
     ax.set_xlabel("Time (ms, aligned)")
     ax.set_yticks(range(len(groups)))
     ax.set_yticklabels(groups)
-    ax.set_title("Grouped Gantt Chart (4 Rows)")
+    ax.set_title(f"Grouped Gantt Chart (4 Rows)(Config:{fp.split('/')[-1].split('.')[0]})")
     ax.grid(True, axis="x", linestyle="--", alpha=0.5)
     # ax.legend()
     # ax.legend(
@@ -256,13 +256,13 @@ def plot_gantt_grouped(
     #     frameon=True                    # 给图例加边框，避免和背景混
     # )
     ax.legend(
-        fontsize=6,        # 再缩小字体
-        markerscale=0.6,   # 再缩小 marker
-        loc="lower right", # 右下角
+        fontsize=6,  # 再缩小字体
+        markerscale=0.6,  # 再缩小 marker
+        loc="lower right",  # 右下角
         bbox_to_anchor=(1, 0.2),  # 稍微上移，避免和 x 轴重叠
         frameon=True,
         borderaxespad=0.3,
-        handlelength=1.0
+        handlelength=1.0,
     )
     plt.tight_layout()
 
@@ -270,4 +270,3 @@ def plot_gantt_grouped(
         plt.show()
     else:
         plt.savefig(fp, dpi=200)
-
