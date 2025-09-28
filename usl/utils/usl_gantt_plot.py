@@ -224,6 +224,7 @@ def plot_gantt_grouped(
     groups = list(GROUP_MAPPING.keys())
 
     for aligned in aligned_list:
+        mb_idx = aligned["mini_batch_idx"]  # 当前 mini_batch 序号
         for row_idx, group_name in enumerate(groups):
             for key in GROUP_MAPPING[group_name]:
                 interval = aligned.get(key)
@@ -242,19 +243,25 @@ def plot_gantt_grouped(
                     alpha=alpha,
                     label=label if aligned["mini_batch_idx"] == 0 else "",  # 避免重复图例
                 )
+                # 在块的中心标注 mini_batch_idx
+                x_center = start + duration / 2
+                y_center = row_idx
+                ax.text(
+                    x_center,
+                    y_center,
+                    str(mb_idx),
+                    ha="center",
+                    va="center",
+                    fontsize=6,
+                    color="black",
+                    fontweight="bold"
+                )
 
     ax.set_xlabel("Time (ms, aligned)")
     ax.set_yticks(range(len(groups)))
     ax.set_yticklabels(groups)
     ax.set_title(f"Grouped Gantt Chart (4 Rows)(Config:{fp.split('/')[-1].split('.')[0]})")
     ax.grid(True, axis="x", linestyle="--", alpha=0.5)
-    # ax.legend()
-    # ax.legend(
-    #     loc="lower right",              # 把图例放在右下角
-    #     bbox_to_anchor=(1.0, 0.05),     # 调整位置 (x=1.0 表示靠最右，y=0.05 表示靠下)
-    #     fontsize=8,                     # 缩小字体
-    #     frameon=True                    # 给图例加边框，避免和背景混
-    # )
     ax.legend(
         fontsize=6,  # 再缩小字体
         markerscale=0.6,  # 再缩小 marker
