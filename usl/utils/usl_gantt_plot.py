@@ -20,19 +20,21 @@ class GanttChartData:
     head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
 
 
-def merge_cs_json(server_data: List[Dict], client_data: List[Dict], save_fp: str = 'merged.json', save: bool = False) -> List[Dict]:
+def merge_cs_json(
+    server_data: List[Dict], client_data: List[Dict], save_fp: str = "merged.json", save: bool = False
+) -> List[Dict]:
     # 使用字典形式合并每个 mini_batch_idx 对应的数据
 
     for server_item, client_item in zip(server_data, client_data):
         # 通过 mini_batch_idx 进行合并
-        if server_item['mini_batch_idx'] == client_item['mini_batch_idx']:
+        if server_item["mini_batch_idx"] == client_item["mini_batch_idx"]:
             # 合并：server 的非空数据覆盖 client 的空数据
             client_item["server_fwd_timestamp"] = server_item["server_fwd_timestamp"]
             client_item["server_bwd_timestamp"] = server_item["server_bwd_timestamp"]
 
         # 将合并后的数据写入 JSON 文件
     if save:
-        with open(save_fp, 'w') as f:
+        with open(save_fp, "w") as f:
             json.dump(client_data, f, indent=4)
     return client_data
 
@@ -83,7 +85,7 @@ def _to_aligned_ms(data_list: List[Dict]) -> List[Dict[str, List[Optional[int]]]
 
 def save_gantt_chart_data(gantt_data_dict: Dict, fp: str):
     # 写入到JSON文件
-    with open(fp, 'w') as f:
+    with open(fp, "w") as f:
         json.dump(gantt_data_dict, f, indent=4)
 
 
@@ -211,17 +213,19 @@ def plot_gantt_grouped(
         print("没有有效的时间戳")
         return
 
-    fig, ax = plt.subplots(figsize=(12, 4))
+    fig, ax = plt.subplots(figsize=(15, 4))
 
     # 四个分组的映射
     GROUP_MAPPING = {
-        "Client Head FWD/BWD": ["head_fwd_timestamp", "head_bwd_timestamp"],
-        "Client Activ Send": ["head_fwd_send_timestamp"],
-        "Server Grad Send": ["server_bwd_send_timestamp"],
-        "Server FWD/BWD": ["server_fwd_timestamp", "server_bwd_timestamp"],
-        "Server Activ Send": ["server_fwd_send_timestamp"],
-        "Client Grad Send": ["tail_bwd_send_timestamp"],
         "Client Tail FWD/BWD": ["tail_fwd_timestamp", "tail_bwd_timestamp"],
+        # "Client Grad Send": ["tail_bwd_send_timestamp"],
+        # "Server Grad Send": ["server_bwd_send_timestamp"],
+        # "Server Activ Send": ["server_fwd_send_timestamp"],
+        "Server Send": ["server_fwd_send_timestamp", "server_bwd_send_timestamp"],
+        "Server FWD/BWD": ["server_fwd_timestamp", "server_bwd_timestamp"],
+        "Client Send": ["head_fwd_send_timestamp", "tail_bwd_send_timestamp"],
+        # "Client Activ Send": ["head_fwd_send_timestamp"],
+        "Client Head FWD/BWD": ["head_fwd_timestamp", "head_bwd_timestamp"],
     }
 
     groups = list(GROUP_MAPPING.keys())
@@ -249,7 +253,16 @@ def plot_gantt_grouped(
                 # 在块的中心标注 mini_batch_idx
                 x_center = start + duration / 2
                 y_center = row_idx
-                ax.text(x_center, y_center, str(mb_idx), ha="center", va="center", fontsize=6, color="black", fontweight="bold")
+                ax.text(
+                    x_center,
+                    y_center,
+                    str(mb_idx),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="black",
+                    fontweight="bold",
+                )
 
     ax.set_xlabel("Time (ms, aligned)")
     ax.set_yticks(range(len(groups)))
