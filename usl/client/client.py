@@ -14,6 +14,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from usl.server.single_server import PipelineMode
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_gantt_grouped
 from usl.utils.tensor_utils import pad_inputs
@@ -38,7 +39,7 @@ class ClientArgs:
     offload_activation: bool = False
     offload_model_state: bool = False
     sort_batch: bool = False
-    pipeline_mode: str = "strict"  # strict or loose
+    pipeline_mode: PipelineMode = PipelineMode.GPIPE
 
     def build_filename(self, prefix: str = "", ext: str = "json") -> str:
         """
@@ -53,7 +54,7 @@ class ClientArgs:
             f"mb_{self.micro_batch_size}",
             f"s_{self.max_seq_len}",
             f"mbps_{self.rate_mbps}",
-            f"pipe_{self.pipeline_mode}",
+            f"pipe_{self.pipeline_mode.value}",
         ]
 
         # 动态处理布尔字段
@@ -340,15 +341,10 @@ class Client:
         self.profile_data[mb_idx].head_fwd_timestamp[1] = time.time()
         return payload
 
-    def _tail_fwd_bwd_micro(self, server_forward_output: Payload) -> Tuple[Payload, torch.Tensor]:
-        # print(f"[Client] micro {head_fwd.mb_idx} tial recv,future elapsed:[{head_fwd.recv_future.start}, {head_fwd.recv_future.end}]")
-        # token = server_forward_output.get("token")
-        # group_id = server_forward_output.get("group_id")
-        # mb_idx = int(server_forward_output.get("mb_idx"))
-        # mb_total = int(server_forward_output.get("mb_total"))
+    def _tail_fwd_micro(self, server_forward_output: Payload) -> Tuple[torch.Tensor, torch.Tensor]:
         # 解析 server 传来的 payload
-        token = server_forward_output.token
-        group_id = server_forward_output.group_id
+        # token = server_forward_output.token
+        # group_id = server_forward_output.group_id
         mb_idx = server_forward_output.mb_idx
         mb_total = server_forward_output.mb_total
 
@@ -367,6 +363,11 @@ class Client:
         # 可选：按 accum 步数归一化，保证与“单大 batch 一次性训练”的梯度数值一致
         loss = output.loss / mb_total if self.normalize_loss else output.loss
         self.losses.append(loss.item())
+        return activation_to_tail, loss
+
+    def _tail_bwd_micro(
+        self, loss: torch.Tensor, activation_to_tail: torch.Tensor, token: str, group_id: str, mb_idx: int, mb_total: int
+    ) -> Tuple[Payload, torch.Tensor]:
         self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.time()
         loss.backward()
         torch.cuda.synchronize()
@@ -380,8 +381,7 @@ class Client:
             phase='BWD' if mb_idx < mb_total - 1 else 'FWD',
         )
         self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.time()
-
-        return grad_payload, loss
+        return grad_payload
 
     def _head_bwd_micro(self, server_bwd_output: Payload):
         assert server_bwd_output.is_activation == False, "should be gradient,but activation recieved"
@@ -434,6 +434,10 @@ class Client:
             except Empty:
                 pass
             try:
+                if self.client_args.pipeline_mode == PipelineMode.PIPAR:
+                    if not self.activation_to_server_queue.empty():
+                        time.sleep(0.001)  # 等待队列中有数据，避免频繁发送
+                        continue
                 payload = self.gradient_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
@@ -481,7 +485,232 @@ class Client:
         # else:
         #     self.logger.warning(f"Unknown data received: {data}")
 
-    def _do_pipeline(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+    def _do_gpipe(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+        for mb_idx in range(grad_accum_steps):
+            #  tail fwd and send
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
+            self.labels_dict[mb_idx] = micro_labels[mb_idx]
+            self.activation_to_server_queue.put(payload)
+            pass
+
+        batch_loss = 0
+        # tail fwd
+        no_tail_fwd_mb_list = [False] * grad_accum_steps
+        activation_to_tail_queue: Queue[Dict] = Queue(maxsize=grad_accum_steps)
+        while True:
+            if not all(no_tail_fwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_activation_payload = self.activation_from_server_queue.get(timeout=0.001)
+                    if server_activation_payload is not None:
+                        mb_idx = server_activation_payload.mb_idx
+                        no_tail_fwd_mb_list[mb_idx] = True
+                        activation_to_tail, loss = self._tail_fwd_micro(server_activation_payload)
+                        batch_loss += loss.item()
+                        # grad_payload = self._tail_bwd_micro(loss, activation_to_tail, group_id, mb_idx, grad_accum_steps)
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} tail forward and backward')
+                        # self.gradient_to_server_queue.put(grad_payload)
+                        activation_to_tail_queue.put(
+                            {
+                                'mb_idx': mb_idx,
+                                'activation': activation_to_tail,
+                                'loss': loss,
+                                'token': server_activation_payload.token,
+                            }
+                        )
+                except Empty:
+                    continue
+            else:
+                break
+            pass
+        # tail bwd
+        no_tail_bwd_mb_list = [False] * grad_accum_steps
+        while True:
+            if not all(no_tail_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    activation_to_tail_dict = activation_to_tail_queue.get(block=True)
+                    if activation_to_tail_dict is not None:
+                        mb_idx = activation_to_tail_dict['mb_idx']
+                        loss = activation_to_tail_dict['loss']
+                        no_tail_bwd_mb_list[mb_idx] = True
+                        try:
+                            grad_payload = self._tail_bwd_micro(
+                                loss, activation_to_tail_dict['activation'], activation_to_tail_dict['token'], group_id, mb_idx, grad_accum_steps
+                            )
+                        except Exception as e:
+                            print(f'error when send grad payload: {e}')
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} tail forward and backward')
+                        self.gradient_to_server_queue.put(grad_payload)
+                except Empty:
+                    continue
+            else:
+                break
+            pass
+        # tail step
+        self.optimizer_tail.step()
+        self.optimizer_tail.zero_grad(set_to_none=True)
+        # head bwd
+        no_head_bwd_mb_list = [False] * grad_accum_steps
+        while True:
+            if not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_grad_payload = self.gradient_from_server_queue.get(timeout=0.001)
+                    if server_grad_payload is not None:
+                        mb_idx = server_grad_payload.mb_idx
+                        no_head_bwd_mb_list[mb_idx] = True
+                        self._head_bwd_micro(server_grad_payload)
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} head backward')
+                except Empty:
+                    continue
+            else:
+                # print(f'exit global batch id -> {global_batch_idx}')
+                break
+            pass
+        self.optimizer_head.step()
+        self.optimizer_head.zero_grad(set_to_none=True)
+        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        torch.cuda.reset_peak_memory_stats(self.client_device)
+        return batch_loss
+
+    def _do_pipedream_loose(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+        for mb_idx in range(grad_accum_steps):
+            #  tail fwd and send
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
+            self.labels_dict[mb_idx] = micro_labels[mb_idx]
+            self.activation_to_server_queue.put(payload)
+            pass
+
+        batch_loss = 0
+        no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
+        no_head_bwd_mb_list = [False] * grad_accum_steps
+        while True:
+            if not all(no_tail_fwd_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_activation_payload = self.activation_from_server_queue.get(timeout=0.001)
+                    if server_activation_payload is not None:
+                        mb_idx = server_activation_payload.mb_idx
+                        no_tail_fwd_bwd_mb_list[mb_idx] = True
+                        activation_to_tail, loss = self._tail_fwd_micro(server_activation_payload)
+                        batch_loss += loss.item()
+                        grad_payload = self._tail_bwd_micro(
+                            loss,
+                            activation_to_tail,
+                            token=server_activation_payload.token,
+                            group_id=group_id,
+                            mb_idx=mb_idx,
+                            mb_total=grad_accum_steps,
+                        )
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} tail forward and backward')
+                        self.gradient_to_server_queue.put(grad_payload)
+                except Empty:
+                    pass
+            # else:
+            #     pass
+            # pass
+            # while True:
+            if not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_grad_payload = self.gradient_from_server_queue.get(timeout=0.001)
+                    if server_grad_payload is not None:
+                        mb_idx = server_grad_payload.mb_idx
+                        no_head_bwd_mb_list[mb_idx] = True
+                        self._head_bwd_micro(server_grad_payload)
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} head backward')
+                except Empty:
+                    continue
+            else:
+                # print(f'exit global batch id -> {global_batch_idx}')
+                break
+            time.sleep(0.001)
+            pass
+        # model step
+        self.optimizer_tail.step()
+        self.optimizer_tail.zero_grad(set_to_none=True)
+        self.optimizer_head.step()
+        self.optimizer_head.zero_grad(set_to_none=True)
+        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        torch.cuda.reset_peak_memory_stats(self.client_device)
+        return batch_loss
+
+    def _do_pipedream_strict(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+        warmup_steps = grad_accum_steps // 2
+        # warmup phase for head model fwd
+        curr_head_fwd_mb_idx = 0
+        for mb_idx in range(warmup_steps):
+            #  head fwd and send
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
+            self.labels_dict[mb_idx] = micro_labels[mb_idx]
+            self.activation_to_server_queue.put(payload)
+            curr_head_fwd_mb_idx += 1
+            pass
+        batch_loss = 0
+        # strict 1F1B phase for tail model fwd and bwd
+        no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
+        no_head_bwd_mb_list = [False] * grad_accum_steps
+        # curr_head_bwd_mb_idx = 0
+        # print(f'strict 1F1B phase for tail model fwd and bwd')
+        while not all(no_tail_fwd_bwd_mb_list) and not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
+            # tail operation
+            if not all(no_tail_fwd_bwd_mb_list):
+                try:
+                    server_activation_payload = self.activation_from_server_queue.get(block=True)
+                    if server_activation_payload is not None:
+                        # print(f'tail fwd &bwd for micro {server_activation_payload.mb_idx}')
+                        mb_idx = server_activation_payload.mb_idx
+                        no_tail_fwd_bwd_mb_list[mb_idx] = True
+                        activation_to_tail, loss = self._tail_fwd_micro(server_activation_payload)
+                        batch_loss += loss.item()
+                        grad_payload = self._tail_bwd_micro(
+                            loss,
+                            activation_to_tail,
+                            token=server_activation_payload.token,
+                            group_id=group_id,
+                            mb_idx=mb_idx,
+                            mb_total=grad_accum_steps,
+                        )
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} tail forward and backward')
+                        self.gradient_to_server_queue.put(grad_payload)
+                except Empty:
+                    pass
+            # head operation
+            if not all(no_head_bwd_mb_list):
+                try:
+                    server_grad_payload = self.gradient_from_server_queue.get(block=True)
+                    if server_grad_payload is not None:
+                        mb_idx = server_grad_payload.mb_idx
+                        no_head_bwd_mb_list[mb_idx] = True
+                        # head bwd for mb_idx
+                        self._head_bwd_micro(server_grad_payload)
+                        # print(f'head done bwd for micro {mb_idx}')
+                        # head fwd for next mb_idx if available
+                        if curr_head_fwd_mb_idx < grad_accum_steps:
+                            # print(f'head fwd for micro {curr_head_fwd_mb_idx}')
+                            payload = self._head_fwd_micro(
+                                group_id,
+                                curr_head_fwd_mb_idx,
+                                grad_accum_steps,
+                                micro_inputs[curr_head_fwd_mb_idx],
+                                micro_masks[curr_head_fwd_mb_idx],
+                                micro_labels[curr_head_fwd_mb_idx],
+                            )
+                            self.activation_to_server_queue.put(payload)
+                            self.labels_dict[curr_head_fwd_mb_idx] = micro_labels[curr_head_fwd_mb_idx]
+                            curr_head_fwd_mb_idx += 1
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} head backward')
+                    pass
+                except Empty:
+                    pass
+            time.sleep(0.001)
+
+        # model step
+        self.optimizer_tail.step()
+        self.optimizer_tail.zero_grad(set_to_none=True)
+        self.optimizer_head.step()
+        self.optimizer_head.zero_grad(set_to_none=True)
+        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        torch.cuda.reset_peak_memory_stats(self.client_device)
+        return batch_loss
+
+    def _do_pipar(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         offload_activation = self.client_args.offload_activation
         offload_model_state = self.client_args.offload_model_state
         # micro batch head fwd and send
@@ -515,8 +744,16 @@ class Client:
                     if server_activation_payload is not None:
                         mb_idx = server_activation_payload.mb_idx
                         no_tail_fwd_bwd_mb_list[mb_idx] = True
-                        grad_payload, loss = self._tail_fwd_bwd_micro(server_activation_payload)
+                        activation_to_tail, loss = self._tail_fwd_micro(server_activation_payload)
                         batch_loss += loss.item()
+                        grad_payload = self._tail_bwd_micro(
+                            loss,
+                            activation_to_tail,
+                            token=server_activation_payload.token,
+                            group_id=group_id,
+                            mb_idx=mb_idx,
+                            mb_total=grad_accum_steps,
+                        )
                         # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} tail forward and backward')
                         self.gradient_to_server_queue.put(grad_payload)
                 except Empty:
@@ -577,9 +814,10 @@ class Client:
             self.activation_to_server_queue.put(payload)
             # wait for server activation
             server_activation_payload = self.activation_from_server_queue.get(block=True)
-            payload, loss = self._tail_fwd_bwd_micro(server_activation_payload)
+            activation_to_tail, loss = self._tail_fwd_micro(server_activation_payload)
             batch_loss += loss.item()
-            self.gradient_to_server_queue.put(payload)
+            grad_payload = self._tail_bwd_micro(loss, activation_to_tail, server_activation_payload)
+            self.gradient_to_server_queue.put(grad_payload)
             # wait for server gradient
             server_grad_payload = self.gradient_from_server_queue.get(block=True)
             self._head_bwd_micro(server_grad_payload)
@@ -716,10 +954,16 @@ class Client:
         group_id = uuid.uuid4().hex
         self.stop_event.clear()
         # --------------------------------------------------------main loop--------------------------------------------------------
-        if self.client_args.async_io:
-            batch_loss = self._do_pipeline(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
-        else:
+        if self.client_args.pipeline_mode == PipelineMode.GPIPE:
+            batch_loss = self._do_gpipe(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        elif self.client_args.pipeline_mode == PipelineMode.NAIVE:
             batch_loss = self._do_sequential(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        elif self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
+            batch_loss = self._do_pipedream_strict(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        elif self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_LOOSE:
+            batch_loss = self._do_pipedream_loose(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        elif self.client_args.pipeline_mode == PipelineMode.PIPAR:
+            batch_loss = self._do_pipar(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
         # --------------------------------------------------------main loop end--------------------------------------------------------
         # do step
         # self.optimizer_head.step()

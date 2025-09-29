@@ -6,13 +6,31 @@ from queue import Queue, Empty
 import threading
 import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple as TTuple, Type, Union
+from enum import Enum
+from typing import Dict, Any, Optional, List, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
 
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData
+
+
+class PipelineMode(Enum):
+    GPIPE = "gpipe"
+    PIPAR = "pipar"
+    PIPE_DREAM_STRICT = "pipedream_strict"
+    PIPE_DREAM_LOOSE = "pipedream_loose"
+    FWD_EAGER = "fwd_eager"
+    BWD_EAGER = "bwd_eager"
+    NAIVE = "naive"
+
+
+def convert_pipeline_mode(pmode: str) -> str:
+    try:
+        return PipelineMode(value=pmode.lower())
+    except KeyError:
+        raise ValueError(f"Invalid pipeline mode: {pmode}")
 
 
 # -------------------------------
@@ -28,7 +46,7 @@ class ServerArgs:
     split_point: int = 2
     dataset: str = "gsm8k"
     learning_rate: float = 5e-4
-    pipeline_mode: str = "strict"  # "strict" or "loose"
+    pipeline_mode: PipelineMode = PipelineMode.GPIPE  # "strict" or "loose"
     # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
     rate_limit_mbps: float = 10
     rate_limit_mbps: Optional[float] = None
@@ -150,12 +168,16 @@ class SingleServer:
 
     def _compute_loop_wrapper(self):
         try:
-            if self.server_args.pipeline_mode == "strict":
-                self._compute_task_strict_all_fwd_all_bwd()
-            elif self.server_args.pipeline_mode == "loose":
-                self._compute_task_loose()
-            elif self.server_args.pipeline_mode == "1f1b":
-                self._compute_task_one_fwd_one_bwd()
+            if self.server_args.pipeline_mode == PipelineMode.GPIPE:
+                self._compute_task_gpipe()
+            elif self.server_args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
+                self._compute_task_pipedream_strict()
+            elif self.server_args.pipeline_mode == PipelineMode.PIPAR:
+                self._compute_task_pipar()
+            elif self.server_args.pipeline_mode == PipelineMode.BWD_EAGER:
+                self._compute_task_bwd_eager()
+            elif self.server_args.pipeline_mode == PipelineMode.PIPE_DREAM_LOOSE:
+                self._compute_task_pipedream_loose()
             else:
                 raise ValueError(f"Unknown pipeline mode: {self.server_args.pipeline_mode}")
         except Exception as e:
@@ -167,7 +189,7 @@ class SingleServer:
         self,
         activation: torch.Tensor,
         attention_mask: Optional[torch.LongTensor],
-        position_embeddings: Optional[TTuple[torch.Tensor, torch.Tensor]] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         *,
         token: str,
         mb_idx: int,
@@ -243,7 +265,7 @@ class SingleServer:
                 return
             while not self.stop_event.is_set():
                 try:
-                    response: Payload = self.activation_to_tail_queue.get(timeout=0.01)
+                    response: Payload = self.activation_to_tail_queue.get(timeout=0.005)
                     if response is not None:
                         start_send_time = time.time()
                         self.communicator.send(response)
@@ -255,7 +277,7 @@ class SingleServer:
                 except Empty:
                     pass
                 try:
-                    response: Payload = self.gradient_to_head_queue.get(timeout=0.01)
+                    response: Payload = self.gradient_to_head_queue.get(timeout=0.005)
                     if response is not None:  # 可能是 None（队列空）
                         start_send_time = time.time()
                         self.communicator.send(response)
@@ -306,9 +328,9 @@ class SingleServer:
         finally:
             self.shutdown()
 
-    def _do_one_fwd_task(self) -> Payload:
+    def _do_one_fwd_task(self, block=False) -> Payload:
         fwd_wait_start = time.time()
-        data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait()
+        data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait() if not block else self.activation_from_head_queue.get(block)
         # if isinstance(data, dict) and 'stop' in data.keys():
         #     print('Server requested stop')
         #     return data
@@ -353,9 +375,9 @@ class SingleServer:
         # has_fwd = True
         return data
 
-    def _do_one_bwd_task(self) -> Payload:
+    def _do_one_bwd_task(self, block=False) -> Payload:
         bwd_wait_start = time.time()
-        data: Payload = self.gradient_from_tail_queue.get_nowait()
+        data: Payload = self.gradient_from_tail_queue.get_nowait() if not block else self.gradient_from_tail_queue.get(block)
         self.idle_time += time.time() - bwd_wait_start
 
         token = data.token
@@ -396,7 +418,7 @@ class SingleServer:
             torch.empty(0, device=dev)  # 触发一次轻量 CUDA 调用
 
     # --------------- Compute loop ---------------
-    def _compute_task_loose(self):
+    def _compute_task_pipedream_loose(self):
 
         self._init_cuda()
 
@@ -422,8 +444,45 @@ class SingleServer:
             time.sleep(0.001)
         print('Server finished training')
 
+    def _compute_task_pipedream_strict(self):
+
+        self._init_cuda()
+        # curr_phase = 'WARMUP'
+        while not self.stop_event.is_set():
+            while not self.stop_event.is_set():
+                # --- Forward one minibatch ---
+                try:
+                    data = self._do_one_fwd_task()  # wait for mb head fwd
+                except Empty:
+                    time.sleep(0.001)
+                    continue
+                # print(f'server fwd warmup for mb {data.mb_idx}')
+                if data.mb_idx == data.mb_total // 2 - 1:
+                    break
+            # ---- Fully 1F1B phase ----
+            num_1f1b = 0
+            while not self.stop_event.is_set():
+                # --- backward one minibatch ---
+                if num_1f1b == data.mb_total // 2:
+                    break
+                data = self._do_one_bwd_task(block=True)
+                # print(f'done bwd for mb {data.mb_idx} ')
+                if data.mb_idx == 0:
+                    continue
+                # --- forward one minibatch ---
+                data = self._do_one_fwd_task(block=True)
+                num_1f1b += 1
+                # print(f'done fwd for mb {data.mb_idx} ')
+            # print('server 1F1B phase finished')
+            # --- Cool down phase for rest mb bwd---
+            while not self.stop_event.is_set():
+                data = self._do_one_bwd_task(block=True)
+                if data.mb_idx == data.mb_total - 1:
+                    break
+        pass
+
     # --------------- Compute loop ---------------
-    def _compute_task_strict_all_fwd_all_bwd(self):
+    def _compute_task_gpipe(self):
 
         self._init_cuda()
 
@@ -449,7 +508,29 @@ class SingleServer:
             time.sleep(0.001)
         print('Server finished training')
 
-    def _compute_task_one_fwd_one_bwd(self):
+    def _compute_task_bwd_eager(self):
+        self._init_cuda()
+        while not self.stop_event.is_set():
+            # --- Forward path ---
+            has_bwd = False
+            try:
+                _ = self._do_one_bwd_task()
+                has_bwd = True
+            except Empty:
+                pass
+            # Small cooperative yield
+            if has_bwd:
+                continue
+            # --- Backward path ---
+            try:
+                self._do_one_fwd_task()
+            except Empty:
+                pass
+            # Small cooperative yield
+            time.sleep(0.001)
+        print('Server finished training')
+
+    def _compute_task_pipar(self):
 
         self._init_cuda()
 

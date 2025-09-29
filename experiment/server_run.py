@@ -3,7 +3,7 @@ import time
 import torch
 import argparse
 from transformers import AutoConfig
-from usl.server.single_server import SingleServer, ServerArgs
+from usl.server.single_server import SingleServer, ServerArgs, convert_pipeline_mode
 from usl.utils.exp import set_seed
 from usl.utils.load_utils import *
 from usl.utils.log_utils import create_logger
@@ -25,7 +25,7 @@ def run_server(server_args: ServerArgs):
     # =====================================================================
     model_dir = os.path.join("data/models", server_args.model)
     split_point = server_args.split_point
-    server_model = load_server_model(model_dir, server_args.model, split_point, use_lora=True)  # use_lora=True for LoRA
+    server_model = load_server_model(model_dir, server_args.model, split_point, use_lora=server_args.use_lora)  # use_lora=True for LoRA
     # =====================================================================
     torch.cuda.init()
     torch.cuda.set_device(server_args.server_device)
@@ -41,11 +41,11 @@ if __name__ == "__main__":
     parser.add_argument("-L", "--use_lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
     parser.add_argument("-SD", "--server_device", type=str, default="cuda:1", help="Device for server model")
-    parser.add_argument("-SP", "--split_point", type=int, default=2)
+    parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--mbps", type=int, default=0)
-    parser.add_argument("--pmode", type=str, default="strict", help='mode of pipeline, "strict" or "loose" or "1f1b"')
+    parser.add_argument("--pmode", type=str, default="gpipe", help='mode of pipeline, "strict" or "loose" or "1f1b"')
     args = parser.parse_args()
     args = ServerArgs(
         port=args.port,
@@ -57,8 +57,9 @@ if __name__ == "__main__":
         dataset=args.dataset,
         learning_rate=args.learning_rate,
         rate_limit_mbps=args.mbps,
-        pipeline_mode=args.pmode,
+        pipeline_mode=convert_pipeline_mode(args.pmode),
     )
+    print(args)
 
     set_seed(SEED)
     run_server(args)

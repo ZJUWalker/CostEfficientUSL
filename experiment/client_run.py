@@ -7,6 +7,8 @@ from usl.client import Client, ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
 from usl.utils.exp import set_seed
+from usl.server.single_server import PipelineMode, convert_pipeline_mode
+from torch.distributed.pipelining import PipelineStage
 
 # from deepspeed.ops.op_builder import AsyncIOBuilder
 
@@ -61,7 +63,7 @@ def main():
     parser.add_argument("-S", "--step", type=int, default=5)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
-    parser.add_argument("-SP", "--split_point", type=int, default=2)
+    parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--mbps", type=int, default=0)
     parser.add_argument("--async_io", action="store_true", default=True)
@@ -88,7 +90,7 @@ def main():
         offload_activation=args.offload_activation,
         offload_model_state=args.offload_model_state,
         sort_batch=args.sort_batch,
-        pipeline_mode=args.pmode,
+        pipeline_mode=convert_pipeline_mode(args.pmode),
     )
 
     run_client(args)

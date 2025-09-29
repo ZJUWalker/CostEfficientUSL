@@ -215,11 +215,13 @@ def plot_gantt_grouped(
 
     # 四个分组的映射
     GROUP_MAPPING = {
-        "Client Head Compute": ["head_fwd_timestamp", "head_bwd_timestamp"],
-        "Client Send": ["head_fwd_send_timestamp", "tail_bwd_send_timestamp"],
-        "Server Compute": ["server_fwd_timestamp", "server_bwd_timestamp"],
-        "Server Send": ["server_fwd_send_timestamp", "server_bwd_send_timestamp"],
-        "Client Tail Compute": ["tail_fwd_timestamp", "tail_bwd_timestamp"],
+        "Client Head FWD/BWD": ["head_fwd_timestamp", "head_bwd_timestamp"],
+        "Client Activ Send": ["head_fwd_send_timestamp"],
+        "Server Grad Send": ["server_bwd_send_timestamp"],
+        "Server FWD/BWD": ["server_fwd_timestamp", "server_bwd_timestamp"],
+        "Server Activ Send": ["server_fwd_send_timestamp"],
+        "Client Grad Send": ["tail_bwd_send_timestamp"],
+        "Client Tail FWD/BWD": ["tail_fwd_timestamp", "tail_bwd_timestamp"],
     }
 
     groups = list(GROUP_MAPPING.keys())
@@ -247,16 +249,7 @@ def plot_gantt_grouped(
                 # 在块的中心标注 mini_batch_idx
                 x_center = start + duration / 2
                 y_center = row_idx
-                ax.text(
-                    x_center,
-                    y_center,
-                    str(mb_idx),
-                    ha="center",
-                    va="center",
-                    fontsize=6,
-                    color="black",
-                    fontweight="bold"
-                )
+                ax.text(x_center, y_center, str(mb_idx), ha="center", va="center", fontsize=6, color="black", fontweight="bold")
 
     ax.set_xlabel("Time (ms, aligned)")
     ax.set_yticks(range(len(groups)))
