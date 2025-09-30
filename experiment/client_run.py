@@ -70,7 +70,7 @@ def main():
     parser.add_argument("--micro_batch_size", type=int, default=4)
     parser.add_argument("--offload_activation", action="store_true", default=False)
     parser.add_argument("--offload_model_state", action="store_true", default=False)
-    parser.add_argument("--sort_batch", action="store_true", default=False)
+    parser.add_argument("--sort", type=str, default="no", help='sort batch before pipeline, "no" or "desc" or "asc"')
     parser.add_argument("--pmode", type=str, default="strict", help='mode of pipeline, "strict" or "loose"')
 
     args = parser.parse_args()
@@ -89,7 +89,7 @@ def main():
         micro_batch_size=args.micro_batch_size,
         offload_activation=args.offload_activation,
         offload_model_state=args.offload_model_state,
-        sort_batch=args.sort_batch,
+        sort_batch=args.sort,
         pipeline_mode=convert_pipeline_mode(args.pmode),
     )
 

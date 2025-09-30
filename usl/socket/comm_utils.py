@@ -18,7 +18,7 @@ class SocketCommunicator:
         host="localhost",
         port=8888,
         is_server=False,
-        buffer_size=1024 * 4,
+        buffer_size=1024,
         rate_limit_mbps=0,
         **kwargs,
     ):

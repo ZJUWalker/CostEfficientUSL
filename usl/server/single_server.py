@@ -82,7 +82,7 @@ class SingleServer:
         self.communicator = SocketCommunicator(
             is_server=True,
             port=server_args.port,
-            buffer_size=1024 * 1024,  # 1MB
+            buffer_size=1024 * 4,  # 4KB
             rate_limit_mbps=server_args.effective_rate_limit(),
         )
 
@@ -191,19 +191,15 @@ class SingleServer:
         mb_idx: int,
     ) -> torch.Tensor:
         try:
-            self.profile_data[mb_idx].server_fwd_timestamp[0] = time.time()
+            self.profile_data[mb_idx].server_fwd_timestamp[0] = time.perf_counter()
             hidden_status_from_head = activation.to(self.server_device)
             hidden_status_from_head.requires_grad_(True)
             # hidden_status_from_head.retain_grad()
 
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
-            pos_emb = (
-                tuple(pos.to(self.server_device) for pos in position_embeddings)
-                if position_embeddings is not None
-                else None
-            )
+            pos_emb = tuple(pos.to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
 
-            fwd_start = time.time()
+            fwd_start = time.perf_counter()
             server_output: torch.Tensor = self.trunk_model(
                 hidden_states=hidden_status_from_head,
                 attention_mask=attention_mask,
@@ -211,8 +207,7 @@ class SingleServer:
             )
             if torch.cuda.is_available() and str(self.server_device).startswith("cuda"):
                 torch.cuda.synchronize(device=self.server_device)
-            self.compute_time += time.time() - fwd_start
-            self.profile_data[mb_idx].server_fwd_timestamp[1] = time.time()
+            self.compute_time += time.perf_counter() - fwd_start
             # Save context per token for later backward
             server_output = server_output.requires_grad_(True)
             self.ctx[token] = {
@@ -236,18 +231,17 @@ class SingleServer:
 
             server_output = ctx["server_output"]
             hidden_from_head = ctx["hidden_from_head"]
-            self.profile_data[mb_idx].server_bwd_timestamp[0] = time.time()
+            self.profile_data[mb_idx].server_bwd_timestamp[0] = time.perf_counter()
             server_grad = server_grad.to(self.server_device)
 
-            bwd_start_time = time.time()
+            bwd_start_time = time.perf_counter()
             server_output.backward(server_grad, retain_graph=False)
 
             grad_to_head = hidden_from_head.grad.cpu()
 
             if torch.cuda.is_available() and str(self.server_device).startswith("cuda"):
                 torch.cuda.synchronize(device=self.server_device)
-            self.compute_time += time.time() - bwd_start_time
-            self.profile_data[mb_idx].server_bwd_timestamp[1] = time.time()
+            self.compute_time += time.perf_counter() - bwd_start_time
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             return grad_to_head
@@ -264,30 +258,35 @@ class SingleServer:
             if not self.communicator.conn:
                 return
             while not self.stop_event.is_set():
+
                 try:
-                    response: Payload = self.activation_to_tail_queue.get(timeout=0.005)
+                    response: Payload = self.activation_to_tail_queue.get_nowait()
                     if response is not None:
-                        start_send_time = time.time()
+                        start_send_time = time.perf_counter()
                         self.communicator.send(response)
-                        end_send_time = time.time()
+                        end_send_time = time.perf_counter()
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[1] = end_send_time
                     else:
                         continue
                 except Empty:
                     pass
+                if self.server_args.pipeline_mode == PipelineMode.PIPE_DREAM_WC and not self.activation_to_tail_queue.empty():
+                    # insure all activations are sent before starting backward
+                    continue
                 try:
-                    response: Payload = self.gradient_to_head_queue.get(timeout=0.005)
+                    response: Payload = self.gradient_to_head_queue.get_nowait()
                     if response is not None:  # 可能是 None（队列空）
-                        start_send_time = time.time()
+                        start_send_time = time.perf_counter()
                         self.communicator.send(response)
-                        end_send_time = time.time()
+                        end_send_time = time.perf_counter()
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[1] = end_send_time
                     else:
                         continue
                 except Empty:
                     pass
+                time.sleep(0.001)
             print("_handle_server_send finished")
         except Exception as e:
             self.logger.error(f"Client {self.communicator.addr} error: {e}")
@@ -329,14 +328,12 @@ class SingleServer:
             self.shutdown()
 
     def _do_one_fwd_task(self, block=False) -> Payload:
-        fwd_wait_start = time.time()
-        data: Optional[Dict | Payload] = (
-            self.activation_from_head_queue.get_nowait() if not block else self.activation_from_head_queue.get(block)
-        )
+        fwd_wait_start = time.perf_counter()
+        data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait() if not block else self.activation_from_head_queue.get(block)
         # if isinstance(data, dict) and 'stop' in data.keys():
         #     print('Server requested stop')
         #     return data
-        self.idle_time += time.time() - fwd_wait_start
+        self.idle_time += time.perf_counter() - fwd_wait_start
 
         token = data.token
         group_id = data.group_id
@@ -374,15 +371,14 @@ class SingleServer:
                 is_activation=True,
             )
         )
+        self.profile_data[mb_idx].server_fwd_timestamp[1] = time.perf_counter()
         # has_fwd = True
         return data
 
     def _do_one_bwd_task(self, block=False) -> Payload:
-        bwd_wait_start = time.time()
-        data: Payload = (
-            self.gradient_from_tail_queue.get_nowait() if not block else self.gradient_from_tail_queue.get(block)
-        )
-        self.idle_time += time.time() - bwd_wait_start
+        bwd_wait_start = time.perf_counter()
+        data: Payload = self.gradient_from_tail_queue.get_nowait() if not block else self.gradient_from_tail_queue.get(block)
+        self.idle_time += time.perf_counter() - bwd_wait_start
 
         token = data.token
         group_id = data.group_id
@@ -391,17 +387,10 @@ class SingleServer:
         # mb_idx = int(data.get("mb_idx", 0))
         grad_to_client = self._backward(data.tensor, token=token, mb_idx=mb_idx)
 
-        gs = self.group_state.setdefault(group_id, {"total": 1, "done": 0, "zeroed": True})
+        gs = self.group_state.setdefault(group_id, {"total": data.mb_total, "done": 0, "zeroed": True})
         gs["done"] += 1
         total = int(gs.get("total", 1))
         done = int(gs["done"])
-
-        if done >= total:
-            torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
-            self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
-            self.group_state.pop(group_id, None)
-
         self.gradient_to_head_queue.put(
             Payload(
                 tensor=grad_to_client,
@@ -412,6 +401,13 @@ class SingleServer:
                 mb_total=total,
             )
         )
+        self.profile_data[mb_idx].server_bwd_timestamp[1] = time.perf_counter()
+        if done >= total:
+            print(f"Group {group_id} done,do step and purge grads")
+            torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+            self.group_state.pop(group_id, None)
         return data
 
     def _init_cuda(self):

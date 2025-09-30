@@ -38,7 +38,7 @@ class ClientArgs:
     async_io: bool = False
     offload_activation: bool = False
     offload_model_state: bool = False
-    sort_batch: bool = False
+    sort_batch: str = 'no'  # no,asc,desc
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
 
     def build_filename(self, prefix: str = "", ext: str = "json") -> str:
@@ -62,8 +62,8 @@ class ClientArgs:
             parts.append("oa")
         if self.offload_model_state:
             parts.append("os")
-        if self.sort_batch:
-            parts.append("sort")
+        if self.sort_batch != 'no':
+            parts.append(f"sort_{self.sort_batch}")
 
         base = "_".join(parts)
         # name = f"{prefix}{base}{suffix}.{ext}"
@@ -175,7 +175,7 @@ class Client:
         self.communicator = SocketCommunicator(
             is_server=False,
             port=client_args.port,
-            buffer_size=1024 * 1024,  # 1MB
+            buffer_size=1024 * 4,  # 4KB
             rate_limit_mbps=client_args.rate_mbps,
         )
 
@@ -207,9 +207,7 @@ class Client:
         # save essential tensors to dict for tail and bwd phase to use
         attn_gpu = output[1] if (len(output) > 1 and output[1] is not None) else None
         if attn_gpu is not None:
-            self.pin_on_gpu_tensors_idx.append(
-                attn_gpu.data_ptr()
-            )  # pos_embedding和attn_mask在tail fwd的时候需要，所以不能卸载
+            self.pin_on_gpu_tensors_idx.append(attn_gpu.data_ptr())  # pos_embedding和attn_mask在tail fwd的时候需要，所以不能卸载
         self.atten_mask_dict[mb_idx] = attn_gpu
         pos_gpu = output[2] if (len(output) > 2 and output[2] is not None) else None
         self.pos_embedding_dict[mb_idx] = pos_gpu
@@ -282,13 +280,15 @@ class Client:
             return []
 
         # 按长度排序和分块
-        sequences.sort(key=lambda x: x[0].size(0), reverse=True)
+        reverse = self.client_args.sort_batch == "desc"
+        sequences.sort(key=lambda x: x[0].size(0), reverse=reverse)
 
         chunks = []
+        self.client_args.max_seq_len = 0
         for start in range(0, len(sequences), micro_bs):
             batch = sequences[start : start + micro_bs]
             max_len = max(seq[0].size(0) for seq in batch)
-
+            self.client_args.max_seq_len = max(self.client_args.max_seq_len, max_len)
             # 更高效的批处理方式
             ids_batch = torch.full((len(batch), max_len), pad_token_id, dtype=input_ids.dtype, device=input_ids.device)
             mask_batch = torch.zeros(len(batch), max_len, dtype=attention_mask.dtype, device=attention_mask.device)
@@ -320,7 +320,7 @@ class Client:
         m: torch.Tensor,
         y: torch.Tensor,
     ):
-        self.profile_data[mb_idx].head_fwd_timestamp[0] = time.time()
+        self.profile_data[mb_idx].head_fwd_timestamp[0] = time.perf_counter()
         # if self.client_args.offload_activation:
         #     with self.head_activation_collector:
         #         head_outs = self.head_model.forward(x, m)
@@ -340,7 +340,7 @@ class Client:
             is_activation=True,
             phase="FWD" if mb_idx < grad_accum_steps - 1 else "BWD",
         )
-        self.profile_data[mb_idx].head_fwd_timestamp[1] = time.time()
+        self.profile_data[mb_idx].head_fwd_timestamp[1] = time.perf_counter()
         return payload
 
     def _tail_fwd_micro(self, server_forward_output: Payload) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -350,7 +350,7 @@ class Client:
         mb_idx = server_forward_output.mb_idx
         mb_total = server_forward_output.mb_total
 
-        self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.time()
+        self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.perf_counter()
         activation_cpu: torch.Tensor = server_forward_output.tensor
         activation_to_tail = activation_cpu.to(self.client_device).requires_grad_(True)
         # tail forward
@@ -361,7 +361,7 @@ class Client:
             labels=self.labels_dict[mb_idx],
         )
         torch.cuda.synchronize()
-        self.profile_data[mb_idx].tail_fwd_timestamp[1] = time.time()
+        self.profile_data[mb_idx].tail_fwd_timestamp[1] = time.perf_counter()
         # 可选：按 accum 步数归一化，保证与“单大 batch 一次性训练”的梯度数值一致
         loss = output.loss / mb_total if self.normalize_loss else output.loss
         self.losses.append(loss.item())
@@ -376,7 +376,7 @@ class Client:
         mb_idx: int,
         mb_total: int,
     ) -> Tuple[Payload, torch.Tensor]:
-        self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.time()
+        self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.perf_counter()
         loss.backward()
         torch.cuda.synchronize()
         grad_payload = self._to_cpu_payload(
@@ -388,7 +388,7 @@ class Client:
             is_activation=False,
             phase="BWD" if mb_idx < mb_total - 1 else "FWD",
         )
-        self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.time()
+        self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.perf_counter()
         return grad_payload
 
     def _head_bwd_micro(self, server_bwd_output: Payload):
@@ -396,13 +396,13 @@ class Client:
         mb_idx = server_bwd_output.mb_idx
         grad_cpu: torch.Tensor = server_bwd_output.tensor
         # load grad and activation
-        self.profile_data[mb_idx].head_bwd_timestamp[0] = time.time()
+        self.profile_data[mb_idx].head_bwd_timestamp[0] = time.perf_counter()
         grad_to_head = grad_cpu.to(self.client_device)
         head_activation = self.head_fwd_activation_dict[mb_idx]
         # real head model backward
         head_activation.backward(grad_to_head)
         torch.cuda.synchronize()
-        self.profile_data[mb_idx].head_bwd_timestamp[1] = time.time()
+        self.profile_data[mb_idx].head_bwd_timestamp[1] = time.perf_counter()
         # remove not needed tensors to save memory
         del (
             self.head_fwd_activation_dict[mb_idx],
@@ -431,9 +431,9 @@ class Client:
                 # ):
                 payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
-                    start_send = time.time()
+                    start_send = time.perf_counter()
                     self.communicator.send(payload)
-                    end_time = time.time()
+                    end_time = time.perf_counter()
                     if isinstance(payload, dict) and "stop" in payload:
                         print("send stop flag")
                         continue
@@ -453,9 +453,9 @@ class Client:
                 payload = self.gradient_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
-                    start_send = time.time()
+                    start_send = time.perf_counter()
                     self.communicator.send(payload)
-                    end_time = time.time()
+                    end_time = time.perf_counter()
                     mb_idx = payload.mb_idx
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[0] = start_send
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[1] = end_time
@@ -473,9 +473,6 @@ class Client:
         while not self.stop_event.is_set():
             try:
                 data: Optional[Dict | Payload] = self.communicator.receive()
-            except socket.timeout:
-                print("socket timeout")
-                continue
             except Exception as e:
                 break
             if data is None:
@@ -500,9 +497,7 @@ class Client:
     def _do_gpipe(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         for mb_idx in range(grad_accum_steps):
             #  tail fwd and send
-            payload = self._head_fwd_micro(
-                group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx]
-            )
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
             pass
@@ -586,18 +581,74 @@ class Client:
             pass
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
-        self.max_mem_allocated_mb = max(
-            self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2
-        )
+        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss
 
     def _do_pipedream_wc(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         for mb_idx in range(grad_accum_steps):
             #  tail fwd and send
-            payload = self._head_fwd_micro(
-                group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx]
-            )
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
+            self.labels_dict[mb_idx] = micro_labels[mb_idx]
+            self.activation_to_server_queue.put(payload)
+            pass
+
+        batch_loss = 0
+        no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
+        no_head_bwd_mb_list = [False] * grad_accum_steps
+        while True:
+            if not all(no_tail_fwd_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_activation_payload = self.activation_from_server_queue.get(timeout=0.001)
+                    if server_activation_payload is not None:
+                        mb_idx = server_activation_payload.mb_idx
+                        no_tail_fwd_bwd_mb_list[mb_idx] = True
+                        activation_to_tail, loss = self._tail_fwd_micro(server_activation_payload)
+                        batch_loss += loss.item()
+                        grad_payload = self._tail_bwd_micro(
+                            loss,
+                            activation_to_tail,
+                            token=server_activation_payload.token,
+                            group_id=group_id,
+                            mb_idx=mb_idx,
+                            mb_total=grad_accum_steps,
+                        )
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} tail forward and backward')
+                        self.gradient_to_server_queue.put(grad_payload)
+                except Empty:
+                    pass
+            else:
+                break
+            # pass
+        while True:
+            if not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
+                try:
+                    server_grad_payload = self.gradient_from_server_queue.get(timeout=0.001)
+                    if server_grad_payload is not None:
+                        mb_idx = server_grad_payload.mb_idx
+                        no_head_bwd_mb_list[mb_idx] = True
+                        self._head_bwd_micro(server_grad_payload)
+                        # print(f'Global batch id -> {global_batch_idx} finished micro {mb_idx} head backward')
+                except Empty:
+                    continue
+            else:
+                # print(f'exit global batch id -> {global_batch_idx}')
+                break
+            time.sleep(0.001)
+            pass
+        # model step
+        self.optimizer_tail.step()
+        self.optimizer_tail.zero_grad(set_to_none=True)
+        self.optimizer_head.step()
+        self.optimizer_head.zero_grad(set_to_none=True)
+        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        torch.cuda.reset_peak_memory_stats(self.client_device)
+        return batch_loss
+
+    def _do_pipedream_wc_eager(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
+        for mb_idx in range(grad_accum_steps):
+            #  tail fwd and send
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
             pass
@@ -650,23 +701,17 @@ class Client:
         self.optimizer_tail.zero_grad(set_to_none=True)
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
-        self.max_mem_allocated_mb = max(
-            self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2
-        )
+        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss
 
-    def _do_pipedream_strict(
-        self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx
-    ):
+    def _do_pipedream_strict(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         warmup_steps = grad_accum_steps // 2
         # warmup phase for head model fwd
         curr_head_fwd_mb_idx = 0
         for mb_idx in range(warmup_steps):
             #  head fwd and send
-            payload = self._head_fwd_micro(
-                group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx]
-            )
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
             curr_head_fwd_mb_idx += 1
@@ -735,9 +780,7 @@ class Client:
         self.optimizer_tail.zero_grad(set_to_none=True)
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
-        self.max_mem_allocated_mb = max(
-            self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2
-        )
+        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss
 
@@ -745,9 +788,7 @@ class Client:
         # micro batch head fwd and send
         batch_loss = 0
         for mb_idx in range(grad_accum_steps):
-            payload = self._head_fwd_micro(
-                group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx]
-            )
+            payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
             # wait for server activation
@@ -778,17 +819,13 @@ class Client:
         server_bwd_time_avg = 0
         tail_fwd_time_avg = 0
         tail_bwd_time_avg = 0
-        assert len(self.profile_data) == len(
-            server_profile_data
-        ), "error in profile data length between client and server"
+        assert len(self.profile_data) == len(server_profile_data), "error in profile data length between client and server"
         for client_item, server_item in zip(self.profile_data, server_profile_data):
             client_item.server_fwd_timestamp = server_item.server_fwd_timestamp
             client_item.server_bwd_timestamp = server_item.server_bwd_timestamp
-            client_item.server_bwd_send_timestamp = server_item.server_bwd_send_timestamp
             client_item.server_fwd_send_timestamp = server_item.server_fwd_send_timestamp
-            client_item.train_time_duration_ms = round(
-                (client_item.head_bwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000, 2
-            )
+            client_item.server_bwd_send_timestamp = server_item.server_bwd_send_timestamp
+            client_item.train_time_duration_ms = round((client_item.head_bwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000, 2)
             local_compute_time_ms += (
                 client_item.head_fwd_timestamp[1]
                 - client_item.head_fwd_timestamp[0]
@@ -823,9 +860,7 @@ class Client:
         # 计算平均通信时间
 
         # 计算batch训练时间
-        batch_train_time_ms = round(
-            (self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2
-        )
+        batch_train_time_ms = round((self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2)
         # 计算本地计算时间
 
         # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
@@ -872,19 +907,19 @@ class Client:
         # 解析与 pad（先 pad 再切 micro，保持序列对齐）
         input_ids = batch["input_ids"].to(self.client_device)
         attention_mask = batch["attention_mask"].to(self.client_device)
+        # if not self.client_args.sort_batch:
         input_ids, attention_mask = pad_inputs(input_ids, attention_mask, self.client_args.max_seq_len)
         labels_full = input_ids  # 自回归
 
         total_bs = input_ids.size(0)
         micro_bs, grad_accum_steps = self._resolve_micro_bs(total_bs)
         self.logger.info(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
-        print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
         self.profile_data = [GanttChartData(mini_batch_idx=i) for i in range(grad_accum_steps)]
         # —— 每个“大 batch”一次 step —— 梯度先清零
         self.optimizer_head.zero_grad(set_to_none=True)
         self.optimizer_tail.zero_grad(set_to_none=True)
 
-        if self.client_args.sort_batch:
+        if self.client_args.sort_batch != 'no':
             micro_batches = self._split_micro_with_mask(
                 input_ids,
                 attention_mask,
@@ -906,22 +941,15 @@ class Client:
         self.stop_event.clear()
         # --------------------------------------------------------main loop--------------------------------------------------------
         if self.client_args.pipeline_mode == PipelineMode.GPIPE:
-            batch_loss = self._do_gpipe(
-                grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx
-            )
+            batch_loss = self._do_gpipe(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
         elif self.client_args.pipeline_mode == PipelineMode.NAIVE:
-            batch_loss = self._do_sequential(
-                grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx
-            )
+            batch_loss = self._do_sequential(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
         elif self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
-            batch_loss = self._do_pipedream_strict(
-                grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx
-            )
-        elif self.client_args.pipeline_mode in [PipelineMode.PIPE_DREAM_WC, PipelineMode.PIPE_DREAM_WC_EAGER]:
-            # 这两个方法是Server上的区别
-            batch_loss = self._do_pipedream_wc(
-                grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx
-            )
+            batch_loss = self._do_pipedream_strict(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        elif self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_WC:
+            batch_loss = self._do_pipedream_wc(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
+        elif self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_WC_EAGER:
+            batch_loss = self._do_pipedream_wc_eager(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
         # --------------------------------------------------------main loop end--------------------------------------------------------
         # do step
         # self.optimizer_head.step()
@@ -931,6 +959,7 @@ class Client:
         self.logger.info(
             f"[Client] big batch {global_batch_idx}: loss={batch_loss/grad_accum_steps:.4f},max mem alloc: {torch.cuda.max_memory_allocated(device=self.client_device)/1024**2:.2f} MB",
         )
+        print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps},loss = {batch_loss/grad_accum_steps:.4f}")
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
         # print(self.profile_data)
         if global_batch_idx == 5:
@@ -941,16 +970,14 @@ class Client:
 
     def train_epoch(self, profile: bool = False):
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
-        start_time = time.time()
+        start_time = time.perf_counter()
         send_future = self.main_executor.submit(self._head_client_send)
         recv_future = self.main_executor.submit(self._handle_server_send)
         for epoch in range(self.local_ep):
             self.logger.info(f"[Client] start (overlap+accum) epoch {epoch+1}, len: {len(self.train_loader)}")
             with torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-                schedule=torch.profiler.schedule(
-                    wait=1, warmup=2, active=2, repeat=0
-                ),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
+                schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
                 on_trace_ready=(
                     torch.profiler.tensorboard_trace_handler("./log/trace", worker_name="client") if profile else None
                 ),  # 保存到 TensorBoard
@@ -972,5 +999,5 @@ class Client:
         recv_future.result()
         self.communicator.close()
         self.main_executor.shutdown(wait=True)
-        end_time = time.time()
+        end_time = time.perf_counter()
         self.logger.info(f"[Client Finished] epoch time: {end_time - start_time:.2f} s")
