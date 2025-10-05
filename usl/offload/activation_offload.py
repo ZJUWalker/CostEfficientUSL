@@ -1,7 +1,7 @@
 # This file is largely inspired by and partially follows the structure of
 # ``transformer_engine.pytorch.cpu_offload`` in
 # https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/pytorch/cpu_offload.py
-"""Functionality for CPU offloading of tensors saved for backward pass."""
+"""Functionality for CPU offloading of activation tensors saved for backward pass."""
 import math
 import warnings
 from typing import Any, Tuple
@@ -173,14 +173,14 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         self.current_mb_idx = -1
 
     def on_minibatch_commit_forward(self):
-        """On group commit forward."""
-        # finishing up with updating current group and tensor count
+        """On minibatch commit forward."""
+        # finishing up with updating current minibatch and tensor count
         self.current_mb_idx += 1  # increment
         self.tensor_count_current_mb_idx = 0  # reset
 
     def on_minibatch_commit_backward(self):
-        """On group commit backward."""
-        # finishing up with updating current group and tensor count
+        """On minibatch commit backward."""
+        # finishing up with updating current minibatch and tensor count
         self.current_mb_idx += 1
         assert self.current_mb_idx >= 0
 
@@ -212,7 +212,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
             state = SynchronizedGroupOffloadHandler.offload(tensor)
             self.tensor_tag_to_state[tensor_tag] = state
         else:
-            # will be offloaded together after group commit
+            # will be offloaded together after minibatch commit
             self.tensor_tag_to_state[tensor_tag] = tensor
         return tensor_tag
 
@@ -249,13 +249,12 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             debug=debug,
         )
         self.num_prefetch_mb = num_minibatch_prefetch
-        # self.num_offload_sync_mb = num_offload_sync_group
-
         self.offloaded_tensor_buffers = [[] for _ in range(num_minibatch)]
 
         # allocate streams and events for synchronization
         self.d2h_stream = offload_stream if offload_stream is not None else torch.cuda.Stream()
         self.h2d_stream = load_stream if load_stream is not None else torch.cuda.Stream()
+        self.compute_stream = torch.cuda.current_stream()
         self.h2d_finish_events = []
         self.d2h_finish_events = []
         self.compute_stream_bwd_start_events = []
@@ -276,7 +275,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             if self.current_mb_idx < self.num_minibatch:
                 # We use the data_ptr as the tensor tag to eliminate some views of the same tensor.
                 # It's worth noting that we preserve tensors, so the data pointers of different tensors
-                # within the same group will not be identical.
+                # within the same minibatch will not be identical.
                 tensor_tag = (self.current_mb_idx, tensor.data_ptr())
                 if tensor_tag not in self.tensor_tag_to_state:
                     self.tensor_tag_to_state[tensor_tag] = TensorState(tensor)
@@ -313,9 +312,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         return tensor
 
     def bulk_offload_group(self, mb_to_offload: int):
-        # the copying of this group should wait for the computation stream
-        self.d2h_stream.wait_stream(torch.cuda.current_stream())
-        """Bulk offload group."""
+        # the copying of this minibatch should wait for the computation stream
+        self.d2h_stream.wait_stream(self.compute_stream)
+        """Bulk offload minibatch."""
         with torch.cuda.stream(self.d2h_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 mb_idx, _ = tensor_tag
@@ -331,43 +330,27 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # print(f"offloading tensor size: {self.total_offload_size / (1024.0**3):.5f} GiB")
 
     def synchronize_on_group_commit_forward(self, current_mb_idx: int):
-        """Synchronize on group commit forward."""
+        """Synchronize on minibatch commit forward."""
         if current_mb_idx < self.num_minibatch:
             # perform bulk offloading
             self.bulk_offload_group(current_mb_idx)
             self.d2h_stream.record_event(self.d2h_finish_events[current_mb_idx])
+        # wait for the previous minibatch to finish offloading,we need to clear the GPU buffer of the previous minibatch
         if current_mb_idx > 0 and current_mb_idx < self.num_minibatch:
             pre_mb_idx = current_mb_idx - 1
-            torch.cuda.current_stream().wait_event(self.d2h_finish_events[pre_mb_idx])
-            # release tensors since the copying has finished
+            self.compute_stream.wait_event(self.d2h_finish_events[pre_mb_idx])
+            # release tensors since the offloading has finished
             self.offloaded_tensor_buffers[pre_mb_idx].clear()
-        # if current_mb_idx == self.num_minibatch - 1:
-        #     # wait for the last offload to finish
-        #     torch.cuda.current_stream().wait_event(self.d2h_finish_events[current_mb_idx])
-        #     self.offloaded_tensor_buffers[current_mb_idx].clear()
-
-        # for mb_idx in range(self.num_minibatch):
-        #     finish_offload_group = math.ceil((mb_idx + 1) * self.num_offload_sync_mb)
-        #     if finish_offload_group <= current_mb_idx and len(self.offloaded_tensor_buffers[mb_idx]) > 0:
-        #         # This is very important. The tensor needs to be released for use
-        #         # by other streams only after the copy has finished.
-        #         torch.cuda.current_stream().wait_event(self.d2h_finish_events[mb_idx])
-        #         # release tensors since the copying has finished
-        #         self.offloaded_tensor_buffers[mb_idx].clear()
 
     def on_minibatch_commit_forward(self):
         """This function will cause host device synchronization"""
         # handle synchronization events
         self.synchronize_on_group_commit_forward(self.current_mb_idx)
 
-        # during forward, the next_group_to_fetch always points to the min of
-        # the last commited group, and the last offloaded group
-        # self.next_group_to_fetch = min(self.current_mb_idx, self.num_minibatch - 1)
-
         super().on_minibatch_commit_forward()
 
     def bulk_reload_group(self, mb_to_reload: int):
-        """Bulk reload group."""
+        """Bulk reload minibatch."""
         assert mb_to_reload < self.num_minibatch
 
         # allocating tensors in the current stream allows subsequent ops in current streams
@@ -386,13 +369,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         state.reload()
 
     def on_minibatch_commit_backward(self):
-        # first decrement the current group.
-        # after last commit in forward, the group will +1; in backward it -1.
-        # Finally it should be decremented to 0.
-        # clear the buffer of the last mb idx
+        # first we need to wait for the last minibatch activation to finish offloading
         if self.current_mb_idx == -1:
             self.h2d_stream.wait_event(self.d2h_finish_events[self.num_minibatch - 1])
             self.offloaded_tensor_buffers[self.num_minibatch - 1].clear()
+        # start reloading the activations
         self.current_mb_idx += 1
         assert self.current_mb_idx >= 0 and self.current_mb_idx < self.num_minibatch
         if self.current_mb_idx == self.num_minibatch - 1:
@@ -403,14 +384,16 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 "num_offload_sync_layers * num_offload_layers + 1 cannot be greater than" " the number of all layers."
             )
 
-        # decide the range of group to prefetch
-        should_prefetch_until_mb_idx = self.current_mb_idx + self.num_prefetch_mb
+        # decide the range of minibatches to prefetch
+        should_prefetch_until_mb_idx = (
+            self.current_mb_idx + self.num_prefetch_mb
+        )  # always set to 2 for memory saving,and it's enough to be overlapped for now.
         should_prefetch_until_mb_idx = min(should_prefetch_until_mb_idx, self.num_minibatch)
         print(f"prefetching  from mb_idx {self.next_mb_to_fetch} until mb_idx {should_prefetch_until_mb_idx}")
         # do prefetch minibatch
         for mb_idx_to_prefetch in range(self.next_mb_to_fetch, should_prefetch_until_mb_idx):
-            # record the event in the compute stream, for h2d to wait
-            torch.cuda.current_stream().record_event(self.compute_stream_bwd_start_events[mb_idx_to_prefetch])
+            # record the event in the compute stream, for h2d to wait ( wait for pre minibatch bwd to finish)
+            self.compute_stream.record_event(self.compute_stream_bwd_start_events[mb_idx_to_prefetch])
 
             # start of h2d should wait for the compute and the d2h
             self.h2d_stream.wait_event(self.compute_stream_bwd_start_events[mb_idx_to_prefetch])
@@ -421,9 +404,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # record an event for the backward of this layer to wait
             self.h2d_stream.record_event(self.h2d_finish_events[mb_idx_to_prefetch])
 
-        # always is set to -1 at the end of the backward
+        # update the next mb to prefetch
         self.next_mb_to_fetch = min(self.num_minibatch, should_prefetch_until_mb_idx)
 
-        # wait for the current group
+        # wait for the current minibatch to finish loading
         if self.current_mb_idx < self.num_minibatch:
-            torch.cuda.current_stream().wait_event(self.h2d_finish_events[self.current_mb_idx])
+            self.compute_stream.wait_event(self.h2d_finish_events[self.current_mb_idx])
