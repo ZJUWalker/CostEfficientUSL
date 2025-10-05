@@ -44,7 +44,7 @@ Thumbs.db       # Windows 系统文件
 
 # 忽略 Jupyter Notebook 的检查点
 .ipynb_checkpoints/
-
+*/backup/
 # 忽略输出文件
 /output/        # 结果文件目录
 */log/

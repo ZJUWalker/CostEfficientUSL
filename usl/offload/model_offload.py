@@ -1,12 +1,19 @@
 import torch
 import torch.nn as nn
 from typing import List, Dict, Tuple
+import time
 
 
 class ModelParamOffload:
 
     def __init__(
-        self, base_model: nn.Module, offload_threshold: int = 0, device='cuda', load_stream=None, offload_stream=None, except_tensor_idx_list=[]
+        self,
+        base_model: nn.Module,
+        offload_threshold: int = 0,
+        device="cuda",
+        load_stream=None,
+        offload_stream=None,
+        except_tensor_idx_list=[],
     ):
         self.base_model = base_model
         self.offload_threshold = offload_threshold  # Byte
@@ -19,7 +26,9 @@ class ModelParamOffload:
 
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
-        self.except_tensor_idx_list: List[int] = except_tensor_idx_list  # tensor_idx list to be excluded from offloading
+        self.except_tensor_idx_list: List[int] = (
+            except_tensor_idx_list  # tensor_idx list to be excluded from offloading
+        )
         self._init_param_dict()
 
     def add_except_tensor(self, tensor: torch.Tensor):
@@ -44,25 +53,30 @@ class ModelParamOffload:
 
     # offload model parameters and optimizer states from GPU to CPU
     def offload(self, async_offload=False):
+        start = time.perf_counter()
         stream = self.offload_stream if self.offload_stream else torch.cuda.current_stream(self.device)
         with torch.cuda.stream(stream):
             # Offload model parameters to CPU
             for idx, tensor in self.model_param_on_gpu.items():
                 if idx in self.except_tensor_idx_list:
                     continue
-                if tensor.device.type == 'cuda' and tensor.numel() * tensor.element_size() >= self.offload_threshold:
-                    t_cpu = torch.empty_like(tensor, device='cpu', pin_memory=True)
+                if tensor.device.type == "cuda" and tensor.numel() * tensor.element_size() >= self.offload_threshold:
+                    t_cpu = torch.empty_like(tensor, device="cpu", pin_memory=True)
                     t_cpu.data.copy_(tensor.data, non_blocking=True)
                     self.model_param_on_cpu[id(tensor)] = t_cpu
 
             if async_offload:
                 # record offload event
                 self.offload_event.record(stream)
+                end = time.perf_counter()
+                print(f"Offload time: {end - start:.4f}s")
             else:
                 # wait for all tensors offloaded
                 torch.cuda.synchronize(self.device)
                 # release GPU memory
                 self._release_gpu_memory()
+                end = time.perf_counter()
+                print(f"Offload time: {end - start:.4f}s")
 
     # wait for all offloaded states to finish
     def wait_offload(self):
@@ -86,7 +100,7 @@ class ModelParamOffload:
             for idx, tensor in self.model_param_on_cpu.items():
                 if idx in self.except_tensor_idx_list:
                     continue
-                if tensor.device.type == 'cpu':
+                if tensor.device.type == "cpu":
                     t_gpu = torch.empty_like(tensor, device=self.device)  # no pin_memory on GPU
                     t_gpu.data.copy_(tensor.data, non_blocking=True)
                     self.model_param_on_gpu[idx].data = t_gpu.data
