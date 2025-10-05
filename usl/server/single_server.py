@@ -208,6 +208,7 @@ class SingleServer:
                 position_embeddings=pos_emb,
             )
             torch.cuda.synchronize(device=self.server_device)
+            # print(f'[{mb_idx}] fwd time {time.perf_counter() - fwd_start:.6f} s')
             self.compute_time += time.perf_counter() - fwd_start
             # Save context per token for later backward
             server_output = server_output.requires_grad_(True)
@@ -217,7 +218,6 @@ class SingleServer:
             }
 
             activation_to_tail = server_output.detach().cpu()
-            torch.cuda.empty_cache()
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Forward failed (token={token}): {e}")
@@ -241,7 +241,7 @@ class SingleServer:
 
             torch.cuda.synchronize(device=self.server_device)
             self.compute_time += time.perf_counter() - bwd_start_time
-            torch.cuda.empty_cache()
+            # print(f'[{mb_idx}] bwd time {time.perf_counter() - bwd_start_time:.6f} s')
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Backward failed (token={token}): {e}")
@@ -328,18 +328,12 @@ class SingleServer:
     def _do_one_fwd_task(self, block=False) -> Payload:
         fwd_wait_start = time.perf_counter()
         data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait() if not block else self.activation_from_head_queue.get(block)
-        # if isinstance(data, dict) and 'stop' in data.keys():
-        #     print('Server requested stop')
-        #     return data
         self.idle_time += time.perf_counter() - fwd_wait_start
 
         token = data.token
         group_id = data.group_id
         mb_total = data.mb_total
         mb_idx = data.mb_idx
-        # group_id = str(data.get("group_id", "default"))
-        # mb_total = int(data.get("mb_total", 1))
-        # mb_idx = int(data.get("mb_idx", 0))
         if self.profile_data == []:
             self.profile_data = [GanttChartData(mini_batch_idx=i) for i in range(mb_total)]
         # Group init / maintenance
