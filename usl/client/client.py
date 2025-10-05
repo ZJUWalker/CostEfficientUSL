@@ -29,7 +29,7 @@ class ClientArgs:
     model: str = "meta-llama/llama3.2-1b"
     batch_size: int = 4
     max_seq_len: int = 256
-    step: int = 10
+    step: int = 5
     dataset: str = "gsm8k"
     epoch: int = 1
     split_point: int = 2
@@ -662,7 +662,7 @@ class Client:
         print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps},loss = {batch_loss/grad_accum_steps:.4f}")
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
         # print(self.profile_data)
-        if global_batch_idx == 5:
+        if global_batch_idx == self.client_args.step:
             print(f"client finished training and need reduce profile data")
             self.activation_to_server_queue.put({"stop": True})
         # print(f'global batch id -> {global_batch_idx} finished training')

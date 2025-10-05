@@ -90,6 +90,8 @@ class SingleServer:
         self.compute_time = 0.0
         self.idle_time = 0.0
         self.profile_data: List[GanttChartData] = []
+        self.start_event = torch.cuda.Event(enable_timing=True)
+        self.end_event = torch.cuda.Event(enable_timing=True)
 
         # ---- Executors & coordination
         self.main_executor: Optional[ThreadPoolExecutor] = None
@@ -205,8 +207,7 @@ class SingleServer:
                 attention_mask=attention_mask,
                 position_embeddings=pos_emb,
             )
-            if torch.cuda.is_available() and str(self.server_device).startswith("cuda"):
-                torch.cuda.synchronize(device=self.server_device)
+            torch.cuda.synchronize(device=self.server_device)
             self.compute_time += time.perf_counter() - fwd_start
             # Save context per token for later backward
             server_output = server_output.requires_grad_(True)
@@ -216,8 +217,7 @@ class SingleServer:
             }
 
             activation_to_tail = server_output.detach().cpu()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Forward failed (token={token}): {e}")
@@ -239,11 +239,9 @@ class SingleServer:
 
             grad_to_head = hidden_from_head.grad.cpu()
 
-            if torch.cuda.is_available() and str(self.server_device).startswith("cuda"):
-                torch.cuda.synchronize(device=self.server_device)
+            torch.cuda.synchronize(device=self.server_device)
             self.compute_time += time.perf_counter() - bwd_start_time
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Backward failed (token={token}): {e}")
@@ -458,7 +456,7 @@ class SingleServer:
                     continue
                 if data.mb_idx == data.mb_total // 2 - 1:
                     break
-            # ---- Fully 1F1B phase ----
+            # ---- Fully 1F1B phase ----f
             num_1f1b = 0
             while not self.stop_event.is_set():
                 # --- backward one minibatch ---
