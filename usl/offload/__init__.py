@@ -1,5 +1,3 @@
-from .tensor_offload import TensorOffload
-from .activation_offload import ActivationOffload
 from .model_offload import ModelParamOffload
 from .optimizer_offload import OptimizerStateOffload
 

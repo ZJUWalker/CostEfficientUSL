@@ -389,7 +389,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             self.current_mb_idx + self.num_prefetch_mb
         )  # always set to 2 for memory saving,and it's enough to be overlapped for now.
         should_prefetch_until_mb_idx = min(should_prefetch_until_mb_idx, self.num_minibatch)
-        print(f"prefetching  from mb_idx {self.next_mb_to_fetch} until mb_idx {should_prefetch_until_mb_idx}")
+        # print(f"prefetching  from mb_idx {self.next_mb_to_fetch} until mb_idx {should_prefetch_until_mb_idx}")
         # do prefetch minibatch
         for mb_idx_to_prefetch in range(self.next_mb_to_fetch, should_prefetch_until_mb_idx):
             # record the event in the compute stream, for h2d to wait ( wait for pre minibatch bwd to finish)

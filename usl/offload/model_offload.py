@@ -23,12 +23,11 @@ class ModelParamOffload:
         # self.swap_stream = torch.cuda.Stream(device) if swap_stream is None else swap_stream
         self.load_stream = load_stream
         self.offload_stream = offload_stream
+        self.compute_stream = torch.cuda.current_stream(self.device)
 
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
-        self.except_tensor_idx_list: List[int] = (
-            except_tensor_idx_list  # tensor_idx list to be excluded from offloading
-        )
+        self.except_tensor_idx_list: List[int] = except_tensor_idx_list  # tensor_idx list to be excluded from offloading
         self._init_param_dict()
 
     def add_except_tensor(self, tensor: torch.Tensor):
@@ -54,7 +53,8 @@ class ModelParamOffload:
     # offload model parameters and optimizer states from GPU to CPU
     def offload(self, async_offload=False):
         start = time.perf_counter()
-        stream = self.offload_stream if self.offload_stream else torch.cuda.current_stream(self.device)
+        stream = self.offload_stream if self.offload_stream else self.compute_stream
+        stream.wait_stream(self.compute_stream)  # offload should be done after compute
         with torch.cuda.stream(stream):
             # Offload model parameters to CPU
             for idx, tensor in self.model_param_on_gpu.items():
@@ -68,20 +68,16 @@ class ModelParamOffload:
             if async_offload:
                 # record offload event
                 self.offload_event.record(stream)
-                end = time.perf_counter()
-                print(f"Offload time: {end - start:.4f}s")
             else:
                 # wait for all tensors offloaded
-                torch.cuda.synchronize(self.device)
+                self.compute_stream.wait_stream(stream)
                 # release GPU memory
                 self._release_gpu_memory()
-                end = time.perf_counter()
-                print(f"Offload time: {end - start:.4f}s")
 
     # wait for all offloaded states to finish
     def wait_offload(self):
-        if self.offload_stream != torch.cuda.current_stream(self.device):
-            torch.cuda.current_stream(self.device).wait_event(self.offload_event)
+        if self.offload_stream != self.compute_stream:
+            self.compute_stream.wait_stream(self.offload_stream)
             self._release_gpu_memory()
 
     def _release_gpu_memory(self):
@@ -90,11 +86,12 @@ class ModelParamOffload:
             if idx in self.except_tensor_idx_list:
                 continue
             self.model_param_on_gpu[idx].data = torch.empty(0)
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
     # reload model parameters and optimizer states from CPU to GPU
     def reload(self, async_reload=False):
-        stream = self.load_stream if self.load_stream else torch.cuda.current_stream(self.device)
+        stream = self.load_stream if self.load_stream else self.compute_stream
+        stream.wait_stream(self.compute_stream)  # reload should be done after compute
         with torch.cuda.stream(stream):
             # Reload model parameters from CPU to GPU
             for idx, tensor in self.model_param_on_cpu.items():
@@ -109,14 +106,14 @@ class ModelParamOffload:
                 self.reload_event.record(stream)
             else:
                 # wait for all tensors reloaded
-                torch.cuda.synchronize(self.device)
+                self.compute_stream.wait_stream(stream)
                 # release CPU memory
                 self.model_param_on_cpu.clear()
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
 
     def wait_reload(self):
-        if self.load_stream != torch.cuda.current_stream(self.device):
-            torch.cuda.current_stream(self.device).wait_event(self.reload_event)
+        if self.load_stream != self.compute_stream:
+            self.compute_stream.wait_event(self.reload_event)
             # Clear CPU memory
             self.model_param_on_cpu.clear()
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
