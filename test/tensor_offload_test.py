@@ -42,15 +42,11 @@ def _init():
     # tail_model.train()
     head_optimizer = torch.optim.Adam(head_model.parameters(), lr=0.001)
     tail_optimizer = torch.optim.Adam(tail_model.parameters(), lr=0.001)
-    tokenizer = GPT2Tokenizer.from_pretrained("data/models/gpt/gpt2-large")
-    tokenizer.pad_token = tokenizer.eos_token
-    client_dataloaders = load_dataset(tokenizer=tokenizer, client_ids=[0], batch_size=4, max_seq_len=256)
-    dataloader = client_dataloaders[0]['train']  # 默认只取第一个客户端数据
-    return head_model, tail_model, head_optimizer, tail_optimizer, tokenizer, dataloader
+    return head_model, tail_model, head_optimizer, tail_optimizer
 
 
 def test_no_offload():
-    head_model, tail_model, head_optimizer, tail_optimizer, tokenizer, dataloader = _init()
+    head_model, tail_model, head_optimizer, tail_optimizer = _init()
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
@@ -67,26 +63,22 @@ def test_no_offload():
             print("total iter------", i + 1)
             # head fwd
             print("head fwd")
-            for idx, batch in enumerate(dataloader):
-                input_ids = batch["input_ids"].to(device)
+            for j in range(mini_batch_num):
+                input_ids = torch.randint(0, 10000, (1, 512), device=device)
                 labels = input_ids
                 output = head_model(input_ids=input_ids, labels=labels)
                 loss = output.loss
                 head_losses.append(loss)
-                if idx == mini_batch_num - 1:
-                    break
             # tail fwd
             # time.sleep(0.5)
             print("tail fwd")
-            for idx, batch in enumerate(dataloader):
-                input_ids = batch["input_ids"].to(device)
+            for j in range(mini_batch_num):
+                input_ids = torch.randint(0, 10000, (1, 512), device=device)
                 labels = input_ids
                 output = tail_model(input_ids=input_ids, labels=labels)
                 loss = output.loss
                 tail_losses.append(loss)
-                tail_losses[idx].backward()
-                if idx == mini_batch_num - 1:
-                    break
+                tail_losses[j].backward()
             tail_optimizer.step()
             tail_optimizer.zero_grad()  # 优化器梯度归零
             # head bwd,simulate time consuming
@@ -101,7 +93,7 @@ def test_no_offload():
 
 
 def test_activation_offload():
-    head_model, tail_model, head_optimizer, tail_optimizer, tokenizer, dataloader = _init()
+    head_model, tail_model, head_optimizer, tail_optimizer = _init()
     head_cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(num_minibatch=mini_batch_num)
     head_cpu_offload_context = CpuOffloadHookWithOffloadHandler(head_cpu_offload_handler)
     with torch.profiler.profile(
@@ -121,29 +113,25 @@ def test_activation_offload():
             # head fwd
             print("head fwd")
             head_cpu_offload_handler.start_fwd()
-            for idx, batch in enumerate(dataloader):
-                input_ids = batch["input_ids"].to(device)
+            for j in range(mini_batch_num):
+                input_ids = torch.randint(0, 10000, (1, 512), device=device)
                 labels = input_ids
                 with head_cpu_offload_context if head_cpu_offload_context is not None else contextlib.nullcontext():
                     output = head_model(input_ids=input_ids, labels=labels)
                     head_cpu_offload_handler.on_minibatch_commit_forward()
                 loss = output.loss
                 head_losses.append(loss)
-                if idx == mini_batch_num - 1:
-                    break
             # tail fwd
             # time.sleep(0.5)
             print("tail fwd")
-            for idx, batch in enumerate(dataloader):
-                input_ids = batch["input_ids"].to(device)
+            for j in range(mini_batch_num):
+                input_ids = torch.randint(0, 10000, (1, 512), device=device)
                 labels = input_ids
                 output = tail_model(input_ids=input_ids, labels=labels)
                 loss = output.loss
                 tail_losses.append(loss)
                 # tail bwd
-                tail_losses[idx].backward()
-                if idx == mini_batch_num - 1:
-                    break
+                tail_losses[j].backward()
             tail_optimizer.step()
             tail_optimizer.zero_grad()  # 优化器梯度归零
             # head bwd,simulate time consuming
@@ -160,7 +148,7 @@ def test_activation_offload():
 
 
 def test_model_param_offload():
-    head_model, tail_model, head_optimizer, tail_optimizer, tokenizer, dataloader = _init()
+    head_model, tail_model, head_optimizer, tail_optimizer = _init()
     load_stream = torch.cuda.Stream(device)
     offload_stream = torch.cuda.Stream(device)
     head_p_off = ModelParamOffload(head_model, load_stream=load_stream, offload_stream=offload_stream)
@@ -184,15 +172,13 @@ def test_model_param_offload():
             print("total iter------", i + 1)
             # head fwd
             print("head fwd")
-            for idx, batch in enumerate(dataloader):
-                input_ids = batch["input_ids"].to(device)
+            for j in range(mini_batch_num):
+                input_ids = torch.randint(0, 10000, (1, 512), device=device)
                 labels = input_ids
                 output = head_model(input_ids=input_ids, labels=labels)
                 loss = output.loss
                 head_loss += loss.item()
                 head_losses.append(loss)
-                if idx == mini_batch_num - 1:
-                    break
             tail_p_off.reload(True)
             tail_os_off.reload(True)
             head_p_off.offload(True)
@@ -201,15 +187,13 @@ def test_model_param_offload():
             head_os_off.wait_offload()
             tail_p_off.wait_reload()
             # tail fwd
-            for idx, batch in enumerate(dataloader):
-                input_ids = batch["input_ids"].to(device)
+            for j in range(mini_batch_num):
+                input_ids = torch.randint(0, 10000, (1, 512), device=device)
                 labels = input_ids
                 output = tail_model(input_ids=input_ids, labels=labels)
                 loss = output.loss
                 tail_losses.append(loss)
-                tail_losses[idx].backward()
-                if idx == mini_batch_num - 1:
-                    break
+                tail_losses[j].backward()
                 # 每次梯度更新前裁剪梯度
             tail_os_off.wait_reload()
             tail_optimizer.step()
@@ -222,10 +206,9 @@ def test_model_param_offload():
             head_p_off.wait_reload()
             tail_p_off.wait_offload()
             tail_os_off.wait_offload()
-            # head_p_off.wait_offload()
-            # time.sleep(0.5)
             for j in range(mini_batch_num):
                 head_losses[j].backward()
+            # wait for head_os_off to finish reload and offload
             head_os_off.wait_reload()
             head_optimizer.step()
             head_optimizer.zero_grad()  # 优化器梯度归零
@@ -235,7 +218,7 @@ def test_model_param_offload():
 
 
 def test_all():
-    head_model, tail_model, head_optimizer, tail_optimizer, tokenizer, dataloader = _init()
+    head_model, tail_model, head_optimizer, tail_optimizer = _init()
     load_stream = torch.cuda.Stream(device)
     offload_stream = torch.cuda.Stream(device)
     head_p_off = ModelParamOffload(head_model, load_stream=load_stream, offload_stream=offload_stream)
@@ -246,10 +229,6 @@ def test_all():
         num_minibatch=mini_batch_num, load_stream=load_stream, offload_stream=offload_stream
     )
     head_cpu_offload_context = CpuOffloadHookWithOffloadHandler(head_cpu_offload_handler)
-    # tail_cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-    #     num_minibatch=mini_batch_num, load_stream=load_stream, offload_stream=offload_stream
-    # )
-    # tail_cpu_offload_context = CpuOffloadHookWithOffloadHandler(tail_cpu_offload_handler)
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
@@ -263,6 +242,7 @@ def test_all():
         for i in range(5):
             head_losses = []
             tail_losses = []
+            head_loss=0
             print("total iter------", i + 1)
             # head fwd
             print("head fwd")
@@ -274,70 +254,55 @@ def test_all():
                     output = head_model(input_ids=input_ids, labels=labels)
                     head_cpu_offload_handler.on_minibatch_commit_forward()
                 loss = output.loss
+                head_loss += loss.item()
                 head_losses.append(loss)
-            print(f'head fwd finished ,loss : {sum(head_losses) / len(head_losses)}')
-            head_p_off.offload(False)
-            head_os_off.offload(False)
-            tail_p_off.reload(False)
-            tail_os_off.reload(False)
-            # head_p_off.offload(True)
-            # head_os_off.offload(True)
-            # tail_p_off.reload(True)
-            # tail_os_off.reload(True)
-            # head_p_off.wait_offload()
-            # head_os_off.wait_offload()
-            # tail_p_off.wait_reload()
-            # tail_os_off.wait_reload()
-            # tail fwd
-            # time.sleep(0.5)
-            print("tail fwd")
+            tail_p_off.reload(True)
+            tail_os_off.reload(True)
+            head_p_off.offload(True)
+            head_os_off.offload(True)
+            head_p_off.wait_offload()
+            head_os_off.wait_offload()
+            tail_p_off.wait_reload()
             for j in range(mini_batch_num):
                 input_ids = torch.randint(0, 10000, (1, 512), device=device)
                 labels = input_ids
                 output = tail_model(input_ids=input_ids, labels=labels)
                 loss = output.loss
                 tail_losses.append(loss)
-                # tail bwd
-                # print("tail bwd")
-                # for j in range(mini_batch_num):
                 tail_losses[j].backward()
+            tail_os_off.wait_reload()
             tail_optimizer.step()
             tail_optimizer.zero_grad()  # 优化器梯度归零
             # head bwd,simulate time consuming
-            tail_p_off.offload()
-            tail_os_off.offload()
-            head_p_off.reload()
-            head_os_off.reload()
-            # tail_p_off.offload(True)
-            # tail_os_off.offload(True)
-            # head_p_off.reload(True)
-            # head_os_off.reload(True)
-            # tail_p_off.wait_offload()
-            # tail_os_off.wait_offload()
-            # head_p_off.wait_reload()
-            # head_os_off.wait_reload()
-            # time.sleep(0.5)
-            print("head bwd")
+            head_p_off.reload(True)
+            head_os_off.reload(True)
+            tail_p_off.offload(True)
+            tail_os_off.offload(True)
+            head_p_off.wait_reload()
+            tail_p_off.wait_offload()
+            tail_os_off.wait_offload()
             head_cpu_offload_handler.start_bwd()
             for j in range(mini_batch_num):
                 head_cpu_offload_handler.on_minibatch_commit_backward()
                 head_losses[j].backward()
+            head_os_off.wait_reload()
             head_optimizer.step()
             head_optimizer.zero_grad()  # 优化器梯度归零
-            # prof.step()
+            prof.step()
             torch.cuda.reset_peak_memory_stats()
+            print(f'finished ,loss : {head_loss}')
 
 
 if __name__ == '__main__':
-    # a = input("请输入测试模式：1-no_offload, 2-activation_offload, 3-param_offload, 4-all_offload:")
-    # if a == "1":
-    #     test_no_offload()
-    # elif a == "2":
-    #     test_activation_offload()
-    # elif a == "3":
-    #     test_model_param_offload()
-    # elif a == "4":
-    #     test_all()
-    # else:
-    #     print("输入错误，请重新输入！")
-    test_model_param_offload()
+    a = input("请输入测试模式：1-no_offload, 2-activation_offload, 3-param_offload, 4-all_offload:")
+    if a == "1":
+        test_no_offload()
+    elif a == "2":
+        test_activation_offload()
+    elif a == "3":
+        test_model_param_offload()
+    elif a == "4":
+        test_all()
+    else:
+        print("输入错误，请重新输入！")
+    # test_model_param_offload()
