@@ -25,10 +25,18 @@ class PipelineMode(Enum):
 
 
 def convert_pipeline_mode(pmode: str) -> str:
+
     try:
-        return PipelineMode(value=pmode.lower())
+        pmode = pmode.lower()
+        if 'pd' in pmode:
+            return PipelineMode.PIPE_DREAM_STRICT
+        elif 'pdwc' in pmode:
+            return PipelineMode.PIPE_DREAM_WC
+        elif 'pdwce' in pmode:
+            return PipelineMode.PIPE_DREAM_WC_EAGER
+        return PipelineMode(value=pmode)
     except KeyError:
-        raise ValueError(f"Invalid pipeline mode: {pmode}")
+        return PipelineMode.NAIVE
 
 
 # -------------------------------

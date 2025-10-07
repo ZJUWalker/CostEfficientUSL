@@ -3,12 +3,11 @@ import argparse
 import warnings
 
 import torch
-from usl.client import Client, ClientArgs
+from usl.client import ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
 from usl.utils.exp import set_seed
 from usl.server.single_server import PipelineMode, convert_pipeline_mode
-from torch.distributed.pipelining import PipelineStage
 from usl.client import (
     GPipeClientTrainer,
     SequentialClientTrainer,
@@ -17,16 +16,12 @@ from usl.client import (
     PipeDreamWCEagerClientTrainer,
 )
 
-# from deepspeed.ops.op_builder import AsyncIOBuilder
-
-
-# nvme_handle = AsyncIOBuilder().load().aio_handle(block_size=2 * 1024 * 1024)
 
 SEED = 0
 warnings.filterwarnings("ignore", message="To copy construct from a tensor", category=UserWarning)
 
 
-def run_client(args: ClientArgs):
+def run_client(args: ClientArgs, profile=False):
     set_seed(SEED)
     dataset_name = args.dataset
     batch_size = args.batch_size
@@ -68,7 +63,7 @@ def run_client(args: ClientArgs):
         dataset_test=dataloader["test"],
         num_workers=args.micro_batch_size,
     )
-    client.train_epoch()
+    client.train_epoch(profile)
 
 
 def main():
@@ -76,7 +71,7 @@ def main():
     parser.add_argument("-P", "--port", type=int, default=8888, help="port to listen")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
-    parser.add_argument("-SL", "--max_seq_len", type=int, default=256, help="max sequence length")
+    parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
     parser.add_argument("-S", "--step", type=int, default=4)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
@@ -84,12 +79,13 @@ def main():
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--mbps", type=int, default=0)
     parser.add_argument("--micro_batch_size", type=int, default=1)
-    parser.add_argument("--offload_activation", action="store_true", default=False)
-    parser.add_argument("--offload_model_state", action="store_true", default=False)
+    parser.add_argument("--offload_activation", "-OA", action="store_true", default=False)
+    parser.add_argument("--offload_model_state", "-OS", action="store_true", default=False)
     parser.add_argument("--sort", type=str, default="no", help='sort batch before pipeline, "no" or "desc" or "asc"')
     parser.add_argument("--pmode", type=str, default="strict", help='mode of pipeline, "strict" or "loose"')
-
+    parser.add_argument("--profile", "-PROF", action="store_true", default=False)
     args = parser.parse_args()
+    profile = args.profile
     args = ClientArgs(
         port=args.port,
         model=args.model,
@@ -108,7 +104,7 @@ def main():
         pipeline_mode=convert_pipeline_mode(args.pmode),
     )
 
-    run_client(args)
+    run_client(args, profile)
 
 
 if __name__ == "__main__":

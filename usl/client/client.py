@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from contextlib import nullcontext
 import os
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import asdict, dataclass
@@ -15,11 +16,11 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from usl.offload import ModelParamOffload, OptimizerStateOffload, CpuOffloadHookWithOffloadHandler, AsyncDoubleBufferGroupOffloadHandler
 from usl.server.single_server import PipelineMode
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_gantt_grouped
 from usl.utils.tensor_utils import pad_inputs
-from usl.offload import ActivationOffload, ModelParamOffload, OptimizerStateOffload
 from transformers import PreTrainedModel
 
 
@@ -54,7 +55,7 @@ class ClientArgs:
             f"mb_{self.micro_batch_size}",
             f"s_{self.max_seq_len}",
             f"mbps_{self.rate_mbps}",
-            f"pipe_{self.pipeline_mode.value}",
+            f"{self.pipeline_mode.value}",
         ]
 
         # 动态处理布尔字段
@@ -127,51 +128,38 @@ class Client:
         self.offload_stream = torch.cuda.Stream(self.client_device)  # set cuda offload stream
 
         # ----Parameter Efficient Offloading
-        if self.client_args.offload_activation:
-            self.head_activation_collector = ActivationOffload(
-                base_model=self.head_model,
-                device=self.client_device,
-                offload_threshold=0,
-                load_stream=self.load_stream,
-                offload_stream=self.offload_stream,
-            )
         if self.client_args.offload_model_state:
-            # embedding layer shares the same parameters with lm_head layer in tail model, so we need to exclude it from offloading
-            embedding: nn.Embedding = self.head_model.get_input_embeddings()
-            except_tensor_idx_list = [id(p) for p in embedding.parameters()]
-            # Head model的模型参数和优化器状态卸载器
-            self.head_model_param_collector = ModelParamOffload(
-                base_model=self.head_model,
-                offload_threshold=0,
+            # do not offload embedding layer,because it will be used in both head and tail models (shared with lm_head)
+            embed_layer = self.head_model.get_input_embeddings()
+            except_tensor_idx_list = [id(p) for p in embed_layer.parameters()]
+            self.head_m_mgr = ModelParamOffload(
+                self.head_model,
                 device=self.client_device,
-                except_tensor_idx_list=except_tensor_idx_list,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
-            )
-            # self.head_model_optimizer_collector = OptimizerStateOffload(
-            #     optimizer=self.optimizer_head,
-            #     offload_threshold=0,
-            #     device=self.client_device,
-            #     load_stream=self.load_stream,
-            #     offload_stream=self.offload_stream,
-            # )
-            # Tail model的模型参数和优化器状态卸载器
-            self.tail_model_param_collector = ModelParamOffload(
-                base_model=self.tail_model,
-                offload_threshold=0,
-                device=self.client_device,
                 except_tensor_idx_list=except_tensor_idx_list,
+            )
+            self.tail_m_mgr = ModelParamOffload(
+                self.tail_model,
+                device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
+                except_tensor_idx_list=except_tensor_idx_list,
             )
-            # self.tail_model_optimizer_collector = OptimizerStateOffload(
-            #     optimizer=self.optimizer_tail,
-            #     offload_threshold=0,
-            #     device=self.client_device,
-            #     load_stream=self.load_stream,
-            #     offload_stream=self.offload_stream,
-            # )
-            # self.tail_model_optimizer_collector.offload()  # 先把tail的优化器状态也放在cpu
+            self.head_os_mgr = OptimizerStateOffload(
+                self.optimizer_head, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
+            )
+            self.tail_os_mgr = OptimizerStateOffload(
+                self.optimizer_tail, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
+            )
+        self.num_minibatch = (self.client_args.batch_size + self.client_args.micro_batch_size - 1) // self.client_args.micro_batch_size
+        if self.client_args.offload_activation:
+            self.activation_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
+                num_minibatch=self.num_minibatch, load_stream=self.load_stream, offload_stream=self.offload_stream
+            )
+            self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(
+                self.activation_offload_handler
+            )  # this is a context manager , not a handler
         self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
 
         # ---- Communicator
@@ -193,6 +181,14 @@ class Client:
         self.pos_embedding_dict: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         self.atten_mask_dict: Dict[int, torch.Tensor] = {}
         self.labels_dict: Dict[int, torch.Tensor] = {}
+
+    @property
+    def offload_model_state(self) -> bool:
+        return self.client_args.offload_model_state
+
+    @property
+    def offload_activation(self) -> bool:
+        return self.client_args.offload_activation
 
     @torch.no_grad()
     # @timeit()
@@ -324,13 +320,13 @@ class Client:
         y: torch.Tensor,
     ):
         self.profile_data[mb_idx].head_fwd_timestamp[0] = time.perf_counter()
-        # if self.client_args.offload_activation:
-        #     with self.head_activation_collector:
-        #         head_outs = self.head_model.forward(x, m)
-        #     torch.cuda.current_stream().synchronize()
-        # else:
-        head_outs = self.head_model.forward(x, m)
-        torch.cuda.synchronize()
+        if self.offload_activation:
+            with self.activation_offload_ctx:
+                head_outs = self.head_model.forward(x, m)
+                self.activation_offload_handler.on_minibatch_commit_forward()
+        else:
+            head_outs = self.head_model.forward(x, m)
+        torch.cuda.current_stream().synchronize()
         head_outs[0].requires_grad_(True)
         self.head_fwd_activation_dict[mb_idx] = head_outs[0]
         token = uuid.uuid4().hex
@@ -348,8 +344,6 @@ class Client:
 
     def _tail_fwd_micro(self, server_forward_output: Payload) -> Tuple[torch.Tensor, torch.Tensor]:
         # 解析 server 传来的 payload
-        # token = server_forward_output.token
-        # group_id = server_forward_output.group_id
         mb_idx = server_forward_output.mb_idx
         mb_total = server_forward_output.mb_total
 
@@ -363,7 +357,7 @@ class Client:
             position_embeddings=self.pos_embedding_dict[mb_idx],
             labels=self.labels_dict[mb_idx],
         )
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].tail_fwd_timestamp[1] = time.perf_counter()
         # 可选：按 accum 步数归一化，保证与“单大 batch 一次性训练”的梯度数值一致
         loss = output.loss / mb_total if self.normalize_loss else output.loss
@@ -381,7 +375,7 @@ class Client:
     ) -> Tuple[Payload, torch.Tensor]:
         self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.perf_counter()
         loss.backward()
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
         grad_payload = self._to_cpu_payload(
             output=(activation_to_tail.grad,),
             token=token,
@@ -403,8 +397,10 @@ class Client:
         grad_to_head = grad_cpu.to(self.client_device)
         head_activation = self.head_fwd_activation_dict[mb_idx]
         # real head model backward
+        if self.offload_activation:
+            self.activation_offload_handler.on_minibatch_commit_backward()
         head_activation.backward(grad_to_head)
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_bwd_timestamp[1] = time.perf_counter()
         # remove not needed tensors to save memory
         del (
@@ -428,10 +424,6 @@ class Client:
         self._check_communication()
         while not self.stop_event.is_set():
             try:
-                # if not (
-                #     self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_WC_EAGER
-                #     and not self.gradient_to_server_queue.empty()
-                # ):
                 payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
                     start_send = time.perf_counter()
@@ -495,6 +487,7 @@ class Client:
                 self.gradient_from_server_queue.put(data)
         print("server send thread exit")
 
+    @torch.no_grad()
     def _save_profile_res(self, server_profile_data: List[GanttChartData]):
         batch_train_time_ms = 0
         local_compute_time_ms = 0
@@ -593,10 +586,10 @@ class Client:
         if not os.path.exists(dt_save_dir):
             os.makedirs(dt_save_dir)
         save_gantt_chart_data(data_dict, fp=self.client_args.build_filename(prefix=dt_save_dir, ext="json"))
-        png_save_dir = f"log/img/{self.client_args.model}"
-        if not os.path.exists(png_save_dir):
-            os.makedirs(png_save_dir)
-        plot_gantt_per_batch(self.profile_data, fp=self.client_args.build_filename(prefix=png_save_dir, ext="png"))
+        # png_save_dir = f"log/img/{self.client_args.model}"
+        # if not os.path.exists(png_save_dir):
+        #     os.makedirs(png_save_dir)
+        # plot_gantt_per_batch(self.profile_data, fp=self.client_args.build_filename(prefix=png_save_dir, ext="png"))
         png_save_dir_c = f"log/img/grouped/{self.client_args.model}"
         if not os.path.exists(png_save_dir_c):
             os.makedirs(png_save_dir_c)
