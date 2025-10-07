@@ -21,6 +21,7 @@ class OptimizerStateOffload:
         self.offload_stream = offload_stream if offload_stream else torch.cuda.Stream(device)  # create a new stream for offload/reload
         self.compute_stream = torch.cuda.current_stream(device)  # use current stream for compute
         self.except_tensor_idx_list = except_tensor_idx_list  # list of tensor index to be excluded from offload/reload
+        self.optimizer_state_on_cpu: Dict[torch.Tensor, Dict[str, torch.Tensor]] = {}  # param -> parameter state on CPU DRAM
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
 
@@ -91,3 +92,9 @@ class OptimizerStateOffload:
     def wait_reload(self):
         if self.load_stream != self.compute_stream:
             self.compute_stream.wait_event(self.reload_event)
+
+    def offload_finished(self):
+        return self.offload_event.query()
+
+    def reload_finished(self):
+        return self.reload_event.query()

@@ -21,9 +21,9 @@ class ModelParamOffload:
         self.model_param_on_gpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> parameter state on GPU
         self.model_param_on_cpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> parameter state on CPU DRAM
         # self.swap_stream = torch.cuda.Stream(device) if swap_stream is None else swap_stream
-        self.load_stream = load_stream
-        self.offload_stream = offload_stream
-        self.compute_stream = torch.cuda.current_stream(self.device)
+        self.load_stream: torch.cuda.Stream = load_stream
+        self.offload_stream: torch.cuda.Stream = offload_stream
+        self.compute_stream: torch.cuda.Stream = torch.cuda.current_stream(self.device)
 
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
@@ -79,6 +79,12 @@ class ModelParamOffload:
         if self.offload_stream != self.compute_stream:
             self.compute_stream.wait_stream(self.offload_stream)
             self._release_gpu_memory()
+
+    def offload_finished(self):
+        return self.offload_event.query()
+
+    def reload_finished(self):
+        return self.reload_event.query()
 
     def _release_gpu_memory(self):
         # Release model parameters and optimizer states from GPU

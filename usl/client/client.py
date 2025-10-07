@@ -349,7 +349,7 @@ class Client:
 
         self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.perf_counter()
         activation_cpu: torch.Tensor = server_forward_output.tensor
-        activation_to_tail = activation_cpu.to(self.client_device).requires_grad_(True)
+        activation_to_tail = activation_cpu.to(self.client_device, non_blocking=True).requires_grad_(True)
         # tail forward
         output: CausalLMOutputWithPast = self.tail_model.forward(
             hidden_states=activation_to_tail,
@@ -394,7 +394,7 @@ class Client:
         grad_cpu: torch.Tensor = server_bwd_output.tensor
         # load grad and activation
         self.profile_data[mb_idx].head_bwd_timestamp[0] = time.perf_counter()
-        grad_to_head = grad_cpu.to(self.client_device)
+        grad_to_head = grad_cpu.to(self.client_device, non_blocking=True)
         head_activation = self.head_fwd_activation_dict[mb_idx]
         # real head model backward
         if self.offload_activation:
@@ -420,6 +420,7 @@ class Client:
         return self.communicator.conn
 
     # TODO:处理client端的send操作
+    @torch.no_grad()
     def _head_client_send(self):
         self._check_communication()
         while not self.stop_event.is_set():
@@ -462,6 +463,7 @@ class Client:
         pass
 
     # TODO: 处理recv操作
+    @torch.no_grad()
     def _handle_server_send(self):
         self._check_communication()
         self.communicator.conn.settimeout(60.0)
@@ -481,6 +483,7 @@ class Client:
                 finally:
                     self.stop_event.set()
                     break
+            data.tensor = data.tensor.pin_memory()
             if data.is_activation:
                 self.activation_from_server_queue.put(data)
             else:
