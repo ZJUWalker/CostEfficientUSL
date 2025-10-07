@@ -28,9 +28,9 @@ def convert_pipeline_mode(pmode: str) -> str:
 
     try:
         pmode = pmode.lower()
-        if 'pd' in pmode:
+        if 'pds' in pmode:
             return PipelineMode.PIPE_DREAM_STRICT
-        elif 'pdwc' in pmode:
+        elif 'pdwc' in pmode and 'e' not in pmode:
             return PipelineMode.PIPE_DREAM_WC
         elif 'pdwce' in pmode:
             return PipelineMode.PIPE_DREAM_WC_EAGER

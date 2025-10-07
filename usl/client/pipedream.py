@@ -127,11 +127,25 @@ class PipeDreamWCClientTrainer(Client):
 
     def _train_minibatches(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         # 1. Head forward and send
+        if self.offload_activation:
+            self.activation_offload_handler.start_fwd()
         for mb_idx in range(grad_accum_steps):
             payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
-
+        # do offload and reload
+        if self.offload_model_state:
+            # reload tail model and optimizer
+            self.tail_m_mgr.reload(True)
+            self.tail_os_mgr.reload(True)
+            # offload head model and optimizer
+            self.head_m_mgr.offload(True)
+            self.head_os_mgr.offload(True)
+            # wait for offload ,releasing GPU memory
+            self.head_m_mgr.wait_offload()
+            self.head_os_mgr.wait_offload()
+            # wait for reload,
+            self.tail_m_mgr.wait_reload()
         batch_loss = 0
         no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
         no_head_bwd_mb_list = [False] * grad_accum_steps
@@ -159,12 +173,23 @@ class PipeDreamWCClientTrainer(Client):
                     pass
             else:
                 break
-
         # 3. Tail model step
+        if self.offload_model_state:
+            # wait for tail optimizer reload,or else it will cause error when step
+            self.tail_os_mgr.wait_reload()
         self.optimizer_tail.step()
         self.optimizer_tail.zero_grad(set_to_none=True)
-
+        if self.offload_model_state:
+            self.head_m_mgr.reload(True)
+            self.head_os_mgr.reload(True)
+            self.tail_m_mgr.offload(True)
+            self.tail_os_mgr.offload(True)
+            self.head_m_mgr.wait_reload()
+            self.tail_m_mgr.wait_offload()
+            self.tail_os_mgr.wait_offload()
         # 4. Head backward
+        if self.offload_activation:
+            self.activation_offload_handler.start_bwd()
         while True:
             if not all(no_head_bwd_mb_list) and not self.stop_event.is_set():
                 try:
@@ -180,6 +205,8 @@ class PipeDreamWCClientTrainer(Client):
             time.sleep(0.001)
 
         # 5. Head model step
+        if self.offload_model_state:
+            self.head_os_mgr.wait_reload()
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
 
