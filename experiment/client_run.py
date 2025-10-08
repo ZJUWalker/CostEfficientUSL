@@ -29,6 +29,7 @@ def run_client(args: ClientArgs, profile=False):
     model_name = args.model
     model_dir = os.path.join("data/models", model_name)
     split_point = args.split_point
+    lora = args.use_lora
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     log_dir = f"log/{args.model}/client"
@@ -36,23 +37,23 @@ def run_client(args: ClientArgs, profile=False):
     logger.info(f"client start with args: {args}")
 
     # ---------------load model and tokenizer --------------------------
-    head, tail, tokenizer = load_client(model_dir, model_name, split_point, use_lora=False, use_qlora_4bit=False, use_qlora_8bit=False)
+    head, tail, tokenizer = load_client(model_dir, model_name, split_point, use_lora=lora, use_qlora_4bit=False, use_qlora_8bit=False)
     # ---------------load dataset------------------------------------
     client_dataloaders = load_dataset(dataset_name, tokenizer, [0], batch_size, max_seq_len)
     dataloader = client_dataloaders[0]  # 默认只取第一个客户端数据
 
     # -----------------create client----------
     if args.pipeline_mode == PipelineMode.GPIPE:
-        trainer_class = GPipeClientTrainer
+        Trainer = GPipeClientTrainer
     elif args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
-        trainer_class = PipeDreamStrictClientTrainer
+        Trainer = PipeDreamStrictClientTrainer
     elif args.pipeline_mode == PipelineMode.PIPE_DREAM_WC:
-        trainer_class = PipeDreamWCClientTrainer
+        Trainer = PipeDreamWCClientTrainer
     elif args.pipeline_mode == PipelineMode.PIPE_DREAM_WC_EAGER:
-        trainer_class = PipeDreamWCEagerClientTrainer
+        Trainer = PipeDreamWCEagerClientTrainer
     else:
-        trainer_class = SequentialClientTrainer  # default sequential trainer
-    client = trainer_class(
+        Trainer = SequentialClientTrainer  # default sequential trainer
+    client = Trainer(
         client_args=args,
         head_model=head,
         tail_model=tail,
@@ -77,6 +78,7 @@ def main():
     parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
+    parser.add_argument("--lora", action="store_true", default=False)
     parser.add_argument("--mbps", type=int, default=0)
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--offload_activation", "-OA", action="store_true", default=False)
@@ -96,6 +98,7 @@ def main():
         epoch=args.epoch,
         split_point=args.split_point,
         learning_rate=args.learning_rate,
+        use_lora=args.lora,
         rate_mbps=args.mbps,
         micro_batch_size=args.micro_batch_size,
         offload_activation=args.offload_activation,

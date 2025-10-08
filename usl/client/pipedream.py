@@ -101,7 +101,7 @@ class PipeDreamStrictClientTrainer(Client):
         self.optimizer_head.zero_grad(set_to_none=True)
 
         # 4. Memory tracking
-        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss
 
@@ -129,10 +129,12 @@ class PipeDreamWCClientTrainer(Client):
         # 1. Head forward and send
         if self.offload_activation:
             self.activation_offload_handler.start_fwd()
+        self._check_mem_usage('before head fwd')
         for mb_idx in range(grad_accum_steps):
             payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
+        self._check_mem_usage('after head fwd')
         # do offload and reload
         if self.offload_model_state:
             # reload tail model and optimizer
@@ -173,6 +175,7 @@ class PipeDreamWCClientTrainer(Client):
                     pass
             else:
                 break
+        self._check_mem_usage('after all tail fwd&bwd')
         # 3. Tail model step
         if self.offload_model_state:
             # wait for tail optimizer reload,or else it will cause error when step
@@ -211,7 +214,7 @@ class PipeDreamWCClientTrainer(Client):
         self.optimizer_head.zero_grad(set_to_none=True)
 
         # 6. Memory tracking
-        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss
 
@@ -286,6 +289,6 @@ class PipeDreamWCEagerClientTrainer(Client):
         self.optimizer_head.zero_grad(set_to_none=True)
 
         # 3. Memory tracking
-        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss

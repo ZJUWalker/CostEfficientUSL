@@ -46,7 +46,7 @@ def convert_pipeline_mode(pmode: str) -> str:
 class ServerArgs:
     port: int = 8000
     step: int = 10
-    use_lora: bool = True
+    use_lora: bool = False
     model: str = "meta-llama/llama3.2-1b"
     server_device: str = "cuda:0"
     split_point: int = 2
@@ -55,7 +55,6 @@ class ServerArgs:
     pipeline_mode: PipelineMode = PipelineMode.GPIPE  # "strict" or "loose"
     # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
     rate_limit_mbps: float = 10
-    rate_limit_mbps: Optional[float] = None
 
     def effective_rate_limit(self) -> float:
         # Prefer the correctly spelled one if provided
@@ -97,6 +96,7 @@ class SingleServer:
         # ---- Metrics
         self.compute_time = 0.0
         self.idle_time = 0.0
+        self.max_cuda_memory_allocated = 0.0
         self.profile_data: List[GanttChartData] = []
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
@@ -105,6 +105,7 @@ class SingleServer:
         self.main_executor: Optional[ThreadPoolExecutor] = None
         self.compute_future: Optional[Future] = None
         self.client_future: Optional[Future] = None
+        self.server_future: Optional[Future] = None
         self.stop_event = threading.Event()
 
         # ---- Queues (compute pipeline)
@@ -319,7 +320,7 @@ class SingleServer:
                     break
                 if isinstance(data, dict) and "stop" in data.keys():
                     print("Client requested stop")
-                    self.communicator.send({"profile": self.profile_data})
+                    self.communicator.send({"profile": self.profile_data, "max_mem_alloc": round(self.max_cuda_memory_allocated / 1024**2, 4)})
                     self.logger.info(f"Client {self.communicator.addr} requested profile data and finished training")
                     break
                 if data.is_activation:
@@ -439,7 +440,7 @@ class SingleServer:
                 self._do_one_bwd_task()
             except Empty:
                 pass
-
+            self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))
             # Small cooperative yield
             time.sleep(0.001)
         print("Server finished training")
@@ -475,6 +476,7 @@ class SingleServer:
                 data = self._do_one_bwd_task(block=True)
                 if data.mb_idx == data.mb_total - 1:
                     break
+            self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))
         pass
 
     # --------------- Compute loop ---------------
@@ -499,7 +501,7 @@ class SingleServer:
                     curr_phase = data.phase
                 except Empty:
                     pass
-
+            self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))
             # Small cooperative yield
             time.sleep(0.001)
         print("Server finished training")
@@ -524,4 +526,5 @@ class SingleServer:
 
             # Small cooperative yield
             time.sleep(0.001)
+            self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))
         print("Server finished training")

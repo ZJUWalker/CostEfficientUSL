@@ -139,6 +139,6 @@ class GPipeClientTrainer(Client):
             self.head_os_mgr.wait_reload()
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
-        self.max_mem_allocated_mb = max(self.max_mem_allocated_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)
         return batch_loss

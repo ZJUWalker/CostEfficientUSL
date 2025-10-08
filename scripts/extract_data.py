@@ -32,13 +32,13 @@ for sp in sp_values:
                 try:
                     with open(file_path, 'r') as file:
                         data = json.load(file)
-                    
+
                     # 提取需要的数据字段
                     extracted_data = {
                         "sp": sp,
                         "mb": mb,
                         "mbps": mbps,
-                        "max_mem_allocated_MB": data.get("max_mem_allocated_MB", None),
+                        "client_max_mem_alloc_mb": data.get("client_max_mem_alloc_mb", None),
                         "batch_train_time_ms": data.get("batch_train_time_ms", None),
                         "client_idle_rate": data.get("client_idle_rate", None),
                         "server_idle_rate": data.get("server_idle_rate", None),

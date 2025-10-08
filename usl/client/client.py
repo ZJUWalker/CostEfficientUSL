@@ -35,6 +35,7 @@ class ClientArgs:
     epoch: int = 1
     split_point: int = 2
     learning_rate: float = 5e-4
+    use_lora: bool = False
     rate_mbps: float = 10  # rate in Mbps
     micro_batch_size: int = 1
     offload_activation: bool = False
@@ -59,6 +60,9 @@ class ClientArgs:
         ]
 
         # 动态处理布尔字段
+
+        if self.use_lora:
+            parts.append("lora")
         if self.offload_activation:
             parts.append("oa")
         if self.offload_model_state:
@@ -99,6 +103,7 @@ class Client:
             self.tail_model = tail_model.to("cpu")  # 初始化状态：把tail_model放在cpu中
         else:
             self.tail_model = tail_model.to(self.client_device)  # 初始化状态：把tail_model放在cuda中
+
         # ---- move embedding layer to cuda
         # self.head_model.get_input_embeddings().to(self.client_device)
         # ---- Tokenizer
@@ -113,7 +118,8 @@ class Client:
 
         # ---- Metrics
         self.compute_time = 0
-        self.max_mem_allocated_mb = 0
+        self.client_max_mem_alloc_mb = 0
+        self.sent_payload_bytes = 0
         self.normalize_loss = normalize_loss
         self.losses = []
         self.profile_data: List[GanttChartData] = []
@@ -190,6 +196,9 @@ class Client:
     def offload_activation(self) -> bool:
         return self.client_args.offload_activation
 
+    def _check_mem_usage(self, info: str = "") -> None:
+        return _check_mem_usage(info, self.client_device)
+
     @torch.no_grad()
     # @timeit()
     def _to_cpu_payload(
@@ -229,22 +238,6 @@ class Client:
             position_embeddings=pos_cpu,
         )
         return payload
-
-    def _payload_nbytes(self, payload: Dict[str, Any]) -> int:
-        """计算 payload 中所有 tensor 的占用字节数（单位: Byte）"""
-        total = 0
-
-        def tensor_nbytes(t: torch.Tensor) -> int:
-            return t.numel() * t.element_size()
-
-        for key, val in payload.items():
-            if isinstance(val, torch.Tensor):
-                total += tensor_nbytes(val)
-            elif isinstance(val, (list, tuple)):
-                for v in val:
-                    if isinstance(v, torch.Tensor):
-                        total += tensor_nbytes(v)
-        return total
 
     def _split_micro(self, tensor: torch.Tensor, micro_bs: int) -> List[torch.Tensor]:
         # 假设 dim=0 为 batch 维
@@ -434,6 +427,7 @@ class Client:
                         print("send stop flag")
                         continue
                     else:
+                        self.sent_payload_bytes += payload.payload_nbytes()
                         mb_idx = payload.mb_idx
                         self.profile_data[mb_idx].head_fwd_send_timestamp[0] = start_send
                         self.profile_data[mb_idx].head_fwd_send_timestamp[1] = end_time
@@ -449,6 +443,7 @@ class Client:
                 payload = self.gradient_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
+                    self.sent_payload_bytes += payload.payload_nbytes()
                     start_send = time.perf_counter()
                     self.communicator.send(payload)
                     end_time = time.perf_counter()
@@ -477,7 +472,7 @@ class Client:
             if isinstance(data, dict) and "profile" in data:
                 print(f"get profile data")
                 try:
-                    self._save_profile_res(data["profile"])
+                    self._save_profile_res(data["profile"], **{"server_max_mem_alloc_mb": data.get("max_mem_alloc", 0)})
                 except Exception as e:
                     print(f"error when save profile data: {e}")
                 finally:
@@ -491,7 +486,7 @@ class Client:
         print("server send thread exit")
 
     @torch.no_grad()
-    def _save_profile_res(self, server_profile_data: List[GanttChartData]):
+    def _save_profile_res(self, server_profile_data: List[GanttChartData], **kwargs):
         batch_train_time_ms = 0
         local_compute_time_ms = 0
         server_compute_time_ms = 0
@@ -562,13 +557,15 @@ class Client:
         # 计算本地计算时间
 
         # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
+        layer_num = self.client_args.split_point if self.client_args.split_point > 0 else 1
         data_dict = {
             "mbps": self.client_args.rate_mbps,
             "split_point": self.client_args.split_point,
             "batch_size": self.client_args.batch_size,
             "micro_batch_size": self.client_args.micro_batch_size,
             "max_seq_len": self.client_args.max_seq_len,
-            "max_mem_allocated_MB": self.max_mem_allocated_mb,
+            "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
+            "server_max_mem_alloc_mb": kwargs.get("server_max_mem_alloc_mb", 0),
             "batch_train_time_ms": batch_train_time_ms,
             "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
             "head_bwd_time_avg_ms": round(head_bwd_time_avg, 2),
@@ -582,9 +579,11 @@ class Client:
             "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
             "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
             "server_idle_rate": round((1 - server_compute_time_ms / batch_train_time_ms) * 100, 2),
+            "total_bytes_sent": self.sent_payload_bytes,
+            "bytes_sent_per_ms": round(self.sent_payload_bytes / client_send_time_ms, 0),
             "mini_batch_data": [asdict(item) for item in self.profile_data],
         }
-        print(data_dict["max_mem_allocated_MB"], data_dict["batch_train_time_ms"])
+        print(data_dict["client_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
         dt_save_dir = f"log/profile/{self.client_args.model}"
         if not os.path.exists(dt_save_dir):
             os.makedirs(dt_save_dir)

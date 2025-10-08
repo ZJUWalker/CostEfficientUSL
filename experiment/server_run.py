@@ -38,7 +38,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
-    parser.add_argument("-L", "--use_lora", action="store_true", help="Use LoRA")
+    parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
     parser.add_argument("-SD", "--server_device", type=str, default="cuda:1", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
@@ -50,7 +50,7 @@ if __name__ == "__main__":
     args = ServerArgs(
         port=args.port,
         step=args.step,
-        use_lora=args.use_lora,
+        use_lora=args.lora,
         model=args.model,
         server_device=args.server_device,
         split_point=args.split_point,

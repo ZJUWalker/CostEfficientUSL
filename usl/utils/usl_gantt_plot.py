@@ -20,9 +20,7 @@ class GanttChartData:
     head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
 
 
-def merge_cs_json(
-    server_data: List[Dict], client_data: List[Dict], save_fp: str = "merged.json", save: bool = False
-) -> List[Dict]:
+def merge_cs_json(server_data: List[Dict], client_data: List[Dict], save_fp: str = "merged.json", save: bool = False) -> List[Dict]:
     # 使用字典形式合并每个 mini_batch_idx 对应的数据
 
     for server_item, client_item in zip(server_data, client_data):

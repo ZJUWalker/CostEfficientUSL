@@ -2,6 +2,7 @@ import json
 import csv
 import os
 
+
 def main():
     # 目标目录
     base_dir = "log/profile/meta-llama/llama3.2-1b"
@@ -14,9 +15,7 @@ def main():
     rows = []
 
     for mb in micro_batches:
-        filename = (
-            f"sp_3_b_16_mb_{mb}_s_512_off_False_mbps_2000_sort_False_offms_False.json"
-        )
+        filename = f"sp_3_b_16_mb_{mb}_s_512_off_False_mbps_2000_sort_False_offms_False.json"
         filepath = os.path.join(base_dir, filename)
 
         if not os.path.exists(filepath):
@@ -28,7 +27,7 @@ def main():
 
         row = {
             "micro_batch_size": mb,
-            "max_mem_allocated_MB": data.get("max_mem_allocated_MB"),
+            "client_max_mem_alloc_mb": data.get("client_max_mem_alloc_mb"),
             "batch_train_time_ms": data.get("batch_train_time_ms"),
             "client_idle_rate": data.get("client_idle_rate"),
             "server_idle_rate": data.get("server_idle_rate"),
@@ -42,7 +41,7 @@ def main():
             csvfile,
             fieldnames=[
                 "micro_batch_size",
-                "max_mem_allocated_MB",
+                "client_max_mem_alloc_mb",
                 "batch_train_time_ms",
                 "client_idle_rate",
                 "server_idle_rate",
