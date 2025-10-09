@@ -555,6 +555,7 @@ class Client:
             tail_bwd_time_avg += (client_item.tail_bwd_timestamp[1] - client_item.tail_bwd_timestamp[0]) * 1000
             # offload timestamp 为了好画图
             client_item.head_m_offload_ts = self.head_model_offload_timestamp 
+            client_item.head_m_reload_ts = self.head_model_reload_timestamp
             client_item.tail_m_offload_ts = self.tail_model_offload_timestamp
             client_item.tail_m_reload_ts = self.tail_model_reload_timestamp
             head_m_offload_time_ms = self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]

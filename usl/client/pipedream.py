@@ -129,12 +129,12 @@ class PipeDreamWCClientTrainer(Client):
         # 1. Head forward and send
         if self.offload_activation:
             self.activation_offload_handler.start_fwd()
-        self._check_mem_usage('before head fwd')
+        # self._check_mem_usage('before head fwd')
         for mb_idx in range(grad_accum_steps):
             payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
-        self._check_mem_usage('after head fwd')
+        # self._check_mem_usage('after head fwd')
         # do offload and reload
         if self.offload_model_state:
             # reload tail model and optimizer
@@ -175,7 +175,7 @@ class PipeDreamWCClientTrainer(Client):
                     pass
             else:
                 break
-        self._check_mem_usage('after all tail fwd&bwd')
+        # self._check_mem_usage('after all tail fwd&bwd')
         # 3. Tail model step
         if self.offload_model_state:
             # wait for tail optimizer reload,or else it will cause error when step

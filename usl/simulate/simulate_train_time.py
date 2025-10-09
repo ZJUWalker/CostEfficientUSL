@@ -5,7 +5,7 @@ import pandas as pd
 import os
 import json
 import time
-from utils.usl_gantt_plot import plot_gantt_grouped
+from usl.utils.usl_gantt_plot import plot_gantt_grouped
 
 
 @dataclass
@@ -17,9 +17,9 @@ class MainVariable:
     batch_size: int = 8
     micro_batch_size: int = 1
     max_seq_len: int = 512
-    split_point: int = 1
-    rate_mbps: float = 0  # mbps limit
-    bytes_send_ps: float = 0  # bytes per ms
+    split_point: int = 4
+    rate_mbps: float = 300  # mbps limit
+    bytes_send_ps: float = 154339.0  # bytes per ms
     offload: bool = False
     lora: bool = False
 
@@ -30,17 +30,17 @@ class TimeVariable:
     TimeVariable contains the time cost of different components in the system.
     """
 
-    head_fwd_time: float = 0  # unit:ms
-    head_bwd_time: float = 0
-    server_fwd_time: float = 0  # unit:ms
-    server_bwd_time: float = 0
-    head_activation_send_time: float = 0  # unit:ms
-    head_gradient_send_time: float = 0
+    head_fwd_time: float = 34.2  # unit:ms
+    head_bwd_time: float = 41.42
+    server_fwd_time: float = 31.18
+    server_bwd_time: float = 65.31
+    head_activation_send_time: float = 100  # unit:ms
+    head_gradient_send_time: float = 80
     # most of the time,server_activation_recv_time approximates head_gradient_recv_time and server gradient send time
-    server_activation_send_time: float = 0
-    server_gradient_send_time: float = 0  # unit:ms
-    tail_fwd_time: float = 0
-    tail_bwd_time: float = 0  # unit:ms
+    server_activation_send_time: float = 80
+    server_gradient_send_time: float = 80  # unit:ms
+    tail_fwd_time: float = 29.43
+    tail_bwd_time: float = 69.19  # unit:ms
 
 
 @dataclass
@@ -202,7 +202,7 @@ def _simulate_train_time(
             }
             for i in range(micro_batch_num)
         ]
-        plot_gantt_grouped(gantt_data, fp='log/img/grouped/simulated_gantt.png')
+        plot_gantt_grouped(gantt_data, fp='log/img/grouped/simulated_gantt.png',align=False)
     # calculate objective function
     # calculate batch train time ,unit:ms
     batch_train_time = head_bwd_timestamps[-1][1] - head_fwd_timestamps[0][0]
@@ -271,11 +271,11 @@ def _simulate_peak_mem_alloc(
 
 
 def simulate(main_variable: MainVariable, time_variable: TimeVariable, memory_variable: MemoryVariable, objective: Objective) -> SimulateResult:
-    simulate_result = _simulate_train_time(main_variable, time_variable, memory_variable, objective)
-    simulate_mem_result = _simulate_peak_mem_alloc(main_variable, time_variable, memory_variable, objective)
+    simulate_result = _simulate_train_time(main_variable, time_variable, memory_variable, objective,True)
+    # simulate_mem_result = _simulate_peak_mem_alloc(main_variable, time_variable, memory_variable, objective)
     # copy memory result to simulate_result
-    simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
-    simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
+    # simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
+    # simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
     return simulate_result
 
 

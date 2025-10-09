@@ -202,6 +202,7 @@ def plot_gantt_per_batch(
 def plot_gantt_grouped(
     mini_batch_time_gantt: Optional[List[Dict] | List[GanttChartData]] = None,
     fp: str = "grouped.png",
+    align: bool = True,
     alpha: float = 0.3,
     show: bool = False,
 ):
@@ -221,18 +222,64 @@ def plot_gantt_grouped(
         mini_batch_time_gantt = [asdict(data) for data in mini_batch_time_gantt]
 
     # 对齐时间
-    aligned_list = _to_aligned_ms(mini_batch_time_gantt)
+    aligned_list = _to_aligned_ms(mini_batch_time_gantt) if align else mini_batch_time_gantt
 
-    # 收集全局时间范围
+    # 检查是否需要绘制Client Offload / Reload两行
+    OFFLOAD_KEYS = [
+        "head_m_offload_ts", "tail_m_offload_ts",
+        "head_optimizer_offload_ts", "tail_optimizer_offload_ts",
+    ]
+    RELOAD_KEYS = [
+        "head_m_reload_ts", "tail_m_reload_ts",
+        "head_optimizer_reload_ts", "tail_optimizer_reload_ts",
+    ]
+    
+    def all_zero(keys):
+        """判断给定 keys 的时间戳是否全为 [0, 0]（跳过 [None, None]）"""
+        for aligned in aligned_list:
+            for k in keys:
+                v = aligned.get(k)
+                if not v or len(v) < 2:
+                    continue
+
+                # 跳过 [None, None]
+                if v[0] is None and v[1] is None:
+                    continue
+
+                # 若存在任意非零值，则返回 False
+                if float(v[0]) != 0.0 or float(v[1]) != 0.0:
+                    return False
+        return True
+    
+    skip_offload_reload = all_zero(OFFLOAD_KEYS + RELOAD_KEYS)
+    
+   # 重新计算对齐时间（仅使用实际存在的 keys）
+    valid_keys = list(STAGE_COLOR.keys())
+    if skip_offload_reload:
+        valid_keys = [k for k in valid_keys if "offload" not in k and "reload" not in k]
+
     all_times = []
     for aligned in aligned_list:
-        for key in STAGE_COLOR:
-            interval = aligned.get(key)
-            if interval and interval[0] is not None:
-                all_times.extend(interval)
+        for k in valid_keys:
+            v = aligned.get(k)
+            if not v or v[0] is None or v[1] is None:
+                continue
+            all_times.extend(v)
+
     if not all_times:
         print("没有有效的时间戳")
         return
+
+    # 关键：统一时间零点
+    min_time = min(all_times)
+    for aligned in aligned_list:
+        for k, v in aligned.items():
+            if not isinstance(v, (list, tuple)) or len(v) != 2:
+                continue
+            aligned[k] = [
+                t - min_time if isinstance(t, (int, float)) else None
+                for t in v
+            ]
 
     fig, ax = plt.subplots(figsize=(15, 4))
 
@@ -246,29 +293,25 @@ def plot_gantt_grouped(
         "Server FWD/BWD": ["server_fwd_timestamp", "server_bwd_timestamp"],
         "Client Send": ["head_fwd_send_timestamp", "tail_bwd_send_timestamp"],
         # "Client Activ Send": ["head_fwd_send_timestamp"],
-        "Client Offload": [
-            "head_m_offload_ts",
-            "tail_m_offload_ts",
-            "head_optimizer_offload_ts",
-            "tail_optimizer_offload_ts",
-        ],
-        "Client Reload": [
-            "head_m_reload_ts",
-            "tail_m_reload_ts",
-            "head_optimizer_reload_ts",
-            "tail_optimizer_reload_ts",
-        ],
         "Client FWD/BWD": ["head_fwd_timestamp", "head_bwd_timestamp", "tail_fwd_timestamp", "tail_bwd_timestamp"],
     }
+    
+    if not skip_offload_reload:
+        # 构造新的映射，按原注释顺序插入
+        new_mapping = {}
+        for k, v in GROUP_MAPPING.items():
+            new_mapping[k] = v
+            if k == "Client Send":
+                new_mapping["Client Offload"] = OFFLOAD_KEYS
+                new_mapping["Client Reload"] = RELOAD_KEYS
+        GROUP_MAPPING = new_mapping
 
     groups = list(GROUP_MAPPING.keys())
-    has_draw_offload = False  # 是否绘制了 offload/reload 条目
-    has_draw_reload = False  # 是否绘制了 offload/reload 条目
+
     for aligned in aligned_list:
         mb_idx = aligned["mini_batch_idx"]  # 当前 mini_batch 序号
         for row_idx, group_name in enumerate(groups):
-            if 'offload' in group_name.lower() and (has_draw_offload or has_draw_reload):
-                continue
+            skip_text = group_name in ["Client Offload", "Client Reload"]
             for key in GROUP_MAPPING[group_name]:
                 interval = aligned.get(key)
                 if not interval or interval[0] is None or interval[1] is None or interval[0] == interval[1]:
@@ -289,12 +332,7 @@ def plot_gantt_grouped(
                 # 在块的中心标注 mini_batch_idx
                 x_center = start + duration / 2
                 y_center = row_idx
-                if 'load' in group_name:
-                    if 'offload' in group_name.lower():
-                        has_draw_offload = True
-                    elif 'reload' in group_name.lower():
-                        has_draw_reload = True
-                else:
+                if not skip_text:  # 跳过两行的 Offload / Reload
                     ax.text(
                         x_center,
                         y_center,
