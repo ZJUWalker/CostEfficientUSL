@@ -119,6 +119,10 @@ class Client:
         # ---- Metrics
         self.compute_time = 0
         self.client_max_mem_alloc_mb = 0
+        self.head_model_offload_timestamp = [0, 0]
+        self.head_model_reload_timestamp = [0, 0]
+        self.tail_model_offload_timestamp = [0, 0]
+        self.tail_model_reload_timestamp = [0, 0]
         self.sent_payload_bytes = 0
         self.normalize_loss = normalize_loss
         self.losses = []
@@ -312,6 +316,7 @@ class Client:
         m: torch.Tensor,
         y: torch.Tensor,
     ):
+        torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_fwd_timestamp[0] = time.perf_counter()
         if self.offload_activation:
             with self.activation_offload_ctx:
@@ -339,7 +344,7 @@ class Client:
         # 解析 server 传来的 payload
         mb_idx = server_forward_output.mb_idx
         mb_total = server_forward_output.mb_total
-
+        torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.perf_counter()
         activation_cpu: torch.Tensor = server_forward_output.tensor
         activation_to_tail = activation_cpu.to(self.client_device, non_blocking=True).requires_grad_(True)
@@ -366,6 +371,7 @@ class Client:
         mb_idx: int,
         mb_total: int,
     ) -> Tuple[Payload, torch.Tensor]:
+        torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.perf_counter()
         loss.backward()
         torch.cuda.current_stream().synchronize()
@@ -386,6 +392,7 @@ class Client:
         mb_idx = server_bwd_output.mb_idx
         grad_cpu: torch.Tensor = server_bwd_output.tensor
         # load grad and activation
+        torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_bwd_timestamp[0] = time.perf_counter()
         grad_to_head = grad_cpu.to(self.client_device, non_blocking=True)
         head_activation = self.head_fwd_activation_dict[mb_idx]
@@ -575,6 +582,10 @@ class Client:
             "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
             "client_compute_time_ms": round(local_compute_time_ms, 2),
             "server_compute_time_ms": round(server_compute_time_ms, 2),
+            "head_m_offload_ts": self.head_model_offload_timestamp,
+            "head_m_reload_ts": self.head_model_reload_timestamp,
+            "tail_m_offload_ts": self.tail_model_offload_timestamp,
+            "tail_m_reload_ts": self.tail_model_reload_timestamp,
             "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
             "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
             "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),

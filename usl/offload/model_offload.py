@@ -24,9 +24,14 @@ class ModelParamOffload:
         self.load_stream: torch.cuda.Stream = load_stream
         self.offload_stream: torch.cuda.Stream = offload_stream
         self.compute_stream: torch.cuda.Stream = torch.cuda.current_stream(self.device)
-
+        # def events
+        self.start_offload_event = torch.cuda.Event(enable_timing=True)
+        self.start_reload_event = torch.cuda.Event(enable_timing=True)
         self.offload_event = torch.cuda.Event(enable_timing=True)
         self.reload_event = torch.cuda.Event(enable_timing=True)
+        # profile events
+        self.offload_timestamp = [0, 0]
+        self.reload_timestamp = [0, 0]
         self.except_tensor_idx_list: List[int] = except_tensor_idx_list  # tensor_idx list to be excluded from offloading
         self._init_param_dict()
 
@@ -52,9 +57,13 @@ class ModelParamOffload:
 
     # offload model parameters and optimizer states from GPU to CPU
     def offload(self, async_offload=False):
-        start = time.perf_counter()
         stream = self.offload_stream if self.offload_stream else self.compute_stream
         stream.wait_stream(self.compute_stream)  # offload should be done after compute
+        # record start offload event used for profiling
+        self.start_offload_event.record(stream)
+        self.start_offload_event.synchronize()
+        self.offload_timestamp[0] = time.perf_counter()
+        # ----------------------------------------------------
         with torch.cuda.stream(stream):
             # Offload model parameters to CPU
             for idx, tensor in self.model_param_on_gpu.items():
@@ -71,14 +80,19 @@ class ModelParamOffload:
             else:
                 # wait for all tensors offloaded
                 self.compute_stream.wait_stream(stream)
+                self.offload_timestamp[1] = time.perf_counter()
                 # release GPU memory
                 self._release_gpu_memory()
 
     # wait for all offloaded states to finish
     def wait_offload(self):
         if self.offload_stream != self.compute_stream:
-            self.compute_stream.wait_stream(self.offload_stream)
+            self.compute_stream.wait_event(self.offload_event)
+            self.offload_event.synchronize()
+            elapsed_time = self.start_offload_event.elapsed_time(self.offload_event)  # kernel time in ms
+            self.offload_timestamp[1] = self.offload_timestamp[0] + elapsed_time / 1000  # time in seconds
             self._release_gpu_memory()
+        return self.offload_timestamp
 
     def offload_finished(self):
         return self.offload_event.query()
@@ -98,6 +112,11 @@ class ModelParamOffload:
     def reload(self, async_reload=False):
         stream = self.load_stream if self.load_stream else self.compute_stream
         stream.wait_stream(self.compute_stream)  # reload should be done after compute
+        # used for profiling
+        self.start_reload_event.record(stream)
+        self.start_reload_event.synchronize()
+        self.reload_timestamp[0] = time.perf_counter()
+        # ----------------------------------------------------
         with torch.cuda.stream(stream):
             # Reload model parameters from CPU to GPU
             for idx, tensor in self.model_param_on_cpu.items():
@@ -113,6 +132,7 @@ class ModelParamOffload:
             else:
                 # wait for all tensors reloaded
                 self.compute_stream.wait_stream(stream)
+                self.reload_timestamp[1] = time.perf_counter()
                 # release CPU memory
                 self.model_param_on_cpu.clear()
                 # torch.cuda.empty_cache()
@@ -120,6 +140,12 @@ class ModelParamOffload:
     def wait_reload(self):
         if self.load_stream != self.compute_stream:
             self.compute_stream.wait_event(self.reload_event)
+            # used for profiling
+            self.reload_event.synchronize()
+            elapsed_time = self.start_reload_event.elapsed_time(self.reload_event)  # kernel time in ms
+            self.reload_timestamp[1] = self.reload_timestamp[0] + elapsed_time / 1000  # time in seconds
+            # ----------------------------------------------------
             # Clear CPU memory
             self.model_param_on_cpu.clear()
-            # torch.cuda.empty_cache()
+        return self.reload_timestamp
+        # torch.cuda.empty_cache()
