@@ -5,6 +5,7 @@ import pandas as pd
 import os
 import json
 import time
+from utils.usl_gantt_plot import plot_gantt_grouped
 
 
 @dataclass
@@ -96,7 +97,9 @@ class SimulateResult:
             json.dump(self.to_dict(), f, indent=4)
 
 
-def _simulate_train_time(main_var: MainVariable, time_var: TimeVariable, memory_var: MemoryVariable, objective: Objective) -> SimulateResult:
+def _simulate_train_time(
+    main_var: MainVariable, time_var: TimeVariable, memory_var: MemoryVariable, objective: Objective, save_gantt: bool = False
+) -> SimulateResult:
     # simulate the batch training time
     micro_batch_num = (main_var.batch_size + main_var.micro_batch_size - 1) // main_var.micro_batch_size
     # use list to do scheduling, each element is a list of two elements, [start_time, end_time]
@@ -180,6 +183,26 @@ def _simulate_train_time(main_var: MainVariable, time_var: TimeVariable, memory_
         else:
             head_bwd_timestamps[i][0] = max(head_bwd_timestamps[i - 1][1], server_gradient_send_timestamps[i][1])
         head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + time_var.head_bwd_time
+
+    if save_gantt:
+        gantt_data = [
+            {
+                "mini_batch_idx": i,
+                "train_time_duration_ms": head_bwd_timestamps[i][1] - head_fwd_timestamps[i][0],
+                "head_fwd_timestamp": head_fwd_timestamps[i],
+                "head_fwd_send_timestamp": head_fwd_timestamps[i],
+                "server_fwd_timestamp": server_fwd_timestamps[i],
+                "server_fwd_send_timestamp": server_activation_send_timestamps[i],
+                "tail_fwd_timestamp": tail_fwd_timestamps[i],
+                "tail_bwd_timestamp": tail_bwd_timestamps[i],
+                "tail_bwd_send_timestamp": tail_gradient_send_timestamps[i],
+                "server_bwd_timestamp": server_bwd_timestamps[i],
+                "server_bwd_send_timestamp": server_gradient_send_timestamps[i],
+                "head_bwd_timestamp": head_bwd_timestamps[i],
+            }
+            for i in range(micro_batch_num)
+        ]
+        plot_gantt_grouped(gantt_data, fp='log/img/grouped/simulated_gantt.png')
     # calculate objective function
     # calculate batch train time ,unit:ms
     batch_train_time = head_bwd_timestamps[-1][1] - head_fwd_timestamps[0][0]
@@ -254,3 +277,7 @@ def simulate(main_variable: MainVariable, time_variable: TimeVariable, memory_va
     simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
     simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
     return simulate_result
+
+
+simulate_res = simulate(MainVariable(), TimeVariable(), MemoryVariable(), Objective())
+print(simulate_res.to_dict())
