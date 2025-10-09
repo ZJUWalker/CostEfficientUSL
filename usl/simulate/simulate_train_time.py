@@ -30,17 +30,17 @@ class TimeVariable:
     TimeVariable contains the time cost of different components in the system.
     """
 
-    head_fwd_time: float = 34.2  # unit:ms
-    head_bwd_time: float = 41.42
-    server_fwd_time: float = 31.18
-    server_bwd_time: float = 65.31
-    head_activation_send_time: float = 100  # unit:ms
-    head_gradient_send_time: float = 80
+    head_fwd_time: float = 17.5  # unit:ms
+    head_bwd_time: float = 36.77
+    server_fwd_time: float = 31.61
+    server_bwd_time: float = 66.1
+    head_activation_send_time: float = 142  # unit:ms
+    head_gradient_send_time: float = 109
     # most of the time,server_activation_recv_time approximates head_gradient_recv_time and server gradient send time
-    server_activation_send_time: float = 80
-    server_gradient_send_time: float = 80  # unit:ms
-    tail_fwd_time: float = 29.43
-    tail_bwd_time: float = 69.19  # unit:ms
+    server_activation_send_time: float = 108
+    server_gradient_send_time: float = 107  # unit:ms
+    tail_fwd_time: float = 29.09
+    tail_bwd_time: float = 66.67  # unit:ms
 
 
 @dataclass
@@ -103,16 +103,16 @@ def _simulate_train_time(
     # simulate the batch training time
     micro_batch_num = (main_var.batch_size + main_var.micro_batch_size - 1) // main_var.micro_batch_size
     # use list to do scheduling, each element is a list of two elements, [start_time, end_time]
-    head_fwd_timestamps = [[0, 0]] * micro_batch_num
-    head_bwd_timestamps = [[0, 0]] * micro_batch_num
-    server_fwd_timestamps = [[0, 0]] * micro_batch_num
-    server_bwd_timestamps = [[0, 0]] * micro_batch_num
-    tail_fwd_timestamps = [[0, 0]] * micro_batch_num
-    tail_bwd_timestamps = [[0, 0]] * micro_batch_num
-    head_activation_send_timestamps = [[0, 0]] * micro_batch_num
-    tail_gradient_send_timestamps = [[0, 0]] * micro_batch_num
-    server_activation_send_timestamps = [[0, 0]] * micro_batch_num
-    server_gradient_send_timestamps = [[0, 0]] * micro_batch_num
+    head_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    head_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    server_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    server_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    tail_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    tail_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    head_activation_send_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    tail_gradient_send_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    server_activation_send_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    server_gradient_send_timestamps = [[0, 0] for _ in range(micro_batch_num)]
 
     # do simulating
     # step1 : do head fwd
@@ -183,14 +183,14 @@ def _simulate_train_time(
         else:
             head_bwd_timestamps[i][0] = max(head_bwd_timestamps[i - 1][1], server_gradient_send_timestamps[i][1])
         head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + time_var.head_bwd_time
-
+    # print(head_fwd_timestamps)
     if save_gantt:
         gantt_data = [
             {
                 "mini_batch_idx": i,
                 "train_time_duration_ms": head_bwd_timestamps[i][1] - head_fwd_timestamps[i][0],
                 "head_fwd_timestamp": head_fwd_timestamps[i],
-                "head_fwd_send_timestamp": head_fwd_timestamps[i],
+                "head_fwd_send_timestamp": head_activation_send_timestamps[i],
                 "server_fwd_timestamp": server_fwd_timestamps[i],
                 "server_fwd_send_timestamp": server_activation_send_timestamps[i],
                 "tail_fwd_timestamp": tail_fwd_timestamps[i],
@@ -202,7 +202,7 @@ def _simulate_train_time(
             }
             for i in range(micro_batch_num)
         ]
-        plot_gantt_grouped(gantt_data, fp='log/img/grouped/simulated_gantt.png',align=False)
+        plot_gantt_grouped(gantt_data, fp='log/img/grouped/simulated_gantt.png', align=False)
     # calculate objective function
     # calculate batch train time ,unit:ms
     batch_train_time = head_bwd_timestamps[-1][1] - head_fwd_timestamps[0][0]
@@ -271,7 +271,7 @@ def _simulate_peak_mem_alloc(
 
 
 def simulate(main_variable: MainVariable, time_variable: TimeVariable, memory_variable: MemoryVariable, objective: Objective) -> SimulateResult:
-    simulate_result = _simulate_train_time(main_variable, time_variable, memory_variable, objective,True)
+    simulate_result = _simulate_train_time(main_variable, time_variable, memory_variable, objective, True)
     # simulate_mem_result = _simulate_peak_mem_alloc(main_variable, time_variable, memory_variable, objective)
     # copy memory result to simulate_result
     # simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
