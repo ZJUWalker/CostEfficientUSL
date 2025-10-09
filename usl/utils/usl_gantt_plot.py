@@ -18,6 +18,16 @@ class GanttChartData:
     server_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    # 新增 Offload / Reload 时间字段，防止绘图时报错
+    head_m_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_m_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    head_optimizer_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_optimizer_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+
+    head_m_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_m_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    head_optimizer_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_optimizer_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
 
 
 def merge_cs_json(server_data: List[Dict], client_data: List[Dict], save_fp: str = "merged.json", save: bool = False) -> List[Dict]:
@@ -86,6 +96,8 @@ def save_gantt_chart_data(gantt_data_dict: Dict, fp: str):
     with open(fp, "w") as f:
         json.dump(gantt_data_dict, f, indent=4)
 
+OFFLOAD_COLOR = "#66c2a5"
+RELOAD_COLOR = "#fc8d62"
 
 # 阶段名字和颜色
 STAGE_COLOR = {
@@ -99,6 +111,14 @@ STAGE_COLOR = {
     "server_bwd_timestamp": ("(S)Server Bwd", "#7f7f7f"),  # 灰色
     "server_bwd_send_timestamp": ("(S)Server Bwd Send", "#bcbd22"),  # 黄绿色
     "head_bwd_timestamp": ("(C)Head Bwd", "#17becf"),  # 青色
+    "head_m_offload_ts": ("(C)Head M Offload", OFFLOAD_COLOR),
+    "tail_m_offload_ts": ("(C)Tail M Offload", OFFLOAD_COLOR),
+    "head_optimizer_offload_ts": ("(C)Head Opt Offload", OFFLOAD_COLOR),
+    "tail_optimizer_offload_ts": ("(C)Tail Opt Offload", OFFLOAD_COLOR),
+    "head_m_reload_ts": ("(C)Head M Reload", RELOAD_COLOR),
+    "tail_m_reload_ts": ("(C)Tail M Reload", RELOAD_COLOR),
+    "head_optimizer_reload_ts": ("(C)Head Opt Reload", RELOAD_COLOR),
+    "tail_optimizer_reload_ts": ("(C)Tail Opt Reload", RELOAD_COLOR),
 }
 
 
@@ -213,7 +233,7 @@ def plot_gantt_grouped(
 
     fig, ax = plt.subplots(figsize=(15, 4))
 
-    # 四个分组的映射
+    # 六个分组的映射
     GROUP_MAPPING = {
         # "Client Tail FWD/BWD": ["tail_fwd_timestamp", "tail_bwd_timestamp"],
         # "Client Grad Send": ["tail_bwd_send_timestamp"],
@@ -223,6 +243,14 @@ def plot_gantt_grouped(
         "Server FWD/BWD": ["server_fwd_timestamp", "server_bwd_timestamp"],
         "Client Send": ["head_fwd_send_timestamp", "tail_bwd_send_timestamp"],
         # "Client Activ Send": ["head_fwd_send_timestamp"],
+        "Client Reload": [
+            "head_m_reload_ts", "tail_m_reload_ts",
+            "head_optimizer_reload_ts", "tail_optimizer_reload_ts",
+        ],
+        "Client Offload": [
+            "head_m_offload_ts", "tail_m_offload_ts",
+            "head_optimizer_offload_ts", "tail_optimizer_offload_ts",
+        ],
         "Client FWD/BWD": ["head_fwd_timestamp", "head_bwd_timestamp", "tail_fwd_timestamp", "tail_bwd_timestamp"],
     }
 
@@ -237,7 +265,16 @@ def plot_gantt_grouped(
                     continue
                 start, end = interval
                 duration = end - start
-                label, color = STAGE_COLOR[key]
+                # label, color = STAGE_COLOR[key]
+                # 颜色选择
+                # if group_name == "Client Offload":
+                #     label, color = STAGE_COLOR["offload_stage"]
+                # elif group_name == "Client Reload":
+                #     label, color = STAGE_COLOR["reload_stage"]
+                # else:
+                #     # label, color = STAGE_COLOR.get(key, (key, "#cccccc"))
+                #     label, color = STAGE_COLOR[key]
+                label, color = STAGE_COLOR.get(key, ("Unknown", "#cccccc"))
                 ax.barh(
                     y=row_idx,
                     width=duration,

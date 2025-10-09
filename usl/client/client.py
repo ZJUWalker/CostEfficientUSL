@@ -123,6 +123,10 @@ class Client:
         self.head_model_reload_timestamp = [0, 0]
         self.tail_model_offload_timestamp = [0, 0]
         self.tail_model_reload_timestamp = [0, 0]
+        self.head_optimizer_offload_timestamp = [0, 0]
+        self.head_optimizer_reload_timestamp = [0, 0]
+        self.tail_optimizer_offload_timestamp = [0, 0]
+        self.tail_optimizer_reload_timestamp = [0, 0]
         self.sent_payload_bytes = 0
         self.normalize_loss = normalize_loss
         self.losses = []
@@ -586,6 +590,10 @@ class Client:
             "head_m_reload_ts": self.head_model_reload_timestamp,
             "tail_m_offload_ts": self.tail_model_offload_timestamp,
             "tail_m_reload_ts": self.tail_model_reload_timestamp,
+            "head_optimizer_offload_ts": self.head_optimizer_offload_timestamp,
+            "head_optimizer_reload_ts": self.head_optimizer_reload_timestamp,
+            "tail_optimizer_offload_ts": self.tail_optimizer_offload_timestamp,
+            "tail_optimizer_reload_ts": self.tail_optimizer_reload_timestamp,
             "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
             "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
             "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),

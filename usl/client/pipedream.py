@@ -145,7 +145,7 @@ class PipeDreamWCClientTrainer(Client):
             self.head_os_mgr.offload(True)
             # wait for offload ,releasing GPU memory
             self.head_model_offload_timestamp = self.head_m_mgr.wait_offload()
-            self.head_os_mgr.wait_offload()
+            self.head_optimizer_offload_timestamp = self.head_os_mgr.wait_offload()
             # wait for reload,
             self.tail_model_reload_timestamp = self.tail_m_mgr.wait_reload()
         batch_loss = 0
@@ -179,7 +179,8 @@ class PipeDreamWCClientTrainer(Client):
         # 3. Tail model step
         if self.offload_model_state:
             # wait for tail optimizer reload,or else it will cause error when step
-            self.tail_os_mgr.wait_reload()
+            # self.tail_os_mgr.wait_reload()
+            self.tail_optimizer_reload_timestamp = self.tail_os_mgr.wait_reload()
         self.optimizer_tail.step()
         self.optimizer_tail.zero_grad(set_to_none=True)
         if self.offload_model_state:
@@ -189,7 +190,7 @@ class PipeDreamWCClientTrainer(Client):
             self.tail_os_mgr.offload(True)
             self.head_model_reload_timestamp = self.head_m_mgr.wait_reload()
             self.tail_model_offload_timestamp = self.tail_m_mgr.wait_offload()
-            self.tail_os_mgr.wait_offload()
+            self.tail_optimizer_offload_timestamp = self.tail_os_mgr.wait_offload()
         # 4. Head backward
         if self.offload_activation:
             self.activation_offload_handler.start_bwd()
@@ -209,7 +210,8 @@ class PipeDreamWCClientTrainer(Client):
 
         # 5. Head model step
         if self.offload_model_state:
-            self.head_os_mgr.wait_reload()
+            # self.head_os_mgr.wait_reload()
+            self.head_optimizer_reload_timestamp = self.head_os_mgr.wait_reload()
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
 
