@@ -502,10 +502,14 @@ class Client:
         local_compute_time_ms = 0
         server_compute_time_ms = 0
         head_fwd_time_avg = 0
+        head_fwd_send_time_avg = 0
         head_bwd_time_avg = 0
         server_fwd_time_avg = 0
+        server_fwd_send_time_avg = 0
         server_bwd_time_avg = 0
+        server_bwd_send_time_avg = 0
         tail_fwd_time_avg = 0
+        tail_bwd_send_time_avg = 0
         tail_bwd_time_avg = 0
         client_send_time_ms = 0
         server_send_time_ms = 0
@@ -548,13 +552,17 @@ class Client:
             ) * 1000
             # 计算 每个sub model的训练时间
             head_fwd_time_avg += (client_item.head_fwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000
+            head_fwd_send_time_avg += (client_item.head_fwd_send_timestamp[1] - client_item.head_fwd_send_timestamp[0]) * 1000
             head_bwd_time_avg += (client_item.head_bwd_timestamp[1] - client_item.head_bwd_timestamp[0]) * 1000
             server_fwd_time_avg += (server_item.server_fwd_timestamp[1] - server_item.server_fwd_timestamp[0]) * 1000
+            server_fwd_send_time_avg += (client_item.server_fwd_send_timestamp[1] - client_item.server_fwd_send_timestamp[0]) * 1000
             server_bwd_time_avg += (server_item.server_bwd_timestamp[1] - server_item.server_bwd_timestamp[0]) * 1000
+            server_bwd_send_time_avg += (client_item.server_bwd_send_timestamp[1] - client_item.server_bwd_send_timestamp[0]) * 1000
             tail_fwd_time_avg += (client_item.tail_fwd_timestamp[1] - client_item.tail_fwd_timestamp[0]) * 1000
             tail_bwd_time_avg += (client_item.tail_bwd_timestamp[1] - client_item.tail_bwd_timestamp[0]) * 1000
+            tail_bwd_send_time_avg += (client_item.tail_bwd_send_timestamp[1] - client_item.tail_bwd_send_timestamp[0]) * 1000
             # offload timestamp 为了好画图
-            client_item.head_m_offload_ts = self.head_model_offload_timestamp 
+            client_item.head_m_offload_ts = self.head_model_offload_timestamp
             client_item.head_m_reload_ts = self.head_model_reload_timestamp
             client_item.tail_m_offload_ts = self.tail_model_offload_timestamp
             client_item.tail_m_reload_ts = self.tail_model_reload_timestamp
@@ -569,11 +577,15 @@ class Client:
         # 计算平均时间
         grad_accum_steps = len(self.profile_data)
         head_fwd_time_avg /= grad_accum_steps
+        head_fwd_send_time_avg /= grad_accum_steps
         head_bwd_time_avg /= grad_accum_steps
         server_fwd_time_avg /= grad_accum_steps
+        server_fwd_send_time_avg /= grad_accum_steps
         server_bwd_time_avg /= grad_accum_steps
+        server_bwd_send_time_avg /= grad_accum_steps
         tail_fwd_time_avg /= grad_accum_steps
         tail_bwd_time_avg /= grad_accum_steps
+        tail_bwd_send_time_avg /= grad_accum_steps
         # 计算平均通信时间
 
         # 计算batch训练时间
@@ -592,10 +604,14 @@ class Client:
             "server_max_mem_alloc_mb": kwargs.get("server_max_mem_alloc_mb", 0),
             "batch_train_time_ms": batch_train_time_ms,
             "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
+            "head_fwd_send_time_avg_ms": round(head_fwd_send_time_avg, 2),
             "head_bwd_time_avg_ms": round(head_bwd_time_avg, 2),
             "server_fwd_time_avg_ms": round(server_fwd_time_avg, 2),
+            "server_fwd_send_time_avg_ms": round(server_fwd_send_time_avg, 2),
             "server_bwd_time_avg_ms": round(server_bwd_time_avg, 2),
+            "server_bwd_send_time_avg_ms": round(server_bwd_send_time_avg, 2),
             "tail_fwd_time_avg_ms": round(tail_fwd_time_avg, 2),
+            "tail_bwd_send_time_avg_ms": round(tail_bwd_send_time_avg, 2),
             "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
             "client_compute_time_ms": round(local_compute_time_ms, 2),
             "server_compute_time_ms": round(server_compute_time_ms, 2),
