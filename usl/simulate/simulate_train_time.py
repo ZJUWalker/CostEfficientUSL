@@ -18,7 +18,7 @@ class MainVariable:
     micro_batch_size: int = 1
     max_seq_len: int = 512
     split_point: int = 4
-    rate_mbps: float = 300  # mbps limit
+    rate_mbps: float = 1000  # mbps limit
     bytes_send_ps: float = 154339.0  # bytes per ms
     offload: bool = False
     lora: bool = False
@@ -30,17 +30,17 @@ class TimeVariable:
     TimeVariable contains the time cost of different components in the system.
     """
 
-    head_fwd_time: float = 17.5  # unit:ms
-    head_bwd_time: float = 36.77
-    server_fwd_time: float = 31.61
-    server_bwd_time: float = 66.1
-    head_activation_send_time: float = 142  # unit:ms
-    head_gradient_send_time: float = 109
+    head_fwd_time: float = 8.99  # unit:ms
+    head_bwd_time: float = 17.55
+    server_fwd_time: float = 43.14
+    server_bwd_time: float = 87.83
+    head_activation_send_time: float = 44.11  # unit:ms
+    head_gradient_send_time: float = 33.41
     # most of the time,server_activation_recv_time approximates head_gradient_recv_time and server gradient send time
-    server_activation_send_time: float = 108
-    server_gradient_send_time: float = 107  # unit:ms
-    tail_fwd_time: float = 29.09
-    tail_bwd_time: float = 66.67  # unit:ms
+    server_activation_send_time: float = 33.93
+    server_gradient_send_time: float = 33.65  # unit:ms
+    tail_fwd_time: float = 11.43
+    tail_bwd_time: float = 28.63  # unit:ms
 
 
 @dataclass
@@ -148,7 +148,7 @@ def _simulate_train_time(
         if i == 0:
             tail_fwd_timestamps[0][0] = max(head_fwd_timestamps[-1][1], server_activation_send_timestamps[0][1])
         else:
-            tail_fwd_timestamps[i][0] = max(tail_fwd_timestamps[i - 1][1], server_activation_send_timestamps[i][1])
+            tail_fwd_timestamps[i][0] = max(tail_bwd_timestamps[i - 1][1], server_activation_send_timestamps[i][1])
         tail_fwd_timestamps[i][1] = tail_fwd_timestamps[i][0] + time_var.tail_fwd_time
         tail_bwd_timestamps[i][0] = tail_fwd_timestamps[i][1]
         tail_bwd_timestamps[i][1] = tail_bwd_timestamps[i][0] + time_var.tail_bwd_time
