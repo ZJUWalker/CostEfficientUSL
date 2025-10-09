@@ -67,9 +67,8 @@ class OptimizerStateOffload:
         stream.wait_stream(self.compute_stream)  # offload should be done after compute
         # record start offload event used for profiling
         self.start_offload_event.record(stream)
-        self.start_offload_event.synchronize()
         self.offload_timestamp[0] = time.perf_counter()
-        
+
         with torch.cuda.stream(stream):
             self._offload()
 
@@ -97,7 +96,6 @@ class OptimizerStateOffload:
         stream.wait_stream(self.compute_stream)  # reload should be done after compute
         # used for profiling
         self.start_reload_event.record(stream)
-        self.start_reload_event.synchronize()
         self.reload_timestamp[0] = time.perf_counter()
         with torch.cuda.stream(stream):
             self._reload()

@@ -96,29 +96,32 @@ def save_gantt_chart_data(gantt_data_dict: Dict, fp: str):
     with open(fp, "w") as f:
         json.dump(gantt_data_dict, f, indent=4)
 
-OFFLOAD_COLOR = "#66c2a5"
-RELOAD_COLOR = "#fc8d62"
+
+HEAD_OFFLOAD_COLOR = "#66c2a5"
+TAIL_OFFLOAD_COLOR = "#435fc2"
+HEAD_RELOAD_COLOR = "#fc8d62"
+TAIL_RELOAD_COLOR = "#cddc66"
 
 # 阶段名字和颜色
 STAGE_COLOR = {
     "head_fwd_timestamp": ("(C)Head Fwd", "#1f77b4"),  # 蓝色
     "head_fwd_send_timestamp": ("(C)Head Fwd Send", "#ff7f0e"),  # 橙色
     "server_fwd_timestamp": ("(S)Server Fwd", "#2ca02c"),  # 绿色
-    "server_fwd_send_timestamp": ("(S)Server Fwd Send", "#d62728"),  # 红色
+    "server_fwd_send_timestamp": ("(S)Server Fwd Send", "#dfeb56"),  # 红色
     "tail_fwd_timestamp": ("(C)Tail Fwd", "#9467bd"),  # 紫色
     "tail_bwd_timestamp": ("(C)Tail Bwd", "#8c564b"),  # 棕色
     "tail_bwd_send_timestamp": ("(C)Tail Bwd Send", "#e377c2"),  # 粉色
     "server_bwd_timestamp": ("(S)Server Bwd", "#7f7f7f"),  # 灰色
     "server_bwd_send_timestamp": ("(S)Server Bwd Send", "#bcbd22"),  # 黄绿色
     "head_bwd_timestamp": ("(C)Head Bwd", "#17becf"),  # 青色
-    "head_m_offload_ts": ("(C)Head M Offload", OFFLOAD_COLOR),
-    "tail_m_offload_ts": ("(C)Tail M Offload", OFFLOAD_COLOR),
-    "head_optimizer_offload_ts": ("(C)Head Opt Offload", OFFLOAD_COLOR),
-    "tail_optimizer_offload_ts": ("(C)Tail Opt Offload", OFFLOAD_COLOR),
-    "head_m_reload_ts": ("(C)Head M Reload", RELOAD_COLOR),
-    "tail_m_reload_ts": ("(C)Tail M Reload", RELOAD_COLOR),
-    "head_optimizer_reload_ts": ("(C)Head Opt Reload", RELOAD_COLOR),
-    "tail_optimizer_reload_ts": ("(C)Tail Opt Reload", RELOAD_COLOR),
+    "head_m_offload_ts": ("(C)Head M Offload", HEAD_OFFLOAD_COLOR),
+    "tail_m_offload_ts": ("(C)Tail M Offload", TAIL_OFFLOAD_COLOR),
+    "head_optimizer_offload_ts": ("(C)Head Opt Offload", HEAD_OFFLOAD_COLOR),
+    "tail_optimizer_offload_ts": ("(C)Tail Opt Offload", TAIL_OFFLOAD_COLOR),
+    "head_m_reload_ts": ("(C)Head M Reload", HEAD_RELOAD_COLOR),
+    "tail_m_reload_ts": ("(C)Tail M Reload", TAIL_RELOAD_COLOR),
+    "head_optimizer_reload_ts": ("(C)Head Opt Reload", HEAD_RELOAD_COLOR),
+    "tail_optimizer_reload_ts": ("(C)Tail Opt Reload", TAIL_RELOAD_COLOR),
 }
 
 
@@ -243,37 +246,35 @@ def plot_gantt_grouped(
         "Server FWD/BWD": ["server_fwd_timestamp", "server_bwd_timestamp"],
         "Client Send": ["head_fwd_send_timestamp", "tail_bwd_send_timestamp"],
         # "Client Activ Send": ["head_fwd_send_timestamp"],
-        "Client Reload": [
-            "head_m_reload_ts", "tail_m_reload_ts",
-            "head_optimizer_reload_ts", "tail_optimizer_reload_ts",
-        ],
         "Client Offload": [
-            "head_m_offload_ts", "tail_m_offload_ts",
-            "head_optimizer_offload_ts", "tail_optimizer_offload_ts",
+            "head_m_offload_ts",
+            "tail_m_offload_ts",
+            "head_optimizer_offload_ts",
+            "tail_optimizer_offload_ts",
+        ],
+        "Client Reload": [
+            "head_m_reload_ts",
+            "tail_m_reload_ts",
+            "head_optimizer_reload_ts",
+            "tail_optimizer_reload_ts",
         ],
         "Client FWD/BWD": ["head_fwd_timestamp", "head_bwd_timestamp", "tail_fwd_timestamp", "tail_bwd_timestamp"],
     }
 
     groups = list(GROUP_MAPPING.keys())
-
+    has_draw_offload = False  # 是否绘制了 offload/reload 条目
+    has_draw_reload = False  # 是否绘制了 offload/reload 条目
     for aligned in aligned_list:
         mb_idx = aligned["mini_batch_idx"]  # 当前 mini_batch 序号
         for row_idx, group_name in enumerate(groups):
+            if 'offload' in group_name.lower() and (has_draw_offload or has_draw_reload):
+                continue
             for key in GROUP_MAPPING[group_name]:
                 interval = aligned.get(key)
-                if not interval or interval[0] is None or interval[1] is None:
+                if not interval or interval[0] is None or interval[1] is None or interval[0] == interval[1]:
                     continue
                 start, end = interval
                 duration = end - start
-                # label, color = STAGE_COLOR[key]
-                # 颜色选择
-                # if group_name == "Client Offload":
-                #     label, color = STAGE_COLOR["offload_stage"]
-                # elif group_name == "Client Reload":
-                #     label, color = STAGE_COLOR["reload_stage"]
-                # else:
-                #     # label, color = STAGE_COLOR.get(key, (key, "#cccccc"))
-                #     label, color = STAGE_COLOR[key]
                 label, color = STAGE_COLOR.get(key, ("Unknown", "#cccccc"))
                 ax.barh(
                     y=row_idx,
@@ -288,16 +289,22 @@ def plot_gantt_grouped(
                 # 在块的中心标注 mini_batch_idx
                 x_center = start + duration / 2
                 y_center = row_idx
-                ax.text(
-                    x_center,
-                    y_center,
-                    str(mb_idx),
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    color="black",
-                    fontweight="bold",
-                )
+                if 'load' in group_name:
+                    if 'offload' in group_name.lower():
+                        has_draw_offload = True
+                    elif 'reload' in group_name.lower():
+                        has_draw_reload = True
+                else:
+                    ax.text(
+                        x_center,
+                        y_center,
+                        str(mb_idx),
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="black",
+                        fontweight="bold",
+                    )
 
     ax.set_xlabel("Time (ms, aligned)")
     ax.set_yticks(range(len(groups)))

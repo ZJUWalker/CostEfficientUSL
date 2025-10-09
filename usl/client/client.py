@@ -553,6 +553,18 @@ class Client:
             server_bwd_time_avg += (server_item.server_bwd_timestamp[1] - server_item.server_bwd_timestamp[0]) * 1000
             tail_fwd_time_avg += (client_item.tail_fwd_timestamp[1] - client_item.tail_fwd_timestamp[0]) * 1000
             tail_bwd_time_avg += (client_item.tail_bwd_timestamp[1] - client_item.tail_bwd_timestamp[0]) * 1000
+            # offload timestamp 为了好画图
+            client_item.head_m_offload_ts = self.head_model_offload_timestamp 
+            client_item.tail_m_offload_ts = self.tail_model_offload_timestamp
+            client_item.tail_m_reload_ts = self.tail_model_reload_timestamp
+            head_m_offload_time_ms = self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]
+            head_m_reload_time_ms = self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]
+            tail_m_offload_time_ms = self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]
+            tail_m_reload_time_ms = self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0]
+            client_item.head_optimizer_offload_ts = [var + head_m_offload_time_ms for var in self.head_optimizer_offload_timestamp]
+            client_item.head_optimizer_reload_ts = [var + head_m_reload_time_ms for var in self.head_optimizer_reload_timestamp]
+            client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
+            client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
         # 计算平均时间
         grad_accum_steps = len(self.profile_data)
         head_fwd_time_avg /= grad_accum_steps
@@ -586,14 +598,14 @@ class Client:
             "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
             "client_compute_time_ms": round(local_compute_time_ms, 2),
             "server_compute_time_ms": round(server_compute_time_ms, 2),
-            "head_m_offload_ts": self.head_model_offload_timestamp,
-            "head_m_reload_ts": self.head_model_reload_timestamp,
-            "tail_m_offload_ts": self.tail_model_offload_timestamp,
-            "tail_m_reload_ts": self.tail_model_reload_timestamp,
-            "head_optimizer_offload_ts": self.head_optimizer_offload_timestamp,
-            "head_optimizer_reload_ts": self.head_optimizer_reload_timestamp,
-            "tail_optimizer_offload_ts": self.tail_optimizer_offload_timestamp,
-            "tail_optimizer_reload_ts": self.tail_optimizer_reload_timestamp,
+            "head_m_offload_time_ms": self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0],
+            "head_m_reload_time_ms": self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0],
+            "tail_m_offload_time_ms": self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0],
+            "tail_m_reload_time_ms": self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0],
+            "head_os_offload_time_ms": self.head_optimizer_offload_timestamp[1] - self.head_optimizer_offload_timestamp[0],
+            "head_os_reload_time_ms": self.head_optimizer_reload_timestamp[1] - self.head_optimizer_reload_timestamp[0],
+            "tail_os_offload_time_ms": self.tail_optimizer_offload_timestamp[1] - self.tail_optimizer_offload_timestamp[0],
+            "tail_os_reload_time_ms": self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0],
             "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
             "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
             "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
