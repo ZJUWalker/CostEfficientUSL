@@ -37,7 +37,9 @@ def run_client(args: ClientArgs, profile=False):
     logger.info(f"client start with args: {args}")
 
     # ---------------load model and tokenizer --------------------------
-    head, tail, tokenizer = load_client(model_dir, model_name, split_point, use_lora=lora, use_qlora_4bit=False, use_qlora_8bit=False)
+    head, tail, tokenizer = load_client(
+        model_dir, model_name, split_point, use_lora=(lora and split_point > 0), use_qlora_4bit=False, use_qlora_8bit=False
+    )
     # ---------------load dataset------------------------------------
     client_dataloaders = load_dataset(dataset_name, tokenizer, [0], batch_size, max_seq_len)
     dataloader = client_dataloaders[0]  # 默认只取第一个客户端数据
