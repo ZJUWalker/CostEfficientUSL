@@ -600,6 +600,8 @@ class Client:
             "batch_size": self.client_args.batch_size,
             "micro_batch_size": self.client_args.micro_batch_size,
             "max_seq_len": self.client_args.max_seq_len,
+            "offload_model_state": self.client_args.offload_model_state,
+            "offload_activation": self.client_args.offload_activation,
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": kwargs.get("server_max_mem_alloc_mb", 0),
             "batch_train_time_ms": batch_train_time_ms,
