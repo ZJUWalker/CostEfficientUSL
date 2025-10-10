@@ -103,7 +103,13 @@ class Client:
             self.tail_model = tail_model.to("cpu")  # 初始化状态：把tail_model放在cpu中
         else:
             self.tail_model = tail_model.to(self.client_device)  # 初始化状态：把tail_model放在cuda中
-
+        if self.client_args.split_point == 0 and self.client_args.use_lora:
+            # if use lora but no block, all the param don't need to be updated
+            for n, p in self.head_model.named_parameters():
+                p.requires_grad = False
+            for n, p in self.tail_model.named_parameters():
+                p.requires_grad = False
+        self.head_model_param_mem_alloc = torch.cuda.memory_allocated(self.client_device) / 1024**2
         # ---- move embedding layer to cuda
         # self.head_model.get_input_embeddings().to(self.client_device)
         # ---- Tokenizer
@@ -602,6 +608,7 @@ class Client:
             "max_seq_len": self.client_args.max_seq_len,
             "offload_model_state": self.client_args.offload_model_state,
             "offload_activation": self.client_args.offload_activation,
+            "head_param_mem_alloc_mb": round(self.head_model_param_mem_alloc, 4),
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": kwargs.get("server_max_mem_alloc_mb", 0),
             "batch_train_time_ms": batch_train_time_ms,
