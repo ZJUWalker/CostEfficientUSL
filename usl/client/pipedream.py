@@ -214,7 +214,8 @@ class PipeDreamWCClientTrainer(Client):
             self.head_optimizer_reload_timestamp = self.head_os_mgr.wait_reload()
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
-
+        if self.offload_activation:
+            print(self.activation_offload_handler.offload_time_durations)
         # 6. Memory tracking
         self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)

@@ -23,11 +23,13 @@ class GanttChartData:
     tail_m_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     head_optimizer_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     tail_optimizer_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
-
+    activation_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    
     head_m_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     tail_m_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     head_optimizer_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     tail_optimizer_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
+    activation_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
 
 
 def merge_cs_json(server_data: List[Dict], client_data: List[Dict], save_fp: str = "merged.json", save: bool = False) -> List[Dict]:

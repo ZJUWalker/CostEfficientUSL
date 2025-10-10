@@ -127,10 +127,6 @@ class Client:
         self.head_optimizer_reload_timestamp = [0, 0]
         self.tail_optimizer_offload_timestamp = [0, 0]
         self.tail_optimizer_reload_timestamp = [0, 0]
-        self.head_activation_offload_timestamp = [0, 0]
-        self.head_activation_reload_timestamp = [0, 0]
-        self.tail_activation_offload_timestamp = [0, 0]
-        self.tail_activation_reload_timestamp = [0, 0]
         self.sent_payload_bytes = 0
         self.normalize_loss = normalize_loss
         self.losses = []
@@ -578,6 +574,22 @@ class Client:
             client_item.head_optimizer_reload_ts = [var + head_m_reload_time_ms for var in self.head_optimizer_reload_timestamp]
             client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
             client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
+            # client_item.activation_offload_ts =[[self.activation_offload_handler.offload_start_timestamp[client_item.mini_batch_idx],
+                # self.activation_offload_handler.offload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.offload_time_durations[client_item.mini_batch_idx] / 1000]]
+            # client_item.activation_offload_ts = [[start, start + dur / 1000]
+            #     for start, dur in zip(
+            #         self.activation_offload_handler.offload_start_timestamp,
+            #         self.activation_offload_handler.offload_time_durations
+            #     )
+            # ]
+            # client_item.activation_reload_ts = [[self.activation_offload_handler.reload_start_timestamp[client_item.mini_batch_idx],
+                # self.activation_offload_handler.reload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.reload_time_durations[client_item.mini_batch_idx] / 1000]]
+            # client_item.activation_reload_ts = [[start, start + dur / 1000]
+            #     for start, dur in zip(
+            #         self.activation_offload_handler.reload_start_timestamp,
+            #         self.activation_offload_handler.reload_time_durations
+            #     )
+            # ]
         # 计算平均时间
         grad_accum_steps = len(self.profile_data)
         head_fwd_time_avg /= grad_accum_steps
@@ -629,10 +641,8 @@ class Client:
             "head_os_reload_time_ms": self.head_optimizer_reload_timestamp[1] - self.head_optimizer_reload_timestamp[0],
             "tail_os_offload_time_ms": self.tail_optimizer_offload_timestamp[1] - self.tail_optimizer_offload_timestamp[0],
             "tail_os_reload_time_ms": self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0],
-            "head_a_offload_time_ms": self.head_activation_offload_timestamp[1] - self.head_activation_offload_timestamp[0],
-            "head_a_reload_time_ms": self.head_activation_reload_timestamp[1] - self.head_activation_reload_timestamp[0],
-            "tail_a_offload_time_ms": self.tail_activation_offload_timestamp[1] - self.tail_activation_offload_timestamp[0],
-            "tail_a_reload_time_ms": self.tail_activation_reload_timestamp[1] - self.tail_activation_reload_timestamp[0],
+            "activation_offload_time_ms": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
+            "activation_reload_time_ms": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
             "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
             "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
             "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
