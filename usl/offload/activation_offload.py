@@ -3,8 +3,9 @@
 # https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/pytorch/cpu_offload.py
 """Functionality for CPU offloading of activation tensors saved for backward pass."""
 import math
+import time
 import warnings
-from typing import Any, Tuple
+from typing import Any, List, Tuple
 
 import torch
 
@@ -202,6 +203,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
             non_blocking = cpu_backup.is_pinned()
         return cpu_backup.to(dev, non_blocking=non_blocking)
 
+    # 'pack'
     def tensor_push(self, tensor: torch.Tensor, **kwargs):
         """Tensor push."""
         # obtain a unique tensor tag
@@ -216,6 +218,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
             self.tensor_tag_to_state[tensor_tag] = tensor
         return tensor_tag
 
+    # 'unpack'
     def tensor_pop(self, tensor_tag, **kwargs):
         """Tensor pop."""
         assert tensor_tag in self.tensor_tag_to_state
@@ -255,13 +258,25 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.d2h_stream = offload_stream if offload_stream is not None else torch.cuda.Stream()
         self.h2d_stream = load_stream if load_stream is not None else torch.cuda.Stream()
         self.compute_stream = torch.cuda.current_stream()
-        self.h2d_finish_events = []
-        self.d2h_finish_events = []
-        self.compute_stream_bwd_start_events = []
+        self.offload_start_timestamp:List[float] = []
+        self.offload_time_durations:List[float] = []
+        self.reload_start_timestamp:List[float] = []
+        self.reload_time_durations:List[float] = []
+        self.h2d_start_events:List[torch.cuda.Event] = []
+        self.h2d_finish_events:List[torch.cuda.Event] = []
+        self.d2h_start_events:List[torch.cuda.Event] = []
+        self.d2h_finish_events:List[torch.cuda.Event] = []
+        self.compute_stream_bwd_start_events:List[torch.cuda.Event] = []
         for _ in range(self.num_minibatch):
-            self.h2d_finish_events.append(torch.cuda.Event())
-            self.d2h_finish_events.append(torch.cuda.Event())
-            self.compute_stream_bwd_start_events.append(torch.cuda.Event())
+            self.offload_time_durations.append(0)
+            self.offload_start_timestamp.append(None)
+            self.reload_time_durations.append(0)
+            self.reload_start_timestamp.append(None)
+            self.h2d_start_events.append(torch.cuda.Event(enable_timing=True))
+            self.h2d_finish_events.append(torch.cuda.Event(enable_timing=True))
+            self.d2h_start_events.append(torch.cuda.Event(enable_timing=True))
+            self.d2h_finish_events.append(torch.cuda.Event(enable_timing=True))
+            self.compute_stream_bwd_start_events.append(torch.cuda.Event(enable_timing=True))
 
         self.total_offload_size = 0
 
@@ -315,6 +330,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # the copying of this minibatch should wait for the computation stream
         self.d2h_stream.wait_stream(self.compute_stream)
         """Bulk offload minibatch."""
+        # start_offload=time.time()
+        self.offload_start_timestamp[mb_to_offload] = time.time()
+        self.d2h_stream.record_event(self.d2h_start_events[mb_to_offload])
+        # print('record d2h start event for mb_idx', mb_to_offload)
         with torch.cuda.stream(self.d2h_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 mb_idx, _ = tensor_tag
@@ -335,19 +354,33 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # perform bulk offloading
             self.bulk_offload_group(current_mb_idx)
             self.d2h_stream.record_event(self.d2h_finish_events[current_mb_idx])
+            # print('record d2h finish event for mb_idx', current_mb_idx)
         # wait for the previous minibatch to finish offloading,we need to clear the GPU buffer of the previous minibatch
         if current_mb_idx > 0 and current_mb_idx < self.num_minibatch:
             pre_mb_idx = current_mb_idx - 1
             self.compute_stream.wait_event(self.d2h_finish_events[pre_mb_idx])
+            # print(f'elapsed time for offloading mb_idx {pre_mb_idx}: {self.offload_time_durations[pre_mb_idx]}')
+            self.offload_time_durations[pre_mb_idx] =self.d2h_start_events[pre_mb_idx].elapsed_time(self.d2h_finish_events[pre_mb_idx])
             # release tensors since the offloading has finished
             self.offloaded_tensor_buffers[pre_mb_idx].clear()
+    
+    # def finalize_offload_timing(self):
+    #     """Finalize offload time."""
+    #     last_idx = self.num_minibatch - 1
+    #     torch.cuda.synchronize()  # 确保所有事件完成
+    #     self.offload_time_durations[last_idx] = \
+    #         self.d2h_start_events[last_idx].elapsed_time(self.d2h_finish_events[last_idx])
+    #     print(f"[Finalize] elapsed time for offloading mb_idx {last_idx}: "
+    #         f"{self.offload_time_durations[last_idx]:.3f} ms")
 
     def on_minibatch_commit_forward(self):
         """This function will cause host device synchronization"""
         # handle synchronization events
         self.synchronize_on_group_commit_forward(self.current_mb_idx)
-
         super().on_minibatch_commit_forward()
+        # # handle the last minibatch offloading
+        # if self.current_mb_idx == self.num_minibatch - 1:
+        #     self.finalize_offload_timing()
 
     def bulk_reload_group(self, mb_to_reload: int):
         """Bulk reload minibatch."""
@@ -388,6 +421,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         should_prefetch_until_mb_idx = (
             self.current_mb_idx + self.num_prefetch_mb
         )  # always set to 2 for memory saving,and it's enough to be overlapped for now.
+        # num_prefetch_mb: the number of minibatches to prefetch
         should_prefetch_until_mb_idx = min(should_prefetch_until_mb_idx, self.num_minibatch)
         # print(f"prefetching  from mb_idx {self.next_mb_to_fetch} until mb_idx {should_prefetch_until_mb_idx}")
         # do prefetch minibatch
@@ -397,6 +431,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
             # start of h2d should wait for the compute and the d2h
             self.h2d_stream.wait_event(self.compute_stream_bwd_start_events[mb_idx_to_prefetch])
+            
+            self.reload_start_timestamp[mb_idx_to_prefetch] = time.time()
+            self.h2d_stream.record_event(self.h2d_start_events[mb_idx_to_prefetch])
 
             # recover tensors (copy back from host)
             self.bulk_reload_group(mb_idx_to_prefetch)
@@ -407,6 +444,17 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # update the next mb to prefetch
         self.next_mb_to_fetch = min(self.num_minibatch, should_prefetch_until_mb_idx)
 
+        torch.cuda.synchronize(self.h2d_stream)
         # wait for the current minibatch to finish loading
         if self.current_mb_idx < self.num_minibatch:
             self.compute_stream.wait_event(self.h2d_finish_events[self.current_mb_idx])
+            self.reload_time_durations[self.current_mb_idx] =self.h2d_start_events[self.current_mb_idx].elapsed_time(self.h2d_finish_events[self.current_mb_idx])
+            # print(f'elapsed time for reloading mb_idx {self.current_mb_idx}: {self.offload_time_durations[self.current_mb_idx]}')
+        
+        # if self.current_mb_idx == self.num_minibatch - 1:
+        #     last_idx = self.num_minibatch - 1
+        #     torch.cuda.synchronize(self.h2d_stream)  # 等待所有 reload 事件完成
+        #     self.reload_time_durations[last_idx] = \
+        #         self.h2d_start_events[last_idx].elapsed_time(self.h2d_finish_events[last_idx])
+        #     print(f"[Finalize] elapsed time for reloading mb_idx {last_idx}: "
+        #         f"{self.reload_time_durations[last_idx]:.3f} ms")
