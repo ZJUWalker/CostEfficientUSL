@@ -86,6 +86,16 @@ def run_profile(model: str, batch_size: int, mbps: float, lora: bool, profile_di
         )
         time_var.tail_fwd_time_increment_per_sp = round(prof_res[2][False]['tail_fwd_time_avg_ms'] - prof_res[1][False]['tail_fwd_time_avg_ms'], 2)
         time_var.tail_bwd_time_increment_per_sp = round(prof_res[2][False]['tail_bwd_time_avg_ms'] - prof_res[1][False]['tail_bwd_time_avg_ms'], 2)
+
+        # offload time
+        head_m_off_time = prof_res[2][True]['head_m_offload_time_ms'] - prof_res[1][True]['head_m_offload_time_ms']
+        head_os_off_time = prof_res[2][True]['head_os_offload_time_ms'] - prof_res[1][True]['head_os_offload_time_ms']
+        tail_m_off_time = prof_res[2][True]['tail_m_offload_time_ms'] - prof_res[1][True]['tail_m_offload_time_ms']
+        tail_os_off_time = prof_res[2][True]['tail_os_offload_time_ms'] - prof_res[1][True]['tail_os_offload_time_ms']
+        time_var.base_head_offload_time = prof_res[1][True]['head_m_offload_time_ms'] + prof_res[1][True]['head_os_offload_time_ms']
+        time_var.base_tail_offload_time = prof_res[1][True]['tail_m_offload_time_ms'] + prof_res[1][True]['tail_os_offload_time_ms']
+        time_var.head_offload_time_increment_per_sp = head_m_off_time + head_os_off_time
+        time_var.tail_offload_time_increment_per_sp = tail_m_off_time + tail_os_off_time
         # print(time_var)
         return mem_var, time_var
 

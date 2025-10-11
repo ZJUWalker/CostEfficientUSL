@@ -581,7 +581,7 @@ class Client:
             client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
             client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
             # client_item.activation_offload_ts =[[self.activation_offload_handler.offload_start_timestamp[client_item.mini_batch_idx],
-                # self.activation_offload_handler.offload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.offload_time_durations[client_item.mini_batch_idx] / 1000]]
+            # self.activation_offload_handler.offload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.offload_time_durations[client_item.mini_batch_idx] / 1000]]
             # client_item.activation_offload_ts = [[start, start + dur / 1000]
             #     for start, dur in zip(
             #         self.activation_offload_handler.offload_start_timestamp,
@@ -589,7 +589,7 @@ class Client:
             #     )
             # ]
             # client_item.activation_reload_ts = [[self.activation_offload_handler.reload_start_timestamp[client_item.mini_batch_idx],
-                # self.activation_offload_handler.reload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.reload_time_durations[client_item.mini_batch_idx] / 1000]]
+            # self.activation_offload_handler.reload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.reload_time_durations[client_item.mini_batch_idx] / 1000]]
             # client_item.activation_reload_ts = [[start, start + dur / 1000]
             #     for start, dur in zip(
             #         self.activation_offload_handler.reload_start_timestamp,
@@ -640,14 +640,14 @@ class Client:
             "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
             "client_compute_time_ms": round(local_compute_time_ms, 2),
             "server_compute_time_ms": round(server_compute_time_ms, 2),
-            "head_m_offload_time_ms": self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0],
-            "head_m_reload_time_ms": self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0],
-            "tail_m_offload_time_ms": self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0],
-            "tail_m_reload_time_ms": self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0],
-            "head_os_offload_time_ms": self.head_optimizer_offload_timestamp[1] - self.head_optimizer_offload_timestamp[0],
-            "head_os_reload_time_ms": self.head_optimizer_reload_timestamp[1] - self.head_optimizer_reload_timestamp[0],
-            "tail_os_offload_time_ms": self.tail_optimizer_offload_timestamp[1] - self.tail_optimizer_offload_timestamp[0],
-            "tail_os_reload_time_ms": self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0],
+            "head_m_offload_time_ms": round((self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]) * 1000, 2),
+            "head_m_reload_time_ms": round((self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]) * 1000, 2),
+            "tail_m_offload_time_ms": round((self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]) * 1000, 2),
+            "tail_m_reload_time_ms": round((self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0]) * 1000, 2),
+            "head_os_offload_time_ms": round((self.head_optimizer_offload_timestamp[1] - self.head_optimizer_offload_timestamp[0]) * 1000, 2),
+            "head_os_reload_time_ms": round((self.head_optimizer_reload_timestamp[1] - self.head_optimizer_reload_timestamp[0]) * 1000, 2),
+            "tail_os_offload_time_ms": round((self.tail_optimizer_offload_timestamp[1] - self.tail_optimizer_offload_timestamp[0]) * 1000, 2),
+            "tail_os_reload_time_ms": round((self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0]) * 1000, 2),
             "activation_offload_time_ms": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
             "activation_reload_time_ms": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
             "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),

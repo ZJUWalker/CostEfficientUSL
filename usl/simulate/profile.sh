@@ -12,7 +12,7 @@ for SP in "${SP_LIST[@]}"; do
     SERVER_PID=$!
 
     # 启动 client
-    python experiment/client_run.py -SP=$SP --mbps=$MBPS --batch_size=$BS --micro_batch_size=1 --pmode=pipedream_wc --model=$MODEL_NAME $LORA
+    python experiment/client_run.py -SP=$SP --mbps=$MBPS --batch_size=$BS --micro_batch_size=1 --pmode=pipedream_wc --model=$MODEL_NAME $LORA --step=3
 
     # 等待 server 执行完成
     wait $SERVER_PID
@@ -24,7 +24,7 @@ for SP in "${SP_LIST[@]}"; do
     SERVER_PID=$!
 
     # 启动 client
-    python experiment/client_run.py -SP=$SP --mbps=$MBPS --batch_size=$BS --micro_batch_size=1 --pmode=pipedream_wc --model=$MODEL_NAME -OA -OS $LORA
+    python experiment/client_run.py -SP=$SP --mbps=$MBPS --batch_size=$BS --micro_batch_size=1 --pmode=pipedream_wc --model=$MODEL_NAME -OA -OS $LORA --step=3
 
     # 等待 server 执行完成
     wait $SERVER_PID

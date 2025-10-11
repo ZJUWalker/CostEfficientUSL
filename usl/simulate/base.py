@@ -39,6 +39,11 @@ class TimeConstant:
     base_tail_bwd_time: float = 28.63  # unit:ms
     tail_fwd_time_increment_per_sp: float = 0.0  # unit:ms
     tail_bwd_time_increment_per_sp: float = 0.0  # unit:ms
+    # offload and reload time
+    base_head_offload_time: float = 10.0  # unit:ms
+    head_offload_time_increment_per_sp: float = 0.0  # unit:ms
+    base_tail_offload_time: float = 10.0  # unit:ms
+    tail_offload_time_increment_per_sp: float = 0.0  # unit:ms
 
 
 @dataclass
@@ -84,16 +89,16 @@ class SimulateResult:
 
     model_name: str = "default_model"
     main_variable: MainVariable = field(default_factory=lambda: MainVariable())
-    time_variable: TimeConstant = field(default_factory=lambda: TimeConstant())
-    memory_variable: MemoryConstant = field(default_factory=lambda: MemoryConstant())
+    time_const: TimeConstant = field(default_factory=lambda: TimeConstant())
+    memory_const: MemoryConstant = field(default_factory=lambda: MemoryConstant())
     objective: Objective = field(default_factory=lambda: Objective())
 
     def to_dict(self):
         return {
             "model": self.model_name,
             **self.main_variable.__dict__,
-            **self.time_variable.__dict__,
-            **self.memory_variable.__dict__,
+            **self.time_const.__dict__,
+            **self.memory_const.__dict__,
             **self.objective.__dict__,
         }
 
