@@ -122,7 +122,7 @@ class SingleServer:
         # ---- Micro-batch context/state
         self.ctx: Dict[str, Dict[str, torch.Tensor]] = {}
         self.group_state: Dict[str, Dict[str, Any]] = {}
-        
+
         # ---- CUDA streams
         torch.cuda.set_stream(torch.cuda.Stream(self.server_device))  # set cuda compute stream
         self.load_stream = torch.cuda.Stream(self.server_device)  # set cuda load stream
@@ -139,9 +139,7 @@ class SingleServer:
             self.activation_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
                 num_minibatch=self.num_minibatch, load_stream=self.load_stream, offload_stream=self.offload_stream
             )
-            self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(
-                self.activation_offload_handler
-            )
+            self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(self.activation_offload_handler)
         # print(self.server_args.offload_activation)
 
     # --------------- Public lifecycle ---------------
@@ -221,16 +219,13 @@ class SingleServer:
         mb_idx: int,
     ) -> torch.Tensor:
         try:
+            torch.cuda.current_stream().synchronize()
             self.profile_data[mb_idx].server_fwd_timestamp[0] = time.perf_counter()
-            hidden_status_from_head = activation.to(self.server_device)
+            hidden_status_from_head = activation.to(self.server_device, non_blocking=activation.is_pinned())
             hidden_status_from_head.requires_grad_(True)
-            # hidden_status_from_head.retain_grad()
-
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
             pos_emb = tuple(pos.to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
 
-            fwd_start = time.perf_counter()
-            
             if self.server_args.offload_activation:
                 with self.activation_offload_ctx:
                     server_output: torch.Tensor = self.trunk_model(
@@ -238,8 +233,8 @@ class SingleServer:
                         attention_mask=attention_mask,
                         position_embeddings=pos_emb,
                     )
-                # after ctx, the activation will be offloaded to CPU
-                self.activation_offload_handler.on_minibatch_commit_forward()
+                    # after ctx, the activation will be offloaded to CPU
+                    self.activation_offload_handler.on_minibatch_commit_forward()
             else:
                 server_output: torch.Tensor = self.trunk_model(
                     hidden_states=hidden_status_from_head,
@@ -248,9 +243,6 @@ class SingleServer:
                 )
 
             # torch.cuda.synchronize(device=self.server_device)
-            torch.cuda.current_stream().synchronize()
-            # print(f'[{mb_idx}] fwd time {time.perf_counter() - fwd_start:.6f} s')
-            self.compute_time += time.perf_counter() - fwd_start
             # Save context per token for later backward
             server_output = server_output.requires_grad_(True)
             self.ctx[token] = {
@@ -258,6 +250,8 @@ class SingleServer:
                 "hidden_from_head": hidden_status_from_head,
             }
             activation_to_tail = server_output.detach().cpu()
+            torch.cuda.current_stream().synchronize()
+            self.profile_data[mb_idx].server_fwd_timestamp[1] = time.perf_counter()
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Forward failed (token={token}): {e}")
@@ -271,21 +265,14 @@ class SingleServer:
 
             server_output = ctx["server_output"]
             hidden_from_head = ctx["hidden_from_head"]
+            torch.cuda.current_stream().synchronize()
             self.profile_data[mb_idx].server_bwd_timestamp[0] = time.perf_counter()
-            server_grad = server_grad.to(self.server_device)
-            
+            server_grad = server_grad.to(self.server_device, non_blocking=server_grad.is_pinned())
             if self.server_args.offload_activation:
                 self.activation_offload_handler.on_minibatch_commit_backward()
-
-            bwd_start_time = time.perf_counter()
             server_output.backward(server_grad, retain_graph=False)
-
             grad_to_head = hidden_from_head.grad.cpu()
-
-            # torch.cuda.synchronize(device=self.server_device)
-            torch.cuda.current_stream().synchronize()
-            self.compute_time += time.perf_counter() - bwd_start_time
-            # print(f'[{mb_idx}] bwd time {time.perf_counter() - bwd_start_time:.6f} s')
+            self.profile_data[mb_idx].server_bwd_timestamp[1] = time.perf_counter()
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Backward failed (token={token}): {e}")
@@ -358,6 +345,7 @@ class SingleServer:
                     self.communicator.send({"profile": self.profile_data, "max_mem_alloc": round(self.max_cuda_memory_allocated / 1024**2, 4)})
                     self.logger.info(f"Client {self.communicator.addr} requested profile data and finished training")
                     break
+                data.tensor = data.tensor.pin_memory()  # 锁页内存
                 if data.is_activation:
                     self.activation_from_head_queue.put(data)
                 else:
@@ -389,14 +377,19 @@ class SingleServer:
             if mb_total is not None:
                 # tolerate late info
                 self.group_state[group_id]["total"] = int(data.mb_total)
-
-        server_activation = self._forward(
-            data.tensor,
-            data.attention_mask,
-            data.position_embeddings,
-            token=token,
-            mb_idx=mb_idx,
-        )
+        if mb_idx == 0 and self.server_args.offload_activation:
+            self.activation_offload_handler.start_fwd()
+        try:
+            server_activation = self._forward(
+                data.tensor,
+                data.attention_mask,
+                data.position_embeddings,
+                token=token,
+                mb_idx=mb_idx,
+            )
+        except Exception as e:
+            print(f"Forward failed (mb_idx={mb_idx}): {e}")
+            raise e
         self.activation_to_tail_queue.put(
             Payload(
                 tensor=server_activation,
@@ -407,7 +400,7 @@ class SingleServer:
                 is_activation=True,
             )
         )
-        self.profile_data[mb_idx].server_fwd_timestamp[1] = time.perf_counter()
+
         # has_fwd = True
         return data
 
@@ -419,7 +412,13 @@ class SingleServer:
         token = data.token
         group_id = data.group_id
         mb_idx = data.mb_idx
-        grad_to_client = self._backward(data.tensor, token=token, mb_idx=mb_idx)
+        if mb_idx == 0 and self.server_args.offload_activation:
+            self.activation_offload_handler.start_bwd()
+        try:
+            grad_to_client = self._backward(data.tensor, token=token, mb_idx=mb_idx)
+        except Exception as e:
+            print(f"Backward failed (mb_idx={mb_idx}): {e}")
+            raise e
 
         gs = self.group_state.setdefault(group_id, {"total": data.mb_total, "done": 0, "zeroed": True})
         gs["done"] += 1
@@ -435,9 +434,9 @@ class SingleServer:
                 mb_total=total,
             )
         )
-        self.profile_data[mb_idx].server_bwd_timestamp[1] = time.perf_counter()
+
         if done >= total:
-            print(f"Group {group_id} done,do step and purge grads")
+            # print(f"Group {group_id} done,do step and purge grads")
             torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
@@ -528,7 +527,7 @@ class SingleServer:
                     data = self._do_one_fwd_task()
                     curr_phase = data.phase
                     if curr_phase == 'BWD' and self.server_args.offload_activation:
-                            self.activation_offload_handler.start_bwd()  # mark the start of bwd
+                        self.activation_offload_handler.start_bwd()  # mark the start of bwd
                 except Empty:
                     pass
             else:

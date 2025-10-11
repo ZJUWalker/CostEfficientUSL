@@ -3,7 +3,7 @@ import time
 import torch
 import argparse
 from transformers import AutoConfig
-from usl.server.single_server import SingleServer, ServerArgs, convert_pipeline_mode
+from usl.server.single_server import PipelineMode, SingleServer, ServerArgs, convert_pipeline_mode
 from usl.utils.exp import set_seed
 from usl.utils.load_utils import *
 from usl.utils.log_utils import create_logger
@@ -36,7 +36,7 @@ def run_server(server_args: ServerArgs):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8889, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
@@ -65,7 +65,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         micro_batch_size=args.micro_batch_size,
     )
-    print(args)
-
+    # print(args)
+    if args.offload_activation and args.pipeline_mode != PipelineMode.PIPE_DREAM_WC:
+        print("Warning!Offload activation is only supported in pipedream_wc mode, or else it will not be effective.")
     set_seed(SEED)
     run_server(args)

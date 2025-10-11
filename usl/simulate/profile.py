@@ -53,8 +53,11 @@ def run_profile(model: str, batch_size: int, mbps: float, lora: bool, profile_di
         mem_var.base_max_mem_alloc_off_client = prof_res[1][True]['client_max_mem_alloc_mb']
         mem_var.base_max_mem_alloc_no_off_server = prof_res[1][False]['server_max_mem_alloc_mb']
         mem_var.base_max_mem_alloc_off_server = prof_res[1][True]['server_max_mem_alloc_mb']
-        mem_var.base_mem_decrement_per_sp_server = round(
+        mem_var.no_off_mem_decrement_per_sp_server = round(
             prof_res[1][False]['server_max_mem_alloc_mb'] - prof_res[2][False]['server_max_mem_alloc_mb'], 2
+        )
+        mem_var.offload_mem_decrement_per_sp_server = round(
+            prof_res[1][True]['server_max_mem_alloc_mb'] - prof_res[2][True]['server_max_mem_alloc_mb'], 2
         )
         mem_var.no_off_mem_increment_per_sp_client = round(
             prof_res[2][False]['client_max_mem_alloc_mb'] - prof_res[1][False]['client_max_mem_alloc_mb'], 2
@@ -66,23 +69,39 @@ def run_profile(model: str, batch_size: int, mbps: float, lora: bool, profile_di
 
         # TimeVariable calculations
         time_var = TimeConstant(rate_mbps=mbps)
-        time_var.base_head_fwd_time = prof_res[1][False]['head_fwd_time_avg_ms']
-        time_var.base_head_bwd_time = prof_res[1][False]['head_bwd_time_avg_ms']
-        time_var.base_server_fwd_time = prof_res[1][False]['server_fwd_time_avg_ms']
-        time_var.base_server_bwd_time = prof_res[1][False]['server_bwd_time_avg_ms']
+        time_var.base_no_off_head_fwd_time = prof_res[1][False]['head_fwd_time_avg_ms']
+        time_var.base_no_off_head_bwd_time = prof_res[1][False]['head_bwd_time_avg_ms']
+        time_var.base_off_head_fwd_time = prof_res[1][True]['head_fwd_time_avg_ms']
+        time_var.base_off_head_bwd_time = prof_res[1][True]['head_bwd_time_avg_ms']
+        time_var.base_no_off_server_fwd_time = prof_res[1][False]['server_fwd_time_avg_ms']
+        time_var.base_no_off_server_bwd_time = prof_res[1][False]['server_bwd_time_avg_ms']
+        time_var.base_off_server_fwd_time = prof_res[1][True]['server_fwd_time_avg_ms']
+        time_var.base_off_server_bwd_time = prof_res[1][True]['server_bwd_time_avg_ms']
         time_var.base_tail_fwd_time = prof_res[1][False]['tail_fwd_time_avg_ms']
         time_var.base_tail_bwd_time = prof_res[1][False]['tail_bwd_time_avg_ms']
         time_var.head_activation_send_time = prof_res[1][False]['head_fwd_send_time_avg_ms']
         time_var.server_activation_send_time = prof_res[1][False]['server_fwd_send_time_avg_ms']
         time_var.tail_gradient_send_time = prof_res[1][False]['tail_bwd_send_time_avg_ms']
         time_var.server_gradient_send_time = prof_res[1][False]['server_bwd_send_time_avg_ms']
-        time_var.head_fwd_time_increment_per_sp = round(prof_res[2][False]['head_fwd_time_avg_ms'] - prof_res[1][False]['head_fwd_time_avg_ms'], 2)
-        time_var.head_bwd_time_increment_per_sp = round(prof_res[2][False]['head_bwd_time_avg_ms'] - prof_res[1][False]['head_bwd_time_avg_ms'], 2)
-        time_var.server_fwd_time_decrement_per_sp = round(
+        time_var.head_no_off_fwd_time_increment_per_sp = round(
+            prof_res[2][False]['head_fwd_time_avg_ms'] - prof_res[1][False]['head_fwd_time_avg_ms'], 2
+        )
+        time_var.head_no_off_bwd_time_increment_per_sp = round(
+            prof_res[2][False]['head_bwd_time_avg_ms'] - prof_res[1][False]['head_bwd_time_avg_ms'], 2
+        )
+        time_var.head_off_fwd_time_increment_per_sp = round(prof_res[2][True]['head_fwd_time_avg_ms'] - prof_res[1][True]['head_fwd_time_avg_ms'], 2)
+        time_var.head_off_bwd_time_increment_per_sp = round(prof_res[2][True]['head_bwd_time_avg_ms'] - prof_res[1][True]['head_bwd_time_avg_ms'], 2)
+        time_var.server_no_off_fwd_time_increment_per_sp = round(
             prof_res[1][False]['server_fwd_time_avg_ms'] - prof_res[2][False]['server_fwd_time_avg_ms'], 2
         )
-        time_var.server_bwd_time_decrement_per_sp = round(
+        time_var.server_no_off_bwd_time_increment_per_sp = round(
             prof_res[1][False]['server_bwd_time_avg_ms'] - prof_res[2][False]['server_bwd_time_avg_ms'], 2
+        )
+        time_var.server_off_fwd_time_increment_per_sp = round(
+            prof_res[1][True]['server_fwd_time_avg_ms'] - prof_res[2][True]['server_fwd_time_avg_ms'], 2
+        )
+        time_var.server_off_bwd_time_increment_per_sp = round(
+            prof_res[1][True]['server_bwd_time_avg_ms'] - prof_res[2][True]['server_bwd_time_avg_ms'], 2
         )
         time_var.tail_fwd_time_increment_per_sp = round(prof_res[2][False]['tail_fwd_time_avg_ms'] - prof_res[1][False]['tail_fwd_time_avg_ms'], 2)
         time_var.tail_bwd_time_increment_per_sp = round(prof_res[2][False]['tail_bwd_time_avg_ms'] - prof_res[1][False]['tail_bwd_time_avg_ms'], 2)

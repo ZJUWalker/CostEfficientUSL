@@ -71,7 +71,7 @@ def run_client(args: ClientArgs, profile=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8888, help="port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8889, help="port to listen")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")

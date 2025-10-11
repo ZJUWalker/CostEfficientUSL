@@ -22,14 +22,22 @@ class TimeConstant:
     """
 
     rate_mbps: float = 1000  # mbps limit
-    base_head_fwd_time: float = 8.99  # unit:ms
-    base_head_bwd_time: float = 17.55
-    head_fwd_time_increment_per_sp: float = 0.0  # unit:ms
-    head_bwd_time_increment_per_sp: float = 0.0  # unit:ms
-    base_server_fwd_time: float = 43.14
-    base_server_bwd_time: float = 87.83
-    server_fwd_time_decrement_per_sp: float = 0.0  # unit:ms
-    server_bwd_time_decrement_per_sp: float = 0.0  # unit:ms
+    base_no_off_head_fwd_time: float = 8.99  # unit:ms
+    base_off_head_fwd_time: float = 10.0  # unit:ms
+    base_no_off_head_bwd_time: float = 17.55
+    base_off_head_bwd_time: float = 19.0  # unit:ms
+    head_no_off_fwd_time_increment_per_sp: float = 0.0  # unit:ms
+    head_no_off_bwd_time_increment_per_sp: float = 0.0  # unit:ms
+    head_off_fwd_time_increment_per_sp: float = 0.0  # unit:ms
+    head_off_bwd_time_increment_per_sp: float = 0.0  # unit:ms
+    base_no_off_server_fwd_time: float = 43.14
+    base_no_off_server_bwd_time: float = 87.83
+    base_off_server_fwd_time: float = 43.14
+    base_off_server_bwd_time: float = 87.83
+    server_off_fwd_time_increment_per_sp: float = 0.0  # unit:ms
+    server_off_bwd_time_increment_per_sp: float = 0.0  # unit:ms
+    server_no_off_fwd_time_increment_per_sp: float = 0.0  # unit:ms
+    server_no_off_bwd_time_increment_per_sp: float = 0.0  # unit:ms
     head_activation_send_time: float = 44.11  # unit:ms
     tail_gradient_send_time: float = 33.41
     # most of the time,server_activation_recv_time approximates head_gradient_recv_time and server gradient send time
@@ -61,8 +69,9 @@ class MemoryConstant:
     base_max_mem_alloc_no_off_server: float = 23328.3828  # unit:MB # sp=1，不做卸载的时候的最大显存分配
     base_max_mem_alloc_off_server: float = 23328.3828  # unit:MB # sp=1，不做卸载的时候的最大显存分配
     no_off_mem_increment_per_sp_client: float = 2560.70  # 不做卸载，每多一个sp，显存的增加量
-    base_mem_decrement_per_sp_server: float = 3313.054  # 不做卸载，每多一个sp，服务端显存的减少量
+    no_off_mem_decrement_per_sp_server: float = 3313.054  # 不做卸载，每多一个sp，服务端显存的减少量
     offload_mem_increment_per_sp_client: float = 1728.1601  # unit:MB，如果做卸载，每加一个sp，最大显存分配减少的量
+    offload_mem_decrement_per_sp_server: float = 1728.1601  # unit:MB，如果做卸载，每加一个sp，服务端最大显存分配减少的量
 
 
 @dataclass
