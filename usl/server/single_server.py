@@ -6,6 +6,7 @@ from queue import Queue, Empty
 import threading
 import logging
 import time
+import traceback
 from enum import Enum
 from typing import Dict, Any, Optional, List, Tuple, Type, Union
 
@@ -14,6 +15,7 @@ import torch.nn as nn
 
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData
+from usl.offload import CpuOffloadHookWithOffloadHandler, AsyncDoubleBufferGroupOffloadHandler
 
 
 class PipelineMode(Enum):
@@ -55,6 +57,9 @@ class ServerArgs:
     pipeline_mode: PipelineMode = PipelineMode.GPIPE  # "strict" or "loose"
     # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
     rate_limit_mbps: float = 10
+    offload_activation: bool = False
+    micro_batch_size: int = 1
+    batch_size: int = 4
 
     def effective_rate_limit(self) -> float:
         # Prefer the correctly spelled one if provided
@@ -117,6 +122,11 @@ class SingleServer:
         # ---- Micro-batch context/state
         self.ctx: Dict[str, Dict[str, torch.Tensor]] = {}
         self.group_state: Dict[str, Dict[str, Any]] = {}
+        
+        # ---- CUDA streams
+        torch.cuda.set_stream(torch.cuda.Stream(self.server_device))  # set cuda compute stream
+        self.load_stream = torch.cuda.Stream(self.server_device)  # set cuda load stream
+        self.offload_stream = torch.cuda.Stream(self.server_device)  # set cuda offload stream
 
         # ---- Model & optimizer
         self.lr = server_args.learning_rate
@@ -124,6 +134,15 @@ class SingleServer:
         self.optimizer: torch.optim.Optimizer = optimizer_clz(self.trunk_model.parameters(), lr=self.lr)
         self.server_output: Optional[torch.Tensor] = None
         self.hidden_status_from_head: Optional[torch.Tensor] = None
+        self.num_minibatch = (self.server_args.batch_size + self.server_args.micro_batch_size - 1) // self.server_args.micro_batch_size
+        if self.server_args.offload_activation:
+            self.activation_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
+                num_minibatch=self.num_minibatch, load_stream=self.load_stream, offload_stream=self.offload_stream
+            )
+            self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(
+                self.activation_offload_handler
+            )
+        # print(self.server_args.offload_activation)
 
     # --------------- Public lifecycle ---------------
     def run(self):
@@ -211,12 +230,25 @@ class SingleServer:
             pos_emb = tuple(pos.to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
 
             fwd_start = time.perf_counter()
-            server_output: torch.Tensor = self.trunk_model(
-                hidden_states=hidden_status_from_head,
-                attention_mask=attention_mask,
-                position_embeddings=pos_emb,
-            )
-            torch.cuda.synchronize(device=self.server_device)
+            
+            if self.server_args.offload_activation:
+                with self.activation_offload_ctx:
+                    server_output: torch.Tensor = self.trunk_model(
+                        hidden_states=hidden_status_from_head,
+                        attention_mask=attention_mask,
+                        position_embeddings=pos_emb,
+                    )
+                # after ctx, the activation will be offloaded to CPU
+                self.activation_offload_handler.on_minibatch_commit_forward()
+            else:
+                server_output: torch.Tensor = self.trunk_model(
+                    hidden_states=hidden_status_from_head,
+                    attention_mask=attention_mask,
+                    position_embeddings=pos_emb,
+                )
+
+            # torch.cuda.synchronize(device=self.server_device)
+            torch.cuda.current_stream().synchronize()
             # print(f'[{mb_idx}] fwd time {time.perf_counter() - fwd_start:.6f} s')
             self.compute_time += time.perf_counter() - fwd_start
             # Save context per token for later backward
@@ -225,7 +257,6 @@ class SingleServer:
                 "server_output": server_output,
                 "hidden_from_head": hidden_status_from_head,
             }
-
             activation_to_tail = server_output.detach().cpu()
             return activation_to_tail
         except Exception as e:
@@ -242,13 +273,17 @@ class SingleServer:
             hidden_from_head = ctx["hidden_from_head"]
             self.profile_data[mb_idx].server_bwd_timestamp[0] = time.perf_counter()
             server_grad = server_grad.to(self.server_device)
+            
+            if self.server_args.offload_activation:
+                self.activation_offload_handler.on_minibatch_commit_backward()
 
             bwd_start_time = time.perf_counter()
             server_output.backward(server_grad, retain_graph=False)
 
             grad_to_head = hidden_from_head.grad.cpu()
 
-            torch.cuda.synchronize(device=self.server_device)
+            # torch.cuda.synchronize(device=self.server_device)
+            torch.cuda.current_stream().synchronize()
             self.compute_time += time.perf_counter() - bwd_start_time
             # print(f'[{mb_idx}] bwd time {time.perf_counter() - bwd_start_time:.6f} s')
             return grad_to_head
@@ -384,8 +419,6 @@ class SingleServer:
         token = data.token
         group_id = data.group_id
         mb_idx = data.mb_idx
-        # group_id = str(data.get("group_id", "default"))
-        # mb_idx = int(data.get("mb_idx", 0))
         grad_to_client = self._backward(data.tensor, token=token, mb_idx=mb_idx)
 
         gs = self.group_state.setdefault(group_id, {"total": data.mb_total, "done": 0, "zeroed": True})
@@ -486,12 +519,16 @@ class SingleServer:
 
         """Non-busy compute loop using queue.get(timeout) for backpressure."""
         curr_phase = "FWD"
+        if self.server_args.offload_activation:
+            self.activation_offload_handler.start_fwd()  # mark the start of bwd
         while not self.stop_event.is_set():
             # --- Forward one minibatch ---
             if curr_phase == "FWD":
                 try:
                     data = self._do_one_fwd_task()
                     curr_phase = data.phase
+                    if curr_phase == 'BWD' and self.server_args.offload_activation:
+                            self.activation_offload_handler.start_bwd()  # mark the start of bwd
                 except Empty:
                     pass
             else:
@@ -499,6 +536,8 @@ class SingleServer:
                 try:
                     data = self._do_one_bwd_task()
                     curr_phase = data.phase
+                    if curr_phase == 'FWD' and self.server_args.offload_activation:
+                        self.activation_offload_handler.start_fwd()
                 except Empty:
                     pass
             self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))

@@ -46,6 +46,9 @@ if __name__ == "__main__":
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--mbps", type=int, default=0)
     parser.add_argument("--pmode", type=str, default="gpipe", help='mode of pipeline, "strict" or "loose" or "1f1b"')
+    parser.add_argument("--offload_activation", "-OA", action="store_true", default=False)
+    parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
+    parser.add_argument("--micro_batch_size", type=int, default=1)
     args = parser.parse_args()
     args = ServerArgs(
         port=args.port,
@@ -58,6 +61,9 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         rate_limit_mbps=args.mbps,
         pipeline_mode=convert_pipeline_mode(args.pmode),
+        offload_activation=args.offload_activation,
+        batch_size=args.batch_size,
+        micro_batch_size=args.micro_batch_size,
     )
     print(args)
 
