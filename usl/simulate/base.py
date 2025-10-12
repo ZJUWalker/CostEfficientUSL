@@ -106,9 +106,9 @@ class SimulateResult:
         return {
             "model": self.model_name,
             **self.main_variable.__dict__,
+            **self.objective.__dict__,
             **self.time_const.__dict__,
             **self.memory_const.__dict__,
-            **self.objective.__dict__,
         }
 
     def save_to_json(self, file_path='log/simulate/simulate_result.json'):

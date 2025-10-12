@@ -88,6 +88,7 @@ def main():
     parser.add_argument("--sort", type=str, default="no", help='sort batch before pipeline, "no" or "desc" or "asc"')
     parser.add_argument("--pmode", type=str, default="strict", help='mode of pipeline, "strict" or "loose"')
     parser.add_argument("--profile", "-PROF", action="store_true", default=False)
+    parser.add_argument("--save_dir", type=str, default="log/profile")
     args = parser.parse_args()
     profile = args.profile
     args = ClientArgs(
@@ -106,6 +107,7 @@ def main():
         offload_activation=args.offload_activation,
         offload_model_state=args.offload_model_state,
         sort_batch=args.sort,
+        save_dir=args.save_dir,
         pipeline_mode=convert_pipeline_mode(args.pmode),
     )
 

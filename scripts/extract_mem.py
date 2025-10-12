@@ -7,7 +7,7 @@ base_path = 'log/profile/meta-llama/llama3.2-1b/'
 
 # 输出文件路径
 csv_output_path = 'log/extracted_mem_data_lora.csv'
-split_points = [0, 1, 2, 3, 4]
+split_points = [1, 2, 3, 4]
 mbps_values = [300]
 offload_values = ['', '_oa', '_os', '_oa_os']
 batch_sizes = [8]
@@ -26,8 +26,11 @@ for sp in split_points:
         for mbps in mbps_values:
             for offload in offload_values:
                 # 读取文件
-                file_name = f"sp_{sp}_b_{batch_size}_mb_1_s_512_mbps_{mbps}_pipedream_wc_lora{offload}.json"
+                file_name = f"sp_{sp}_b_{batch_size}_mb_1_s_512_mbps_{mbps}_pipedream_wc{offload}.json"
                 file_path = os.path.join(base_path, file_name)
+                if not os.path.exists(file_path):
+                    print(f"文件 {file_path} 不存在")
+                    continue
                 with open(file_path, 'r') as f:
                     data: dict = json.load(f)
                 # 解析数据

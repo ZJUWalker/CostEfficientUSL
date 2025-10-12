@@ -42,6 +42,7 @@ class ClientArgs:
     offload_model_state: bool = False
     sort_batch: str = "no"  # no,asc,desc
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
+    save_dir: str = 'log/profile'
 
     def build_filename(self, prefix: str = "", ext: str = "json") -> str:
         """
@@ -659,7 +660,8 @@ class Client:
             "mini_batch_data": [asdict(item) for item in self.profile_data],
         }
         print(data_dict["client_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
-        dt_save_dir = f"log/profile/{self.client_args.model}"
+        # dt_save_dir = f"{self.client_args.save_dir}/{self.client_args.model}"
+        dt_save_dir = os.path.join(self.client_args.save_dir, self.client_args.model)
         if not os.path.exists(dt_save_dir):
             os.makedirs(dt_save_dir)
         save_gantt_chart_data(data_dict, fp=self.client_args.build_filename(prefix=dt_save_dir, ext="json"))
