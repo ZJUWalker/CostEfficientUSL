@@ -10,7 +10,8 @@ class MainVariable:
     MainVariable contains the variables needed to simulate the system.
     """
 
-    batch_size: int = 8
+    total_batch_num: int = 1000  # total batch need to be trained per epoch
+    batch_size: int = 8  # batch size per batch
     split_point: int = 4
     offload: bool = True
     lora: bool = False
@@ -60,9 +61,12 @@ class MemoryConstant:
     """
     MemoryConstant contains the memory usage of different components in the system.
     """
-    max_split_point:int=8
+
+    max_split_point: int = 8
     micro_batch_size: int = 1
     max_seq_len: int = 512
+    baseline_split_point: int = 1
+    baseline_minibatch_num: int = 4
     # do four profile, (sp=1, no off),(sp=2 ,no off),(sp=1 ,off),(sp=2 ,off)
     base_max_mem_alloc_no_off_client: float = 9899.5542  # unit:MB # sp=1，不做卸载的时候的最大显存分配
     base_max_mem_alloc_off_client: float = 6804.4971  # unit:MB # sp=1，做卸载的时候的最大显存分配
@@ -91,6 +95,9 @@ class Objective:
     client_peak_mem_alloc: float = 0.0  # unit:MB
     server_peak_mem_alloc: float = 0.0
     batch_train_time: float = 0.0
+    server_cost: float = 0.0
+    epoch_train_time: float = 0.0
+
     pass
 
 

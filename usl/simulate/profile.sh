@@ -1,11 +1,11 @@
-SP_LIST=(1 2)
 MBPS=$1
 # BS=$2
 MODEL_NAME=$2
 LORA=$3
 MAX_SP=$4
-SAVE_DIR=$5
-BS_LIST=(4 6)
+BS_LIST=($5)
+SP_LIST=($6)
+SAVE_DIR=$7
 # 遍历组合
 for SP in "${SP_LIST[@]}"; do
     for BS in "${BS_LIST[@]}"; do

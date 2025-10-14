@@ -217,6 +217,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             client_peak_mem_alloc=0,
             server_peak_mem_alloc=0,
             batch_train_time=round(batch_train_time, 2),
+            epoch_train_time=round(batch_train_time * main_var.total_batch_num, 2),
         ),
     )
 
@@ -225,31 +226,33 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
     # simulate the peak memory allocation
     split_point = main_var.split_point
     batch_size = main_var.batch_size
-    max_split_point=memory_const.max_split_point
+    max_split_point = memory_const.max_split_point
+    base_sp = memory_const.baseline_split_point  # default 1
+    base_mb_num = memory_const.baseline_minibatch_num  # default 4
     assert split_point >= 1, "split_point should be greater than or equal to 1"
     assert batch_size >= 4, "batch size should be greater than or equal to 4"
     if main_var.offload:
         client_peak_mem_alloc = (
             memory_const.base_max_mem_alloc_off_client
-            + (split_point - 1) * memory_const.offload_mem_increment_per_sp_client
-            + (batch_size - 4) * memory_const.offload_mem_increment_per_mb_client
+            + (split_point - base_sp) * memory_const.offload_mem_increment_per_sp_client
+            + (batch_size - base_mb_num) * memory_const.offload_mem_increment_per_mb_client
         )
         server_max_mem_alloc = (
             memory_const.base_max_mem_alloc_off_server
-            - (split_point - 1) * memory_const.offload_mem_decrement_per_sp_server
-            + (max_split_point-split_point) * (batch_size - 4) * memory_const.offload_mem_increment_per_mb_server
+            - (split_point - base_sp) * memory_const.offload_mem_decrement_per_sp_server
+            + (max_split_point - split_point) * (batch_size - base_mb_num) * memory_const.offload_mem_increment_per_mb_server
         )
     else:
         client_peak_mem_alloc = (
             memory_const.base_max_mem_alloc_no_off_client
-            + (split_point - 1) * memory_const.no_off_mem_increment_per_sp_client
-            + (split_point) * (batch_size - 4) * memory_const.no_off_mem_increment_per_mb_client
+            + (split_point - base_sp) * memory_const.no_off_mem_increment_per_sp_client
+            + (split_point) * (batch_size - base_mb_num) * memory_const.no_off_mem_increment_per_mb_client
         )
         server_max_mem_alloc = (
             memory_const.base_max_mem_alloc_no_off_server
-            - (split_point - 1) * memory_const.no_off_mem_decrement_per_sp_server
-            + (max_split_point-split_point) * (batch_size - 4) * memory_const.no_off_mem_increment_per_mb_server
-            + (batch_size - 4) * memory_const.offload_mem_increment_per_mb_client
+            - (split_point - base_sp) * memory_const.no_off_mem_decrement_per_sp_server
+            + (max_split_point - split_point) * (batch_size - base_mb_num) * memory_const.no_off_mem_increment_per_mb_server
+            + (batch_size - base_mb_num) * memory_const.offload_mem_increment_per_mb_client
         )
 
     return SimulateResult(objective=Objective(client_peak_mem_alloc=client_peak_mem_alloc, server_peak_mem_alloc=server_max_mem_alloc))
@@ -261,7 +264,9 @@ def simulate(main_var: MainVariable, time_const: TimeConstant, mem_const: Memory
     # copy memory result to simulate_result
     simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
     simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
-    print(simulate_mem_result.objective.server_peak_mem_alloc)
+    simulate_result.objective.server_cost = round(
+        simulate_result.objective.server_peak_mem_alloc * simulate_result.objective.epoch_train_time / 10**6, 2
+    )
     return simulate_result
 
 
@@ -270,8 +275,9 @@ def parse_arguments():
 
     # Defining the command-line arguments
     parser.add_argument('--model', type=str, default='meta-llama/llama3.2-1b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=8, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=16, help='The maximum memory allocation for the client.')
     parser.add_argument('--max_split_point', '-MSP', type=int, default=4, help='The number of layers in the model.')
+    parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
     parser.add_argument('--mbps', type=int, default=1000, help='The mbps value for the simulation.')
     parser.add_argument('--max_batch_size', '-BS', type=int, default=64, help='The max batch size for the simulation.')
@@ -288,38 +294,46 @@ if __name__ == "__main__":
     max_batch_size = args.max_batch_size
     profile_dir = args.profile_dir
     max_split_point = args.max_split_point
+    dataset_size = args.dataset_size
     max_client_mem_mb = args.max_client_mem_gb * 1024
     save_gantt = args.save_gantt
     # run profiling
-    mem_res, time_res = run_profile(model_name, mbps, lora, profile_dir)
+    mem_res, time_res = run_profile(model_name, mbps, lora, profile_dir=profile_dir)
     if mem_res is None or time_res is None:
         print("Failed to run profiling.")
         exit(1)
     # create main variable
     best_strategy = None
+
+    _idle_factor_func = lambda a, b, lambda_=0.3: math.sqrt(a**2 + b**2) + lambda_ * abs(a - b)
+
     # batch_sizes=[2**i for i in range(2,math.ceil(math.log2(max_batch_size+1)))]
-    for bs in [32,64]:
+    for bs in [4, 8, 12, 16, 20, 32, 64]:
         for sp in range(1, max_split_point + 1):
             for offload in [True, False]:
-                var = MainVariable(batch_size=bs, split_point=sp, offload=offload, lora=lora)
+                var = MainVariable(total_batch_num=(dataset_size + bs - 1) // bs, batch_size=bs, split_point=sp, offload=offload, lora=lora)
                 # run simulation
-                sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-                sim_res.model_name = model_name
-                if best_strategy is None:
-                    best_strategy = sim_res
+                cur_strategy = simulate(var, time_res, mem_res, save_gantt=False)
+                cur_strategy.model_name = model_name
+                if best_strategy is None and cur_strategy.objective.client_peak_mem_alloc < max_client_mem_mb * 0.95:  # 0.95 is for safety
+                    best_strategy = cur_strategy
+                    min_cost = best_strategy.objective.server_cost
+                    min_idle_factor = _idle_factor_func(best_strategy.objective.client_idle_rate, best_strategy.objective.server_idle_rate)
                 else:
-                    time_diff = abs(sim_res.objective.batch_train_time - best_strategy.objective.batch_train_time)
-                    mem_diff = abs(sim_res.objective.client_peak_mem_alloc - best_strategy.objective.client_peak_mem_alloc)
+                    server_cost = cur_strategy.objective.server_cost
+                    idle_factor = _idle_factor_func(cur_strategy.objective.client_idle_rate, cur_strategy.objective.server_idle_rate)
                     if (
-                        mem_diff / best_strategy.objective.client_peak_mem_alloc > time_diff / best_strategy.objective.batch_train_time
-                        and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb
+                        cur_strategy.objective.client_peak_mem_alloc * 0.95 < max_client_mem_mb
+                        and server_cost < min_cost
+                        and idle_factor < min_idle_factor
                     ):
-                        # print(best_strategy)
-                        best_strategy = sim_res
+                        best_strategy = cur_strategy
+                        min_cost = server_cost
+                        min_idle_factor = idle_factor
                 save_dir = f'log/profile/simulate/{model_name}'
                 if not os.path.exists(save_dir):
                     os.makedirs(save_dir)
-                sim_res.save_to_json(
-                    f'{save_dir}/sp_{sp}_b_{bs}_mb_{mem_res.micro_batch_size}_s_{mem_res.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora"if lora else ""}{'_oa_os' if offload else ''}.json'
+                cur_strategy.save_to_json(
+                    f'{save_dir}/sp_{sp}_b_{bs}_mb_{cur_strategy.memory_const.micro_batch_size}_s_{cur_strategy.memory_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora"if lora else ""}{'_oa_os' if offload else ''}.json'
                 )
-    print(best_strategy.main_variable)
+    print(best_strategy.main_variable, best_strategy.objective)
