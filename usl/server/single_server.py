@@ -105,6 +105,11 @@ class SingleServer:
         self.profile_data: List[GanttChartData] = []
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
+        self.global_step = 0
+        self.server_fwd_time = 0
+        self.server_fwd_send_time = 0
+        self.server_bwd_time = 0
+        self.server_bwd_send_time = 0
 
         # ---- Executors & coordination
         self.main_executor: Optional[ThreadPoolExecutor] = None
@@ -252,6 +257,8 @@ class SingleServer:
             activation_to_tail = server_output.detach().cpu()
             torch.cuda.current_stream().synchronize()
             self.profile_data[mb_idx].server_fwd_timestamp[1] = time.perf_counter()
+            if self.global_step > 0:
+                self.server_fwd_time += self.profile_data[mb_idx].server_fwd_timestamp[1] - self.profile_data[mb_idx].server_fwd_timestamp[0]
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Forward failed (token={token}): {e}")
@@ -273,6 +280,8 @@ class SingleServer:
             server_output.backward(server_grad, retain_graph=False)
             grad_to_head = hidden_from_head.grad.cpu()
             self.profile_data[mb_idx].server_bwd_timestamp[1] = time.perf_counter()
+            if self.global_step > 0:
+                self.server_bwd_time += self.profile_data[mb_idx].server_bwd_timestamp[1] - self.profile_data[mb_idx].server_bwd_timestamp[0]
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Backward failed (token={token}): {e}")
@@ -296,6 +305,8 @@ class SingleServer:
                         end_send_time = time.perf_counter()
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[1] = end_send_time
+                        if self.global_step > 0:
+                            self.server_fwd_send_time += end_send_time - start_send_time
                     else:
                         continue
                 except Empty:
@@ -311,6 +322,8 @@ class SingleServer:
                         end_send_time = time.perf_counter()
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[1] = end_send_time
+                        if self.global_step > 0:
+                            self.server_bwd_send_time += end_send_time - start_send_time
                     else:
                         continue
                 except Empty:
@@ -342,7 +355,16 @@ class SingleServer:
                     break
                 if isinstance(data, dict) and "stop" in data.keys():
                     print("Client requested stop")
-                    self.communicator.send({"profile": self.profile_data, "max_mem_alloc": round(self.max_cuda_memory_allocated / 1024**2, 4)})
+                    self.communicator.send(
+                        {
+                            "profile": self.profile_data,
+                            "max_mem_alloc": round(self.max_cuda_memory_allocated / 1024**2, 4),
+                            "server_fwd_time": self.server_fwd_time,
+                            "server_fwd_send_time": self.server_fwd_send_time,
+                            "server_bwd_time": self.server_bwd_time,
+                            "server_bwd_send_time": self.server_bwd_send_time,
+                        }
+                    )
                     self.logger.info(f"Client {self.communicator.addr} requested profile data and finished training")
                     break
                 data.tensor = data.tensor.pin_memory()  # 锁页内存
@@ -441,6 +463,7 @@ class SingleServer:
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
             self.group_state.pop(group_id, None)
+            self.global_step += 1
         return data
 
     def _init_cuda(self):
