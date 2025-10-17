@@ -308,7 +308,11 @@ if __name__ == "__main__":
     _idle_factor_func = lambda a, b, lambda_=0.3: math.sqrt(a**2 + b**2) + lambda_ * abs(a - b)
 
     # batch_sizes=[2**i for i in range(2,math.ceil(math.log2(max_batch_size+1)))]
+<<<<<<< HEAD
     for bs in [4, 8, 12, 16, 20, 32, max_batch_size]:
+=======
+    for bs in [4, 8, 12, 16, 20, 32, 64]:
+>>>>>>> 777a1960083e698447ff4af3a569a65340efea4a
         for sp in range(1, max_split_point + 1):
             for offload in [True, False]:
                 var = MainVariable(total_batch_num=(dataset_size + bs - 1) // bs, batch_size=bs, split_point=sp, offload=offload, lora=lora)
