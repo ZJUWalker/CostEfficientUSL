@@ -124,6 +124,7 @@ class Client:
         self.optimizer_tail = torch.optim.Adam(self.tail_model.parameters(), lr=self.lr)
 
         # ---- Metrics
+        self.curr_step_idx = 0
         self.compute_time = 0
         self.client_max_mem_alloc_mb = 0
         self.head_model_offload_timestamp = [0, 0]
@@ -134,6 +135,12 @@ class Client:
         self.head_optimizer_reload_timestamp = [0, 0]
         self.tail_optimizer_offload_timestamp = [0, 0]
         self.tail_optimizer_reload_timestamp = [0, 0]
+        self.head_fwd_time = 0
+        self.head_fwd_send_time = 0
+        self.head_bwd_time = 0
+        self.tail_fwd_time = 0
+        self.tail_bwd_send_time = 0
+        self.tail_bwd_time = 0
         self.sent_payload_bytes = 0
         self.normalize_loss = normalize_loss
         self.losses = []
@@ -349,6 +356,8 @@ class Client:
             phase="FWD" if mb_idx < grad_accum_steps - 1 else "BWD",
         )
         self.profile_data[mb_idx].head_fwd_timestamp[1] = time.perf_counter()
+        if self.curr_step_idx > 0:
+            self.head_fwd_time += self.profile_data[mb_idx].head_fwd_timestamp[1] - self.profile_data[mb_idx].head_fwd_timestamp[0]
         return payload
 
     def _tail_fwd_micro(self, server_forward_output: Payload) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -368,6 +377,8 @@ class Client:
         )
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].tail_fwd_timestamp[1] = time.perf_counter()
+        if self.curr_step_idx > 0:
+            self.tail_fwd_time += self.profile_data[mb_idx].tail_fwd_timestamp[1] - self.profile_data[mb_idx].tail_fwd_timestamp[0]
         # 可选：按 accum 步数归一化，保证与“单大 batch 一次性训练”的梯度数值一致
         loss = output.loss / mb_total if self.normalize_loss else output.loss
         self.losses.append(loss.item())
@@ -396,6 +407,8 @@ class Client:
             phase="BWD" if mb_idx < mb_total - 1 else "FWD",
         )
         self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.perf_counter()
+        if self.curr_step_idx > 0:
+            self.tail_bwd_time += self.profile_data[mb_idx].tail_bwd_timestamp[1] - self.profile_data[mb_idx].tail_bwd_timestamp[0]
         return grad_payload
 
     def _head_bwd_micro(self, server_bwd_output: Payload):
@@ -413,6 +426,8 @@ class Client:
         head_activation.backward(grad_to_head)
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_bwd_timestamp[1] = time.perf_counter()
+        if self.curr_step_idx > 0:
+            self.head_bwd_time += self.profile_data[mb_idx].head_bwd_timestamp[1] - self.profile_data[mb_idx].head_bwd_timestamp[0]
         # remove not needed tensors to save memory
         del (
             self.head_fwd_activation_dict[mb_idx],
@@ -449,6 +464,8 @@ class Client:
                         mb_idx = payload.mb_idx
                         self.profile_data[mb_idx].head_fwd_send_timestamp[0] = start_send
                         self.profile_data[mb_idx].head_fwd_send_timestamp[1] = end_time
+                        if self.curr_step_idx > 0:
+                            self.head_fwd_send_time += end_time - start_send
                 else:
                     continue
             except Empty:
@@ -468,6 +485,8 @@ class Client:
                     mb_idx = payload.mb_idx
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[0] = start_send
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[1] = end_time
+                    if self.curr_step_idx > 0:
+                        self.tail_bwd_send_time += end_time - start_send
                 else:
                     continue
             except Empty:
@@ -490,7 +509,7 @@ class Client:
             if isinstance(data, dict) and "profile" in data:
                 print(f"get profile data")
                 try:
-                    self._save_profile_res(data["profile"], **{"server_max_mem_alloc_mb": data.get("max_mem_alloc", 0)})
+                    self._save_profile_res(data)
                 except Exception as e:
                     print(f"error when save profile data: {e}")
                 finally:
@@ -504,24 +523,19 @@ class Client:
         print("server send thread exit")
 
     @torch.no_grad()
-    def _save_profile_res(self, server_profile_data: List[GanttChartData], **kwargs):
+    def _save_profile_res(self, server_profile_res: Dict[str, Any]):
         batch_train_time_ms = 0
         local_compute_time_ms = 0
         server_compute_time_ms = 0
-        head_fwd_time_avg = 0
-        head_fwd_send_time_avg = 0
-        head_bwd_time_avg = 0
-        server_fwd_time_avg = 0
-        server_fwd_send_time_avg = 0
-        server_bwd_time_avg = 0
-        server_bwd_send_time_avg = 0
-        tail_fwd_time_avg = 0
-        tail_bwd_send_time_avg = 0
-        tail_bwd_time_avg = 0
+        server_profile_gantt_data = server_profile_res.get('profile', [])
+        server_fwd_time = server_profile_res.get('server_fwd_time', 0)
+        server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
+        server_bwd_time = server_profile_res.get('server_bwd_time', 0)
+        server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
         client_send_time_ms = 0
         server_send_time_ms = 0
-        assert len(self.profile_data) == len(server_profile_data), "error in profile data length between client and server"
-        for client_item, server_item in zip(self.profile_data, server_profile_data):
+        assert len(self.profile_data) == len(server_profile_gantt_data), "error in profile data length between client and server"
+        for client_item, server_item in zip(self.profile_data, server_profile_gantt_data):
             client_item.server_fwd_timestamp = server_item.server_fwd_timestamp
             client_item.server_bwd_timestamp = server_item.server_bwd_timestamp
             client_item.server_fwd_send_timestamp = server_item.server_fwd_send_timestamp
@@ -558,17 +572,6 @@ class Client:
                 - server_item.server_bwd_timestamp[0]
             ) * 1000
             # 计算 每个sub model的训练时间
-            head_fwd_time_avg += (client_item.head_fwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000
-            head_fwd_send_time_avg += (client_item.head_fwd_send_timestamp[1] - client_item.head_fwd_send_timestamp[0]) * 1000
-            head_bwd_time_avg += (client_item.head_bwd_timestamp[1] - client_item.head_bwd_timestamp[0]) * 1000
-            server_fwd_time_avg += (server_item.server_fwd_timestamp[1] - server_item.server_fwd_timestamp[0]) * 1000
-            server_fwd_send_time_avg += (client_item.server_fwd_send_timestamp[1] - client_item.server_fwd_send_timestamp[0]) * 1000
-            server_bwd_time_avg += (server_item.server_bwd_timestamp[1] - server_item.server_bwd_timestamp[0]) * 1000
-            server_bwd_send_time_avg += (client_item.server_bwd_send_timestamp[1] - client_item.server_bwd_send_timestamp[0]) * 1000
-            tail_fwd_time_avg += (client_item.tail_fwd_timestamp[1] - client_item.tail_fwd_timestamp[0]) * 1000
-            tail_bwd_time_avg += (client_item.tail_bwd_timestamp[1] - client_item.tail_bwd_timestamp[0]) * 1000
-            tail_bwd_send_time_avg += (client_item.tail_bwd_send_timestamp[1] - client_item.tail_bwd_send_timestamp[0]) * 1000
-            # offload timestamp 为了好画图
             client_item.head_m_offload_ts = self.head_model_offload_timestamp
             client_item.head_m_reload_ts = self.head_model_reload_timestamp
             client_item.tail_m_offload_ts = self.tail_model_offload_timestamp
@@ -581,34 +584,18 @@ class Client:
             client_item.head_optimizer_reload_ts = [var + head_m_reload_time_ms for var in self.head_optimizer_reload_timestamp]
             client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
             client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
-            # client_item.activation_offload_ts =[[self.activation_offload_handler.offload_start_timestamp[client_item.mini_batch_idx],
-            # self.activation_offload_handler.offload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.offload_time_durations[client_item.mini_batch_idx] / 1000]]
-            # client_item.activation_offload_ts = [[start, start + dur / 1000]
-            #     for start, dur in zip(
-            #         self.activation_offload_handler.offload_start_timestamp,
-            #         self.activation_offload_handler.offload_time_durations
-            #     )
-            # ]
-            # client_item.activation_reload_ts = [[self.activation_offload_handler.reload_start_timestamp[client_item.mini_batch_idx],
-            # self.activation_offload_handler.reload_start_timestamp[client_item.mini_batch_idx] + self.activation_offload_handler.reload_time_durations[client_item.mini_batch_idx] / 1000]]
-            # client_item.activation_reload_ts = [[start, start + dur / 1000]
-            #     for start, dur in zip(
-            #         self.activation_offload_handler.reload_start_timestamp,
-            #         self.activation_offload_handler.reload_time_durations
-            #     )
-            # ]
         # 计算平均时间
         grad_accum_steps = len(self.profile_data)
-        head_fwd_time_avg /= grad_accum_steps
-        head_fwd_send_time_avg /= grad_accum_steps
-        head_bwd_time_avg /= grad_accum_steps
-        server_fwd_time_avg /= grad_accum_steps
-        server_fwd_send_time_avg /= grad_accum_steps
-        server_bwd_time_avg /= grad_accum_steps
-        server_bwd_send_time_avg /= grad_accum_steps
-        tail_fwd_time_avg /= grad_accum_steps
-        tail_bwd_time_avg /= grad_accum_steps
-        tail_bwd_send_time_avg /= grad_accum_steps
+        head_fwd_time_avg = self.head_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        head_fwd_send_time_avg = self.head_fwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        head_bwd_time_avg = self.head_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        server_fwd_time_avg = server_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        server_fwd_send_time_avg = server_fwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        server_bwd_time_avg = server_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        server_bwd_send_time_avg = server_bwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        tail_fwd_time_avg = self.tail_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        tail_bwd_time_avg = self.tail_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        tail_bwd_send_time_avg = self.tail_bwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
         # 计算平均通信时间
 
         # 计算batch训练时间
@@ -625,9 +612,8 @@ class Client:
             "max_seq_len": self.client_args.max_seq_len,
             "offload_model_state": self.client_args.offload_model_state,
             "offload_activation": self.client_args.offload_activation,
-            "head_param_mem_alloc_mb": round(self.head_model_param_mem_alloc, 4),
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
-            "server_max_mem_alloc_mb": kwargs.get("server_max_mem_alloc_mb", 0),
+            "server_max_mem_alloc_mb": server_profile_res.get("server_max_mem_alloc_mb", 0),
             "batch_train_time_ms": batch_train_time_ms,
             "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
             "head_fwd_send_time_avg_ms": round(head_fwd_send_time_avg, 2),
@@ -761,6 +747,7 @@ class Client:
             ) as prof:
                 for batch_idx, batch in enumerate(self.train_loader, 1):
                     self.train_large_batch_overlapped_accum(batch, batch_idx)
+                    self.curr_step_idx += 1
                     if profile:
                         prof.step()
                     if batch_idx == self.client_args.step:

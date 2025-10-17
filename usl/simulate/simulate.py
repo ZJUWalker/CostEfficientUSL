@@ -1,5 +1,6 @@
 import argparse
 
+import math
 import os
 import json
 import time
@@ -10,7 +11,7 @@ from usl.simulate.profile import run_profile
 
 def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, save_gantt: bool = False) -> SimulateResult:
     # simulate the batch training time
-    micro_batch_num = (mem_const.batch_size + mem_const.micro_batch_size - 1) // mem_const.micro_batch_size
+    micro_batch_num = (main_var.batch_size + mem_const.micro_batch_size - 1) // mem_const.micro_batch_size
     split_point = main_var.split_point
     assert split_point > 0, "split_point should be greater than 0"
     if not main_var.offload:
@@ -35,7 +36,8 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         server_bwd_time = time_const.base_off_server_bwd_time - (split_point - 1) * time_const.server_off_bwd_time_increment_per_sp
         tail_fwd_time = time_const.base_tail_fwd_time + (split_point - 1) * time_const.tail_fwd_time_increment_per_sp
         tail_bwd_time = time_const.base_tail_bwd_time + (split_point - 1) * time_const.tail_bwd_time_increment_per_sp
-        # print(head_offload_time, tail_reload_time)
+    print('time: ', offload, split_point, server_fwd_time, server_bwd_time)
+    # print(head_offload_time, tail_reload_time)
     # use list to do scheduling, each element is a list of two elements, [start_time, end_time]
     head_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     head_offload_timestamp = [0, 0]
@@ -155,9 +157,10 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             }
             for i in range(micro_batch_num)
         ]
-        if not os.path.exists(f'log/img/simulated/{model_name}'):
-            os.makedirs(f'log/img/simulated/{model_name}')
-        fp = f'log/img/simulated/sp_{split_point}_b_{batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}{"_oa_os" if main_var.offload else ""}.png'
+        save_dir = f'log/img/simulated/{model_name}'
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        fp = f'{save_dir}/sp_{split_point}_b_{max_batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}{"_oa_os" if main_var.offload else ""}.png'
         plot_gantt_grouped(gantt_data, fp, align=False)
     # calculate objective function
     # calculate batch train time ,unit:ms
@@ -214,6 +217,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             client_peak_mem_alloc=0,
             server_peak_mem_alloc=0,
             batch_train_time=round(batch_train_time, 2),
+            epoch_train_time=round(batch_train_time * main_var.total_batch_num, 2),
         ),
     )
 
@@ -221,13 +225,35 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
 def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstant) -> SimulateResult:
     # simulate the peak memory allocation
     split_point = main_var.split_point
+    batch_size = main_var.batch_size
+    max_split_point = memory_const.max_split_point
+    base_sp = memory_const.baseline_split_point  # default 1
+    base_mb_num = memory_const.baseline_minibatch_num  # default 4
     assert split_point >= 1, "split_point should be greater than or equal to 1"
+    assert batch_size >= 4, "batch size should be greater than or equal to 4"
     if main_var.offload:
-        client_peak_mem_alloc = memory_const.base_max_mem_alloc_off_client + (split_point - 1) * memory_const.offload_mem_increment_per_sp_client
-        server_max_mem_alloc = memory_const.base_max_mem_alloc_off_server - (split_point - 1) * memory_const.offload_mem_decrement_per_sp_server
+        client_peak_mem_alloc = (
+            memory_const.base_max_mem_alloc_off_client
+            + (split_point - base_sp) * memory_const.offload_mem_increment_per_sp_client
+            + (batch_size - base_mb_num) * memory_const.offload_mem_increment_per_mb_client
+        )
+        server_max_mem_alloc = (
+            memory_const.base_max_mem_alloc_off_server
+            - (split_point - base_sp) * memory_const.offload_mem_decrement_per_sp_server
+            + (max_split_point - split_point) * (batch_size - base_mb_num) * memory_const.offload_mem_increment_per_mb_server
+        )
     else:
-        client_peak_mem_alloc = memory_const.base_max_mem_alloc_no_off_client + (split_point - 1) * memory_const.no_off_mem_increment_per_sp_client
-        server_max_mem_alloc = memory_const.base_max_mem_alloc_no_off_server - (split_point - 1) * memory_const.no_off_mem_decrement_per_sp_server
+        client_peak_mem_alloc = (
+            memory_const.base_max_mem_alloc_no_off_client
+            + (split_point - base_sp) * memory_const.no_off_mem_increment_per_sp_client
+            + (split_point) * (batch_size - base_mb_num) * memory_const.no_off_mem_increment_per_mb_client
+        )
+        server_max_mem_alloc = (
+            memory_const.base_max_mem_alloc_no_off_server
+            - (split_point - base_sp) * memory_const.no_off_mem_decrement_per_sp_server
+            + (max_split_point - split_point) * (batch_size - base_mb_num) * memory_const.no_off_mem_increment_per_mb_server
+            + (batch_size - base_mb_num) * memory_const.offload_mem_increment_per_mb_client
+        )
 
     return SimulateResult(objective=Objective(client_peak_mem_alloc=client_peak_mem_alloc, server_peak_mem_alloc=server_max_mem_alloc))
 
@@ -238,6 +264,9 @@ def simulate(main_var: MainVariable, time_const: TimeConstant, mem_const: Memory
     # copy memory result to simulate_result
     simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
     simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
+    simulate_result.objective.server_cost = round(
+        simulate_result.objective.server_peak_mem_alloc * simulate_result.objective.epoch_train_time / 10**6, 2
+    )
     return simulate_result
 
 
@@ -247,10 +276,11 @@ def parse_arguments():
     # Defining the command-line arguments
     parser.add_argument('--model', type=str, default='meta-llama/llama3.2-1b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=16, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=6, help='The number of layers in the model.')
+    parser.add_argument('--max_split_point', '-MSP', type=int, default=4, help='The number of layers in the model.')
+    parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
-    parser.add_argument('--mbps', type=int, default=300, help='The mbps value for the simulation.')
-    parser.add_argument('--batch_size', '-BS', type=int, default=8, help='The batch size for the simulation.')
+    parser.add_argument('--mbps', type=int, default=1000, help='The mbps value for the simulation.')
+    parser.add_argument('--max_batch_size', '-BS', type=int, default=64, help='The max batch size for the simulation.')
     parser.add_argument('--profile_dir', type=str, default='log/sim_profile', help='The profile directory for storing results.')
     parser.add_argument('--save_gantt', action='store_true', help='Whether to save gantt chart or not.')
     return parser.parse_args()
@@ -261,42 +291,49 @@ if __name__ == "__main__":
     model_name = args.model
     lora = args.lora
     mbps = args.mbps
-    batch_size = args.batch_size
+    max_batch_size = args.max_batch_size
     profile_dir = args.profile_dir
     max_split_point = args.max_split_point
+    dataset_size = args.dataset_size
     max_client_mem_mb = args.max_client_mem_gb * 1024
     save_gantt = args.save_gantt
     # run profiling
-    mem_res, time_res = run_profile(model_name, batch_size, mbps, lora, profile_dir)
+    mem_res, time_res = run_profile(model_name, mbps, lora, profile_dir=profile_dir)
     if mem_res is None or time_res is None:
         print("Failed to run profiling.")
         exit(1)
     # create main variable
     best_strategy = None
-    for sp in range(1, max_split_point + 1):
-        for offload in [True, False]:
-            var = MainVariable(split_point=sp, offload=offload, lora=lora)
-            # run simulation
-            sim_res = simulate(var, time_res, mem_res, save_gantt=True)
-            sim_res.model_name = model_name
-            if best_strategy is None:
-                best_strategy = sim_res
-            else:
-                # print(best_strategy)
-                if (
-                    sim_res.objective.batch_train_time < best_strategy.objective.batch_train_time
-                    and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb
-                ):
-                    best_strategy = sim_res
-            save_dir = f'log/simulate/{model_name}'
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
-            sim_res.save_to_json(
-                f'{save_dir}/sp_{sp}_b_{batch_size}_mb_{mem_res.micro_batch_size}_s_{mem_res.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora"if lora else ""}{'_oa_os' if offload else ''}.json'
-            )
-    print(best_strategy.main_variable)
-    # if not os.path.exists(f'log/simulate/{model_name}'):
-    #     os.makedirs(f'log/simulate/{model_name}')
-    # best_strategy.save_to_json(
-    #     f'log/simulate/{model_name}/sp_{best_strategy.main_variable.split_point}_b_{batch_size}_mb_{mem_res.micro_batch_size}_s_{mem_res.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora"if lora else ""}.json'
-    # )
+
+    _idle_factor_func = lambda a, b, lambda_=0.3: math.sqrt(a**2 + b**2) + lambda_ * abs(a - b)
+
+    # batch_sizes=[2**i for i in range(2,math.ceil(math.log2(max_batch_size+1)))]
+    for bs in [4, 8, 12, 16, 20, 32, max_batch_size]:
+        for sp in range(1, max_split_point + 1):
+            for offload in [True, False]:
+                var = MainVariable(total_batch_num=(dataset_size + bs - 1) // bs, batch_size=bs, split_point=sp, offload=offload, lora=lora)
+                # run simulation
+                cur_strategy = simulate(var, time_res, mem_res, save_gantt=False)
+                cur_strategy.model_name = model_name
+                if best_strategy is None and cur_strategy.objective.client_peak_mem_alloc < max_client_mem_mb * 0.95:  # 0.95 is for safety
+                    best_strategy = cur_strategy
+                    min_cost = best_strategy.objective.server_cost
+                    min_idle_factor = _idle_factor_func(best_strategy.objective.client_idle_rate, best_strategy.objective.server_idle_rate)
+                else:
+                    server_cost = cur_strategy.objective.server_cost
+                    idle_factor = _idle_factor_func(cur_strategy.objective.client_idle_rate, cur_strategy.objective.server_idle_rate)
+                    if (
+                        cur_strategy.objective.client_peak_mem_alloc * 0.95 < max_client_mem_mb
+                        and server_cost < min_cost
+                        and idle_factor < min_idle_factor
+                    ):
+                        best_strategy = cur_strategy
+                        min_cost = server_cost
+                        min_idle_factor = idle_factor
+                save_dir = f'log/profile/simulate/{model_name}'
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                cur_strategy.save_to_json(
+                    f'{save_dir}/sp_{sp}_b_{bs}_mb_{cur_strategy.memory_const.micro_batch_size}_s_{cur_strategy.memory_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora"if lora else ""}{'_oa_os' if offload else ''}.json'
+                )
+    print(best_strategy.main_variable, best_strategy.objective)
