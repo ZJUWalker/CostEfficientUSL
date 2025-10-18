@@ -40,6 +40,8 @@ class ClientArgs:
     micro_batch_size: int = 1
     offload_activation: bool = False
     offload_model_state: bool = False
+    offload_activation_mb_num: int = 1
+    offload_model_state_ratio: float = 0
     sort_batch: str = "no"  # no,asc,desc
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
     save_dir: str = 'log/profile'
@@ -65,9 +67,9 @@ class ClientArgs:
         if self.use_lora:
             parts.append("lora")
         if self.offload_activation:
-            parts.append("oa")
+            parts.append(f"oa_{self.offload_activation_mb_num}")
         if self.offload_model_state:
-            parts.append("os")
+            parts.append(f"os_{self.offload_model_state_ratio}")
         if self.sort_batch != "no":
             parts.append(f"sort_{self.sort_batch}")
 
@@ -162,6 +164,7 @@ class Client:
             except_tensor_idx_list = [id(p) for p in embed_layer.parameters()]
             self.head_m_mgr = ModelParamOffload(
                 self.head_model,
+                offload_ratio=self.client_args.offload_model_state_ratio,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
@@ -169,21 +172,23 @@ class Client:
             )
             self.tail_m_mgr = ModelParamOffload(
                 self.tail_model,
+                offload_ratio=self.client_args.offload_model_state_ratio,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
                 except_tensor_idx_list=except_tensor_idx_list,
             )
             self.head_os_mgr = OptimizerStateOffload(
-                self.optimizer_head, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
+                self.optimizer_head,offload_ratio=self.client_args.offload_model_state_ratio, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
             )
             self.tail_os_mgr = OptimizerStateOffload(
-                self.optimizer_tail, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
+                self.optimizer_tail,offload_ratio=self.client_args.offload_model_state_ratio, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
             )
         self.num_minibatch = (self.client_args.batch_size + self.client_args.micro_batch_size - 1) // self.client_args.micro_batch_size
-        if self.client_args.offload_activation:
+        self.offload_activation_mb_num = self.client_args.offload_activation_mb_num
+        if self.offload_activation_mb_num > 0:
             self.activation_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-                num_minibatch=self.num_minibatch, load_stream=self.load_stream, offload_stream=self.offload_stream
+                num_minibatch=self.offload_activation_mb_num, load_stream=self.load_stream, offload_stream=self.offload_stream
             )
             self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(
                 self.activation_offload_handler
@@ -336,7 +341,8 @@ class Client:
     ):
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_fwd_timestamp[0] = time.perf_counter()
-        if self.offload_activation:
+        # if self.offload_activation:
+        if mb_idx < self.client_args.offload_activation_mb_num:
             with self.activation_offload_ctx:
                 head_outs = self.head_model.forward(x, m)
                 self.activation_offload_handler.on_minibatch_commit_forward()
@@ -421,7 +427,7 @@ class Client:
         grad_to_head = grad_cpu.to(self.client_device, non_blocking=True)
         head_activation = self.head_fwd_activation_dict[mb_idx]
         # real head model backward
-        if self.offload_activation:
+        if mb_idx < self.client_args.offload_activation_mb_num:
             self.activation_offload_handler.on_minibatch_commit_backward()
         head_activation.backward(grad_to_head)
         torch.cuda.current_stream().synchronize()

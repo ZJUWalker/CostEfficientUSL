@@ -30,7 +30,7 @@ def run_client(args: ClientArgs, profile=False):
     model_dir = os.path.join("data/models", model_name)
     split_point = args.split_point
     lora = args.use_lora
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    device = "cuda:1" if torch.cuda.is_available() else "cpu"
 
     log_dir = f"log/{args.model}/client"
     logger = create_logger(log_file_name="client.log", console_output=False, log_dir=log_dir)
@@ -71,7 +71,7 @@ def run_client(args: ClientArgs, profile=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8889, help="port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8880, help="port to listen")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
@@ -83,10 +83,12 @@ def main():
     parser.add_argument("--lora", action="store_true", default=False)
     parser.add_argument("--mbps", type=int, default=0)
     parser.add_argument("--micro_batch_size", type=int, default=1)
+    parser.add_argument("--offload_activation_mb_num", "-OAM", type=int, default=0)
+    parser.add_argument("--offload_model_state_ratio", "-OSR", type=float, default=0.0)
     parser.add_argument("--offload_activation", "-OA", action="store_true", default=False)
     parser.add_argument("--offload_model_state", "-OS", action="store_true", default=False)
     parser.add_argument("--sort", type=str, default="no", help='sort batch before pipeline, "no" or "desc" or "asc"')
-    parser.add_argument("--pmode", type=str, default="strict", help='mode of pipeline, "strict" or "loose"')
+    parser.add_argument("--pmode", type=str, default="strict", help='pipeline mode, "strict" or "wc" or "eager"')
     parser.add_argument("--profile", "-PROF", action="store_true", default=False)
     parser.add_argument("--save_dir", type=str, default="log/profile")
     args = parser.parse_args()
@@ -106,10 +108,22 @@ def main():
         micro_batch_size=args.micro_batch_size,
         offload_activation=args.offload_activation,
         offload_model_state=args.offload_model_state,
+        offload_activation_mb_num=args.offload_activation_mb_num,
+        offload_model_state_ratio=args.offload_model_state_ratio,
         sort_batch=args.sort,
         save_dir=args.save_dir,
         pipeline_mode=convert_pipeline_mode(args.pmode),
     )
+    # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
+    # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size
+    if args.offload_activation:
+        args.offload_activation_mb_num = (args.batch_size + args.micro_batch_size - 1) // args.micro_batch_size
+    elif args.offload_activation_mb_num > 0:
+        args.offload_activation = True
+    if args.offload_model_state:
+        args.offload_model_state_ratio = 1.0
+    elif args.offload_model_state_ratio > 0:
+        args.offload_model_state = True
 
     run_client(args, profile)
 

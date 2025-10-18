@@ -58,6 +58,7 @@ class ServerArgs:
     # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
     rate_limit_mbps: float = 10
     offload_activation: bool = False
+    offload_activation_mb_num: int = 0
     micro_batch_size: int = 1
     batch_size: int = 4
 
@@ -140,9 +141,10 @@ class SingleServer:
         self.server_output: Optional[torch.Tensor] = None
         self.hidden_status_from_head: Optional[torch.Tensor] = None
         self.num_minibatch = (self.server_args.batch_size + self.server_args.micro_batch_size - 1) // self.server_args.micro_batch_size
-        if self.server_args.offload_activation:
+        self.offload_activation_mb_num = self.server_args.offload_activation_mb_num
+        if self.offload_activation_mb_num > 0:
             self.activation_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-                num_minibatch=self.num_minibatch, load_stream=self.load_stream, offload_stream=self.offload_stream
+                num_minibatch=self.offload_activation_mb_num, load_stream=self.load_stream, offload_stream=self.offload_stream
             )
             self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(self.activation_offload_handler)
         # print(self.server_args.offload_activation)
@@ -231,7 +233,8 @@ class SingleServer:
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
             pos_emb = tuple(pos.to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
 
-            if self.server_args.offload_activation:
+            # if self.server_args.offload_activation or self.server_args.offload_activation_mb_num > 0:
+            if mb_idx < self.server_args.offload_activation_mb_num:
                 with self.activation_offload_ctx:
                     server_output: torch.Tensor = self.trunk_model(
                         hidden_states=hidden_status_from_head,
@@ -269,13 +272,12 @@ class SingleServer:
             ctx = self.ctx.pop(token, None)
             if ctx is None:
                 raise RuntimeError(f"Missing context for token={token}")
-
             server_output = ctx["server_output"]
             hidden_from_head = ctx["hidden_from_head"]
             torch.cuda.current_stream().synchronize()
             self.profile_data[mb_idx].server_bwd_timestamp[0] = time.perf_counter()
             server_grad = server_grad.to(self.server_device, non_blocking=server_grad.is_pinned())
-            if self.server_args.offload_activation:
+            if mb_idx < self.server_args.offload_activation_mb_num:
                 self.activation_offload_handler.on_minibatch_commit_backward()
             server_output.backward(server_grad, retain_graph=False)
             grad_to_head = hidden_from_head.grad.cpu()

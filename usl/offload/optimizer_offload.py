@@ -10,6 +10,7 @@ class OptimizerStateOffload:
         self,
         optimizer: torch.optim.Optimizer,
         offload_threshold: int = 0,
+        offload_ratio: float = 1.0,
         device='cuda',
         load_stream=None,
         offload_stream=None,
@@ -17,6 +18,7 @@ class OptimizerStateOffload:
     ):
         self.optimizer = optimizer
         self.offload_threshold = offload_threshold  # Byte
+        self.offload_ratio = float(max(0.0, min(1.0, offload_ratio)))  # ratio of offload
         self.device = device
         self.load_stream = load_stream if load_stream else torch.cuda.Stream(device)  # create a new stream for offload/reload
         self.offload_stream = offload_stream if offload_stream else torch.cuda.Stream(device)  # create a new stream for offload/reload
@@ -31,20 +33,98 @@ class OptimizerStateOffload:
         self.offload_timestamp = [0, 0]
         self.reload_timestamp = [0, 0]
 
-    def _offload(self):
+        # 统计用途：最近一次offload实际卸载的字节数
+        self._last_offloaded_bytes = 0
+
+    def _iter_candidate_tensors(self):
+        """
+        遍历 optimizer.state，产出可被考虑 offload 的 (tensor, bytes)。
+        只产出：是 Tensor、维度>0、在 GPU 上、大小>=threshold、且不在排除名单中的条目。
+        """
         for param, state in self.optimizer.state.items():
             if id(param) in self.except_tensor_idx_list:
-                print(f"Skip offload for tensor {id(param)}")
+                # print(f"Skip offload for tensor {id(param)}")
                 continue
             state: Dict[str, torch.Tensor]
             for k, v in state.items():
-                v: torch.Tensor
-                if isinstance(v, torch.Tensor) and v.dim() > 0 and v.numel() * v.element_size() >= self.offload_threshold:
-                    if v.is_cuda:  # move tensor to CPU memory
-                        t_cpu = torch.empty_like(v, device='cpu', pin_memory=True)
-                        t_cpu.copy_(v, non_blocking=True)
-                        v.data = t_cpu.data
-            pass
+                if not isinstance(v, torch.Tensor):
+                    continue
+                if v.dim() <= 0:
+                    continue
+                if not v.is_cuda:
+                    # 已在CPU上的（之前卸载过），这次不作为 offload 候选
+                    continue
+                size_bytes = v.numel() * v.element_size()
+                if size_bytes < self.offload_threshold:
+                    continue
+                yield v, size_bytes
+
+    def _offload(self):
+        """
+        按 offload_ratio 卸载一部分状态：
+        - ratio == 0: 不卸载
+        - ratio == 1: 卸载所有候选
+        - 其余：按大小从大到小卸载，直到达到目标字节数
+        """
+        if self.offload_ratio <= 0.0:
+            self._last_offloaded_bytes = 0
+            return
+
+        # 收集候选
+        candidates: List[Tuple[torch.Tensor, int]] = list(self._iter_candidate_tensors())
+        if not candidates:
+            self._last_offloaded_bytes = 0
+            return
+
+        total_bytes = sum(sz for _, sz in candidates)
+        target_bytes = int(total_bytes * self.offload_ratio)
+
+        # 全卸载的捷径
+        if self.offload_ratio >= 0.999999:
+            selected = candidates
+        else:
+            # 按大小从大到小排序，优先卸载大块，释放显存更高效
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            selected = []
+            acc = 0
+            for v, sz in candidates:
+                selected.append((v, sz))
+                acc += sz
+                if acc >= target_bytes:
+                    break
+
+        # 执行卸载：把选中的 GPU Tensor 复制到 pinned CPU，再替换 data 指针
+        actually_offloaded = 0
+        for v, sz in selected:
+            # 再次防御性检查（并行场景下可能发生状态变化）
+            if not v.is_cuda:
+                continue
+            t_cpu = torch.empty_like(v, device='cpu', pin_memory=True)
+            t_cpu.copy_(v, non_blocking=True)
+            v.data = t_cpu.data
+            actually_offloaded += sz
+
+        self._last_offloaded_bytes = actually_offloaded
+
+    @property
+    def last_offloaded_bytes(self) -> int:
+        """上次 offload 实际从 GPU 卸载掉的字节数（统计值）。"""
+        return self._last_offloaded_bytes
+
+    # def _offload(self):
+    #     for param, state in self.optimizer.state.items():
+    #         if id(param) in self.except_tensor_idx_list:
+    #             print(f"Skip offload for tensor {id(param)}")
+    #             continue
+    #         state: Dict[str, torch.Tensor]
+    #         for k, v in state.items():
+    #             v: torch.Tensor
+    #             if isinstance(v, torch.Tensor) and v.dim() > 0 and v.numel() * v.element_size() >= self.offload_threshold:
+    #                 if v.is_cuda:  # move tensor to CPU memory
+    #                     t_cpu = torch.empty_like(v, device='cpu', pin_memory=True)
+    #                     t_cpu.copy_(v, non_blocking=True)
+    #                     v.data = t_cpu.data
+    #         pass
 
     def _reload(self):
         for param, state in self.optimizer.state.items():

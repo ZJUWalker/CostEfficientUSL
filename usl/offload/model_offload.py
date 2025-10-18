@@ -10,6 +10,7 @@ class ModelParamOffload:
         self,
         base_model: nn.Module,
         offload_threshold: int = 0,
+        offload_ratio: float = 1.0,
         device="cuda",
         load_stream=None,
         offload_stream=None,
@@ -17,6 +18,7 @@ class ModelParamOffload:
     ):
         self.base_model = base_model
         self.offload_threshold = offload_threshold  # Byte
+        self.offload_ratio = offload_ratio  # ratio of parameters to offload
         self.device = device
         self.model_param_on_gpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> parameter state on GPU
         self.model_param_on_cpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> parameter state on CPU DRAM
@@ -33,7 +35,18 @@ class ModelParamOffload:
         self.offload_timestamp = [0, 0]
         self.reload_timestamp = [0, 0]
         self.except_tensor_idx_list: List[int] = except_tensor_idx_list  # tensor_idx list to be excluded from offloading
+        self.param_count = self._get_param_count()
+        self.max_offload_param_count = self.param_count * self.offload_ratio
+        # print(f"Offload threshold: {self.offload_threshold}, Offload param count: {self.max_offload_param_count}")
         self._init_param_dict()
+
+    def _get_param_count(self):
+        count = 0
+        for name, param in self.base_model.named_parameters():
+            if id(param) in self.except_tensor_idx_list or param.numel() * param.element_size() < self.offload_threshold:
+                continue
+            count += param.numel()
+        return count
 
     def add_except_tensor(self, tensor: torch.Tensor):
         tensor_idx = id(tensor)
@@ -46,14 +59,19 @@ class ModelParamOffload:
             self.except_tensor_idx_list.remove(tensor_idx)
 
     def _init_param_dict(self):
+        curr_count = 0
         for name, param in self.base_model.named_parameters():
-            # if self.curr_model_state is None:
-            #     self.curr_model_state = param.device.type  # 'cpu' or 'cuda'
-            if id(param) in self.except_tensor_idx_list:
-                print(f"Excluding tensor {name} from offloading")
+            if (
+                id(param) in self.except_tensor_idx_list
+                or param.numel() * param.element_size() < self.offload_threshold
+                or curr_count >= self.max_offload_param_count
+            ):
                 param.data = param.data.cuda(self.device)  # pin on GPU
-            self.model_param_on_cpu[id(param)] = param
-            self.model_param_on_gpu[id(param)] = param  # use the same tensor for both on CPU and GPU,temporary
+            else:
+                curr_count += param.numel()
+                self.model_param_on_cpu[id(param)] = param
+                self.model_param_on_gpu[id(param)] = param  # use the same tensor for both on CPU and GPU,temporary
+
 
     # offload model parameters and optimizer states from GPU to CPU
     def offload(self, async_offload=False):
@@ -67,12 +85,10 @@ class ModelParamOffload:
         with torch.cuda.stream(stream):
             # Offload model parameters to CPU
             for idx, tensor in self.model_param_on_gpu.items():
-                if idx in self.except_tensor_idx_list:
-                    continue
-                if tensor.device.type == "cuda" and tensor.numel() * tensor.element_size() >= self.offload_threshold:
-                    t_cpu = torch.empty_like(tensor, device="cpu", pin_memory=True)
-                    t_cpu.data.copy_(tensor.data, non_blocking=True)
-                    self.model_param_on_cpu[id(tensor)] = t_cpu
+                assert tensor.is_cuda,'model_param_on_gpu should be on GPU'
+                t_cpu = torch.empty_like(tensor, device="cpu", pin_memory=True)
+                t_cpu.data.copy_(tensor.data, non_blocking=True)
+                self.model_param_on_cpu[id(tensor)] = t_cpu
 
             if async_offload:
                 # record offload event
@@ -120,12 +136,10 @@ class ModelParamOffload:
         with torch.cuda.stream(stream):
             # Reload model parameters from CPU to GPU
             for idx, tensor in self.model_param_on_cpu.items():
-                if idx in self.except_tensor_idx_list:
-                    continue
-                if tensor.device.type == "cpu":
-                    t_gpu = torch.empty_like(tensor, device=self.device)  # no pin_memory on GPU
-                    t_gpu.data.copy_(tensor.data, non_blocking=True)
-                    self.model_param_on_gpu[idx].data = t_gpu.data
+                assert tensor.is_cpu and tensor.is_pinned, 'model_param_on_cpu should be on CPU DRAM and pinned'
+                t_gpu = torch.empty_like(tensor, device=self.device)  # no pin_memory on GPU
+                t_gpu.data.copy_(tensor.data, non_blocking=True)
+                self.model_param_on_gpu[idx].data = t_gpu.data
             if async_reload:
                 # record reload event
                 self.reload_event.record(stream)
@@ -133,9 +147,6 @@ class ModelParamOffload:
                 # wait for all tensors reloaded
                 self.compute_stream.wait_stream(stream)
                 self.reload_timestamp[1] = time.perf_counter()
-                # release CPU memory
-                self.model_param_on_cpu.clear()
-                # torch.cuda.empty_cache()
 
     def wait_reload(self):
         if self.load_stream != self.compute_stream:
@@ -144,8 +155,4 @@ class ModelParamOffload:
             self.reload_event.synchronize()
             elapsed_time = self.start_reload_event.elapsed_time(self.reload_event)  # kernel time in ms
             self.reload_timestamp[1] = self.reload_timestamp[0] + elapsed_time / 1000  # time in seconds
-            # ----------------------------------------------------
-            # Clear CPU memory
-            self.model_param_on_cpu.clear()
         return self.reload_timestamp
-        # torch.cuda.empty_cache()
