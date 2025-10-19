@@ -74,13 +74,13 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             head_activation_send_timestamps[0][0] = head_fwd_timestamps[0][1]
         else:
             head_activation_send_timestamps[i][0] = max(head_fwd_timestamps[i][1], head_activation_send_timestamps[i - 1][1])
-        head_activation_send_timestamps[i][1] = head_activation_send_timestamps[i][0] + time_const.head_activation_send_time
+        head_activation_send_timestamps[i][1] = head_activation_send_timestamps[i][0]
     # step3 : do server fwd
     for i in range(micro_batch_num):
         if i == 0:
-            server_fwd_timestamps[0][0] = head_activation_send_timestamps[0][1]
+            server_fwd_timestamps[0][0] = head_activation_send_timestamps[0][1] + time_const.base_idle_time
         else:
-            server_fwd_timestamps[i][0] = max(head_activation_send_timestamps[i][1], server_fwd_timestamps[i - 1][1])
+            server_fwd_timestamps[i][0] = max(head_activation_send_timestamps[i][1] + time_const.base_idle_time, server_fwd_timestamps[i - 1][1])
         server_fwd_timestamps[i][1] = server_fwd_timestamps[i][0] + server_fwd_time
     # step4 : do server activation send
     for i in range(micro_batch_num):
@@ -88,15 +88,17 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             server_activation_send_timestamps[0][0] = server_fwd_timestamps[0][1]
         else:
             server_activation_send_timestamps[i][0] = max(server_fwd_timestamps[i][1], server_activation_send_timestamps[i - 1][1])
-        server_activation_send_timestamps[i][1] = server_activation_send_timestamps[i][0] + time_const.server_activation_send_time
+        server_activation_send_timestamps[i][1] = server_activation_send_timestamps[i][0]
     # step5 : do tail fwd and bwd
     for i in range(micro_batch_num):
         if i == 0:
             tail_fwd_timestamps[0][0] = max(
-                head_fwd_timestamps[-1][1] + head_offload_time, head_fwd_timestamps[-1][1] + tail_reload_time, server_activation_send_timestamps[0][1]
+                head_fwd_timestamps[-1][1] + head_offload_time,
+                head_fwd_timestamps[-1][1] + tail_reload_time,
+                server_activation_send_timestamps[0][1] + time_const.base_idle_time,
             )
         else:
-            tail_fwd_timestamps[i][0] = max(tail_bwd_timestamps[i - 1][1], server_activation_send_timestamps[i][1])
+            tail_fwd_timestamps[i][0] = max(tail_bwd_timestamps[i - 1][1], server_activation_send_timestamps[i][1] + time_const.base_idle_time)
         tail_fwd_timestamps[i][1] = tail_fwd_timestamps[i][0] + tail_fwd_time
         tail_bwd_timestamps[i][0] = tail_fwd_timestamps[i][1]
         tail_bwd_timestamps[i][1] = tail_bwd_timestamps[i][0] + tail_bwd_time
@@ -112,9 +114,9 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     # step7 : do server bwd
     for i in range(micro_batch_num):
         if i == 0:
-            server_bwd_timestamps[0][0] = max(server_fwd_timestamps[-1][1], tail_gradient_send_timestamps[0][1])
+            server_bwd_timestamps[0][0] = max(server_fwd_timestamps[-1][1], tail_gradient_send_timestamps[0][1] + time_const.base_idle_time)
         else:
-            server_bwd_timestamps[i][0] = max(server_bwd_timestamps[i - 1][1], tail_gradient_send_timestamps[i][1])
+            server_bwd_timestamps[i][0] = max(server_bwd_timestamps[i - 1][1], tail_gradient_send_timestamps[i][1] + time_const.base_idle_time)
         server_bwd_timestamps[i][1] = server_bwd_timestamps[i][0] + server_bwd_time
     # step8 : do server grad send to head
     for i in range(micro_batch_num):
@@ -133,10 +135,12 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     for i in range(micro_batch_num):
         if i == 0:
             head_bwd_timestamps[0][0] = max(
-                tail_bwd_timestamps[-1][1] + tail_offload_time, tail_bwd_timestamps[-1][1] + head_reload_time, server_gradient_send_timestamps[0][1]
+                tail_bwd_timestamps[-1][1] + tail_offload_time,
+                tail_bwd_timestamps[-1][1] + head_reload_time,
+                server_gradient_send_timestamps[0][1] + time_const.base_idle_time,
             )
         else:
-            head_bwd_timestamps[i][0] = max(head_bwd_timestamps[i - 1][1], server_gradient_send_timestamps[i][1])
+            head_bwd_timestamps[i][0] = max(head_bwd_timestamps[i - 1][1], server_gradient_send_timestamps[i][1] + time_const.base_idle_time)
         head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + head_bwd_time
     # print(head_fwd_timestamps)
     if save_gantt:
