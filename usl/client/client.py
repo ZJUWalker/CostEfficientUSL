@@ -179,10 +179,18 @@ class Client:
                 except_tensor_idx_list=except_tensor_idx_list,
             )
             self.head_os_mgr = OptimizerStateOffload(
-                self.optimizer_head,offload_ratio=self.client_args.offload_model_state_ratio, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
+                self.optimizer_head,
+                offload_ratio=self.client_args.offload_model_state_ratio,
+                device=self.client_device,
+                load_stream=self.load_stream,
+                offload_stream=self.offload_stream,
             )
             self.tail_os_mgr = OptimizerStateOffload(
-                self.optimizer_tail,offload_ratio=self.client_args.offload_model_state_ratio, device=self.client_device, load_stream=self.load_stream, offload_stream=self.offload_stream
+                self.optimizer_tail,
+                offload_ratio=self.client_args.offload_model_state_ratio,
+                device=self.client_device,
+                load_stream=self.load_stream,
+                offload_stream=self.offload_stream,
             )
         self.num_minibatch = (self.client_args.batch_size + self.client_args.micro_batch_size - 1) // self.client_args.micro_batch_size
         self.offload_activation_mb_num = self.client_args.offload_activation_mb_num
@@ -540,6 +548,7 @@ class Client:
         server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
         client_send_time_ms = 0
         server_send_time_ms = 0
+        delay_time_ms_in_send_and_compute = 0
         assert len(self.profile_data) == len(server_profile_gantt_data), "error in profile data length between client and server"
         for client_item, server_item in zip(self.profile_data, server_profile_gantt_data):
             client_item.server_fwd_timestamp = server_item.server_fwd_timestamp
@@ -590,6 +599,13 @@ class Client:
             client_item.head_optimizer_reload_ts = [var + head_m_reload_time_ms for var in self.head_optimizer_reload_timestamp]
             client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
             client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
+
+        # 计算通信和计算之间的延迟时间
+        for i in range(len(self.profile_data)):
+            delay_time_ms_in_send_and_compute += (client_item.server_fwd_timestamp[0] - client_item.head_fwd_send_timestamp[1]) * 1000
+            delay_time_ms_in_send_and_compute += (client_item.tail_fwd_timestamp[0] - client_item.server_fwd_send_timestamp[1]) * 1000
+            delay_time_ms_in_send_and_compute += (client_item.server_bwd_timestamp[0] - client_item.tail_bwd_send_timestamp[1]) * 1000
+            delay_time_ms_in_send_and_compute += (client_item.head_bwd_timestamp[0] - client_item.server_bwd_send_timestamp[1]) * 1000
         # 计算平均时间
         grad_accum_steps = len(self.profile_data)
         head_fwd_time_avg = self.head_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
@@ -602,6 +618,7 @@ class Client:
         tail_fwd_time_avg = self.tail_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
         tail_bwd_time_avg = self.tail_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
         tail_bwd_send_time_avg = self.tail_bwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        delay_time_avg_ms = delay_time_ms_in_send_and_compute / grad_accum_steps / 4
         # 计算平均通信时间
 
         # 计算batch训练时间
@@ -619,7 +636,7 @@ class Client:
             "offload_model_state": self.client_args.offload_model_state,
             "offload_activation": self.client_args.offload_activation,
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
-            "server_max_mem_alloc_mb": server_profile_res.get("server_max_mem_alloc_mb", 0),
+            "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
             "batch_train_time_ms": batch_train_time_ms,
             "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
             "head_fwd_send_time_avg_ms": round(head_fwd_send_time_avg, 2),
@@ -633,6 +650,7 @@ class Client:
             "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
             "client_compute_time_ms": round(local_compute_time_ms, 2),
             "server_compute_time_ms": round(server_compute_time_ms, 2),
+            "delay_time_avg_ms": round(delay_time_avg_ms, 2),
             "head_m_offload_time_ms": round((self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]) * 1000, 2),
             "head_m_reload_time_ms": round((self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]) * 1000, 2),
             "tail_m_offload_time_ms": round((self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]) * 1000, 2),
