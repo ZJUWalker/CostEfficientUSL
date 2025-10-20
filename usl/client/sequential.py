@@ -1,4 +1,6 @@
 import logging
+
+import torch
 from usl.client.client import Client
 
 from torch.utils.data import Dataset
@@ -51,9 +53,16 @@ class SequentialClientTrainer(Client):
                 mb_total=grad_accum_steps,
             )
             self.gradient_to_server_queue.put(grad_payload)
-
+            if mb_idx == grad_accum_steps - 1:
+                self.optimizer_tail.step()
+                self.optimizer_tail.zero_grad(set_to_none=True)
             # 4. Wait for server gradient
             server_grad_payload = self.gradient_from_server_queue.get(block=True)
             self._head_bwd_micro(server_grad_payload)
+            if mb_idx == grad_accum_steps - 1:
+                self.optimizer_head.step()
+                self.optimizer_head.zero_grad(set_to_none=True)
+        self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
+        torch.cuda.reset_peak_memory_stats(self.client_device)
 
         return batch_loss

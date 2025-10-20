@@ -214,6 +214,9 @@ def run_profile(
             prof_res[base_bs][base_sp][True]['server_bwd_time_avg_ms']
             + (max_split_point - base_sp - 1) * time_var.server_off_bwd_time_increment_per_sp
         )
+        time_var.delay_time_avg_ms = (
+            prof_res[base_bs][base_sp][False]['delay_time_avg_ms'] + prof_res[base_bs][base_sp][True]['delay_time_avg_ms']
+        ) / 2
         # print(time_var)
         return mem_var, time_var
 

@@ -55,7 +55,7 @@ class TimeConstant:
     base_tail_offload_time: float = 10.0
     tail_offload_time_increment_per_sp: float = 0.0
     # idle time between two compute and communication
-    base_idle_time: float = 15.0
+    delay_time_avg_ms: float = 15.0
 
 
 @dataclass
