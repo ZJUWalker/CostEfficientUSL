@@ -284,7 +284,7 @@ def parse_arguments():
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
     parser.add_argument('--mbps', type=int, default=1000, help='The mbps value for the simulation.')
-    parser.add_argument('--max_batch_size', '-BS', type=int, default=64, help='The max batch size for the simulation.')
+    parser.add_argument('--max_batch_size', '-BS', type=int, default=32, help='The max batch size for the simulation.')
     parser.add_argument('--profile_dir', type=str, default='log/sim_profile', help='The profile directory for storing results.')
     parser.add_argument('--save_gantt', action='store_true', help='Whether to save gantt chart or not.')
     return parser.parse_args()

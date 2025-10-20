@@ -65,7 +65,7 @@ def run_profile(
         for sp in split_points:
             for offload in OFFLOAD_VALUES:
                 # Generate the file name dynamically based on the parameters
-                file_name = f"sp_{sp}_b_{bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{'_oa_os' if offload else ''}.json"
+                file_name = f"sp_{sp}_b_{bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{f'_oa_{bs}_os_1.0' if offload else ''}.json"
                 file_path = os.path.join(profile_dir, model, file_name)
                 if not os.path.exists(file_path):
                     need_profile = True
@@ -86,7 +86,7 @@ def run_profile(
                 prof_res[bs][sp] = {}
                 for offload in OFFLOAD_VALUES:
                     # Generate the file name dynamically based on the parameters
-                    file_name = f"sp_{sp}_b_{bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{'_oa_os' if offload else ''}.json"
+                    file_name = f"sp_{sp}_b_{bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{f'_oa_{bs}_os_1.0' if offload else ''}.json"
                     file_path = os.path.join(profile_dir, model, file_name)
 
                     # Read and process the file

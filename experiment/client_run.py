@@ -1,6 +1,7 @@
 import os
 import argparse
 import warnings
+import sys
 
 import torch
 from usl.client import ClientArgs
@@ -75,7 +76,7 @@ def main():
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
-    parser.add_argument("-S", "--step", type=int, default=4)
+    parser.add_argument("-S", "--step", type=int, default=10)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=4)
@@ -91,8 +92,10 @@ def main():
     parser.add_argument("--pmode", type=str, default="strict", help='pipeline mode, "strict" or "wc" or "eager"')
     parser.add_argument("--profile", "-PROF", action="store_true", default=False)
     parser.add_argument("--save_dir", type=str, default="log/profile")
+    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     args = parser.parse_args()
     profile = args.profile
+    
     args = ClientArgs(
         port=args.port,
         model=args.model,
@@ -113,6 +116,7 @@ def main():
         sort_batch=args.sort,
         save_dir=args.save_dir,
         pipeline_mode=convert_pipeline_mode(args.pmode),
+        max_client_mem_mb=args.max_client_mem_gb * 1024,
     )
     # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size

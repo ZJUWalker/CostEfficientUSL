@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, Optional, Tuple, List
+import sys
 
 import torch
 import torch.nn as nn
@@ -26,6 +27,7 @@ from transformers import PreTrainedModel
 
 @dataclass
 class ClientArgs:
+    host: str = "10.82.1.244" # 10.82.1.244 "localhost"
     port: int = 8000
     model: str = "meta-llama/llama3.2-1b"
     batch_size: int = 4
@@ -45,6 +47,7 @@ class ClientArgs:
     sort_batch: str = "no"  # no,asc,desc
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
     save_dir: str = 'log/profile'
+    max_client_mem_mb: int = 12288  # 12GB
 
     def build_filename(self, prefix: str = "", ext: str = "json") -> str:
         """
@@ -205,6 +208,7 @@ class Client:
 
         # ---- Communicator
         self.communicator = SocketCommunicator(
+            host=self.client_args.host,
             is_server=False,
             port=client_args.port,
             buffer_size=1024 * 4,  # 4KB
@@ -523,6 +527,11 @@ class Client:
             if isinstance(data, dict) and "profile" in data:
                 print(f"get profile data")
                 try:
+                    if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
+                        print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
+                        self.communicator.close()
+                        self.main_executor.shutdown(wait=False)
+                        sys.exit(1)
                     self._save_profile_res(data)
                 except Exception as e:
                     print(f"error when save profile data: {e}")

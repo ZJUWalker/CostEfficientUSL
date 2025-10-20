@@ -15,7 +15,7 @@ class SocketCommunicator:
 
     def __init__(
         self,
-        host="localhost",
+        host="10.82.1.244",  # "localhost" "10.82.1.244"
         port=8888,
         is_server=False,
         buffer_size=1024,
@@ -45,6 +45,7 @@ class SocketCommunicator:
         self.close()
 
     def _init_server(self):
+        print(self.host, self.port)
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # ✅ 启用端口复用

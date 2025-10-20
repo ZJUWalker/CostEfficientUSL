@@ -37,10 +37,10 @@ def run_server(server_args: ServerArgs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-P", "--port", type=int, default=8880, help="Port to listen")
-    parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
+    parser.add_argument("-S", "--step", type=int, default=10, help="Number of steps to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
-    parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
+    parser.add_argument("-SD", "--server_device", type=str, default="cuda:3", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
