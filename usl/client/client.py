@@ -27,7 +27,7 @@ from transformers import PreTrainedModel
 
 @dataclass
 class ClientArgs:
-    host: str = "10.82.1.244" # 10.82.1.244 "localhost"
+    host: str = "10.82.1.244"  # 10.82.1.244 "localhost"
     port: int = 8000
     model: str = "meta-llama/llama3.2-1b"
     batch_size: int = 4
@@ -70,9 +70,10 @@ class ClientArgs:
         if self.use_lora:
             parts.append("lora")
         if self.offload_activation:
-            parts.append(f"oa_{self.offload_activation_mb_num}")
+            parts.append(f"coa_{self.offload_activation_mb_num}")
         if self.offload_model_state:
-            parts.append(f"os_{self.offload_model_state_ratio}")
+            parts.append(f"cos_{self.offload_model_state_ratio}")
+        parts.append('{}')  # 占位符，方便后续扩展
         if self.sort_batch != "no":
             parts.append(f"sort_{self.sort_batch}")
 
@@ -354,28 +355,32 @@ class Client:
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_fwd_timestamp[0] = time.perf_counter()
         # if self.offload_activation:
-        if mb_idx < self.client_args.offload_activation_mb_num:
-            with self.activation_offload_ctx:
-                head_outs = self.head_model.forward(x, m)
-                self.activation_offload_handler.on_minibatch_commit_forward()
-        else:
+        # if mb_idx < self.client_args.offload_activation_mb_num:
+        #     with self.activation_offload_ctx:
+        #         head_outs = self.head_model.forward(x, m)
+        #         # self.activation_offload_handler.on_minibatch_commit_forward()
+        # else:
+        #     head_outs = self.head_model.forward(x, m)
+        with self.activation_offload_ctx if mb_idx < self.client_args.offload_activation_mb_num else nullcontext():
             head_outs = self.head_model.forward(x, m)
-        torch.cuda.current_stream().synchronize()
-        head_outs[0].requires_grad_(True)
-        self.head_fwd_activation_dict[mb_idx] = head_outs[0]
-        token = uuid.uuid4().hex
-        payload = self._to_cpu_payload(
-            head_outs,
-            token=token,
-            group_id=group_id,
-            mb_idx=mb_idx,
-            mb_total=grad_accum_steps,
-            is_activation=True,
-            phase="FWD" if mb_idx < grad_accum_steps - 1 else "BWD",
-        )
-        self.profile_data[mb_idx].head_fwd_timestamp[1] = time.perf_counter()
-        if self.curr_step_idx > 0:
-            self.head_fwd_time += self.profile_data[mb_idx].head_fwd_timestamp[1] - self.profile_data[mb_idx].head_fwd_timestamp[0]
+            torch.cuda.current_stream().synchronize()
+            head_outs[0].requires_grad_(True)
+            self.head_fwd_activation_dict[mb_idx] = head_outs[0]
+            token = uuid.uuid4().hex
+            payload = self._to_cpu_payload(
+                head_outs,
+                token=token,
+                group_id=group_id,
+                mb_idx=mb_idx,
+                mb_total=grad_accum_steps,
+                is_activation=True,
+                phase="FWD" if mb_idx < grad_accum_steps - 1 else "BWD",
+            )
+            self.profile_data[mb_idx].head_fwd_timestamp[1] = time.perf_counter()
+            if self.curr_step_idx > 0:
+                self.head_fwd_time += self.profile_data[mb_idx].head_fwd_timestamp[1] - self.profile_data[mb_idx].head_fwd_timestamp[0]
+            if mb_idx < self.client_args.offload_activation_mb_num:
+                self.activation_offload_handler.on_minibatch_commit_forward()
         return payload
 
     def _tail_fwd_micro(self, server_forward_output: Payload) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -555,6 +560,7 @@ class Client:
         server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
         server_bwd_time = server_profile_res.get('server_bwd_time', 0)
         server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
+        server_policy_str = server_profile_res.get('file_suffix', '')
         client_send_time_ms = 0
         server_send_time_ms = 0
         delay_time_ms_in_send_and_compute = 0
@@ -683,7 +689,7 @@ class Client:
         dt_save_dir = os.path.join(self.client_args.save_dir, self.client_args.model)
         if not os.path.exists(dt_save_dir):
             os.makedirs(dt_save_dir)
-        save_gantt_chart_data(data_dict, fp=self.client_args.build_filename(prefix=dt_save_dir, ext="json"))
+        save_gantt_chart_data(data_dict, fp=self.client_args.build_filename(prefix=dt_save_dir, ext="json").format(server_policy_str))
         # png_save_dir = f"log/img/{self.client_args.model}"
         # if not os.path.exists(png_save_dir):
         #     os.makedirs(png_save_dir)
@@ -691,7 +697,7 @@ class Client:
         png_save_dir_c = f"log/img/grouped/{self.client_args.model}"
         if not os.path.exists(png_save_dir_c):
             os.makedirs(png_save_dir_c)
-        plot_gantt_grouped(self.profile_data, fp=self.client_args.build_filename(prefix=png_save_dir_c, ext="png"))
+        plot_gantt_grouped(self.profile_data, fp=self.client_args.build_filename(prefix=png_save_dir_c, ext="png").format(server_policy_str))
         self.stop_event.set()
 
     @abstractmethod
