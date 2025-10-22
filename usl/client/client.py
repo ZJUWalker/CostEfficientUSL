@@ -27,11 +27,7 @@ from transformers import PreTrainedModel
 
 @dataclass
 class ClientArgs:
-<<<<<<< HEAD
-    host: str = "10.82.1.244" # "10.82.1.244" "localhost"
-=======
-    host: str = "10.82.1.244"  # 10.82.1.244 "localhost"
->>>>>>> f32f6c566dc6c5bf18610826ecc37c211e532d6e
+    host: str = "10.82.1.244"  # "10.82.1.244" "localhost"
     port: int = 8000
     model: str = "meta-llama/llama3.2-1b"
     batch_size: int = 4
