@@ -27,7 +27,7 @@ from transformers import PreTrainedModel
 
 @dataclass
 class ClientArgs:
-    host: str = "10.82.1.244" # 10.82.1.244 "localhost"
+    host: str = "10.82.1.244" # "10.82.1.244" "localhost"
     port: int = 8000
     model: str = "meta-llama/llama3.2-1b"
     batch_size: int = 4
@@ -644,6 +644,8 @@ class Client:
             "max_seq_len": self.client_args.max_seq_len,
             "offload_model_state": self.client_args.offload_model_state,
             "offload_activation": self.client_args.offload_activation,
+            "offload_model_state_ratio": self.client_args.offload_model_state_ratio,
+            "offload_activation_mb_num": self.client_args.offload_activation_mb_num,
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
             "batch_train_time_ms": batch_train_time_ms,
