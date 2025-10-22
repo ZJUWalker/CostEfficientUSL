@@ -73,13 +73,13 @@ class ClientArgs:
             parts.append(f"coa_{self.offload_activation_mb_num}")
         if self.offload_model_state:
             parts.append(f"cos_{self.offload_model_state_ratio}")
-        parts.append('{}')  # 占位符，方便后续扩展
+        # parts.append('{}')
         if self.sort_batch != "no":
             parts.append(f"sort_{self.sort_batch}")
 
         base = "_".join(parts)
         # name = f"{prefix}{base}{suffix}.{ext}"
-        name = os.path.join(prefix, f"{base}.{ext}")
+        name = os.path.join(prefix, f"{base}{'{}'}.{ext}")  # 加个占位符，方便后续扩展
         return name
 
 
@@ -561,6 +561,8 @@ class Client:
         server_bwd_time = server_profile_res.get('server_bwd_time', 0)
         server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
         server_policy_str = server_profile_res.get('file_suffix', '')
+        if server_policy_str:
+            server_policy_str = f"_{server_policy_str}"
         client_send_time_ms = 0
         server_send_time_ms = 0
         delay_time_ms_in_send_and_compute = 0
