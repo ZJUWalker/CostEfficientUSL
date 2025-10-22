@@ -365,6 +365,7 @@ class SingleServer:
                             "server_fwd_send_time": self.server_fwd_send_time,
                             "server_bwd_time": self.server_bwd_time,
                             "server_bwd_send_time": self.server_bwd_send_time,
+                            "file_suffix": f'soa_{self.server_args.offload_activation_mb_num}' if self.server_args.offload_activation else '',
                         }
                     )
                     self.logger.info(f"Client {self.communicator.addr} requested profile data and finished training")
