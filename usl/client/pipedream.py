@@ -137,7 +137,7 @@ class PipeDreamWCClientTrainer(Client):
         # self._check_mem_usage('after head fwd')
         # do offload and reload
         if self.offload_model_state:
-            print('offload and reload')
+            # print('offload and reload')
             # reload tail model and optimizer
             self.tail_m_mgr.reload(True)
             self.tail_os_mgr.reload(True)

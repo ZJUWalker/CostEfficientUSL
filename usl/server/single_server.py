@@ -541,7 +541,16 @@ class SingleServer:
     def _compute_task_gpipe_or_pipe_dream_wc(self):
 
         self._init_cuda()
-
+        # with torch.profiler.profile(
+        #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        #     schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
+        #     on_trace_ready=(torch.profiler.tensorboard_trace_handler("./log/trace", worker_name="server")),  # 保存到 TensorBoard
+        #     # on_trace_ready=None,
+        #     record_shapes=True,
+        #     profile_memory=True,
+        #     with_stack=True,
+        #     with_flops=True,
+        # ) as prof:
         """Non-busy compute loop using queue.get(timeout) for backpressure."""
         curr_phase = "FWD"
         if self.server_args.offload_activation:
@@ -563,6 +572,7 @@ class SingleServer:
                     curr_phase = data.phase
                     if curr_phase == 'FWD' and self.server_args.offload_activation:
                         self.activation_offload_handler.start_fwd()
+                        # prof.step()  # 记录当前 step 的性能数据
                 except Empty:
                     pass
             self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))
