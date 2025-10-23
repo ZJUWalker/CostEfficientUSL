@@ -92,7 +92,7 @@ def main():
     parser.add_argument("--pmode", type=str, default="strict", help='pipeline mode, "strict" or "wc" or "eager"')
     parser.add_argument("--profile", "-PROF", action="store_true", default=False)
     parser.add_argument("--save_dir", type=str, default="log/profile")
-    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
     args = parser.parse_args()
     profile = args.profile
     

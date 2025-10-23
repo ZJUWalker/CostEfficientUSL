@@ -657,6 +657,7 @@ class Client:
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
             "batch_train_time_ms": batch_train_time_ms,
+            "GPU_rent_cost": round(batch_train_time_ms * server_profile_res.get("max_mem_alloc", 0) / 1e6, 6),
             "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
             "head_fwd_send_time_avg_ms": round(head_fwd_send_time_avg, 2),
             "head_bwd_time_avg_ms": round(head_bwd_time_avg, 2),
