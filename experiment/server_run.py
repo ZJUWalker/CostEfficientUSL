@@ -36,22 +36,22 @@ def run_server(server_args: ServerArgs):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8880, help="Port to listen")
-    parser.add_argument("-S", "--step", type=int, default=10, help="Number of steps to profile")
+    parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
+    parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
-    parser.add_argument("-SD", "--server_device", type=str, default="cuda:3", help="Device for server model")
+    parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--mbps", type=int, default=0)
-    parser.add_argument("--pmode", type=str, default="gpipe", help='mode of pipeline, "strict" or "loose" or "1f1b"')
+    parser.add_argument("--mbps", type=int, default=300)
+    parser.add_argument("--pmode", type=str, default="pdwc", help='mode of pipeline, "strict" or "loose" or "1f1b"')
     parser.add_argument("--offload_activation", "-OA", action="store_true", default=False)
     parser.add_argument("--offload_activation_mb_num", "-OAM", type=int, default=0)
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("--micro_batch_size", type=int, default=1)
     args = parser.parse_args()
-    args = ServerArgs(
+    server_args = ServerArgs(
         port=args.port,
         step=args.step,
         use_lora=args.lora,
@@ -63,17 +63,22 @@ if __name__ == "__main__":
         rate_limit_mbps=args.mbps,
         pipeline_mode=convert_pipeline_mode(args.pmode),
         offload_activation=args.offload_activation,
+        offload_activation_mb_num=args.offload_activation_mb_num,
         batch_size=args.batch_size,
         micro_batch_size=args.micro_batch_size,
     )
     # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size
-    if args.offload_activation:
-        args.offload_activation_mb_num = (args.batch_size + args.micro_batch_size - 1) // args.micro_batch_size
-    elif args.offload_activation_mb_num > 0:
-        args.offload_activation = True
+    if server_args.offload_activation or server_args.offload_activation_mb_num > 0:
+        server_args.offload_activation_mb_num = max(
+            0, min(server_args.batch_size // server_args.micro_batch_size, server_args.offload_activation_mb_num)
+        )
+        server_args.offload_activation = True
+    else:
+        server_args.offload_activation_mb_num = 0
+        server_args.offload_activation = False
     # print(args)
-    if args.offload_activation and args.pipeline_mode != PipelineMode.PIPE_DREAM_WC:
+    if server_args.offload_activation and server_args.pipeline_mode != PipelineMode.PIPE_DREAM_WC:
         print("Warning!Offload activation is only supported in pipedream_wc mode, or else it will not be effective.")
     set_seed(SEED)
-    run_server(args)
+    run_server(server_args)

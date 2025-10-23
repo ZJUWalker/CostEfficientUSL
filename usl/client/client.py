@@ -43,7 +43,7 @@ class ClientArgs:
     offload_activation: bool = False
     offload_model_state: bool = False
     offload_activation_mb_num: int = 1
-    offload_model_state_ratio: float = 0
+    offload_model_state_sp_num: int = 0
     sort_batch: str = "no"  # no,asc,desc
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
     save_dir: str = 'log/profile'
@@ -72,7 +72,7 @@ class ClientArgs:
         if self.offload_activation:
             parts.append(f"coa_{self.offload_activation_mb_num}")
         if self.offload_model_state:
-            parts.append(f"cos_{self.offload_model_state_ratio}")
+            parts.append(f"cos_{self.offload_model_state_sp_num}")
         # parts.append('{}')
         if self.sort_batch != "no":
             parts.append(f"sort_{self.sort_batch}")
@@ -168,7 +168,7 @@ class Client:
             except_tensor_idx_list = [id(p) for p in embed_layer.parameters()]
             self.head_m_mgr = ModelParamOffload(
                 self.head_model,
-                offload_ratio=self.client_args.offload_model_state_ratio,
+                offload_layer_num=self.client_args.offload_model_state_sp_num,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
@@ -176,7 +176,7 @@ class Client:
             )
             self.tail_m_mgr = ModelParamOffload(
                 self.tail_model,
-                offload_ratio=self.client_args.offload_model_state_ratio,
+                offload_layer_num=self.client_args.offload_model_state_sp_num,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
@@ -184,14 +184,14 @@ class Client:
             )
             self.head_os_mgr = OptimizerStateOffload(
                 self.optimizer_head,
-                offload_ratio=self.client_args.offload_model_state_ratio,
+                offload_until_param_id=self.head_m_mgr.offload_until_param_id,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
             )
             self.tail_os_mgr = OptimizerStateOffload(
                 self.optimizer_tail,
-                offload_ratio=self.client_args.offload_model_state_ratio,
+                offload_until_param_id=self.tail_m_mgr.offload_until_param_id,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
@@ -555,7 +555,7 @@ class Client:
         batch_train_time_ms = 0
         local_compute_time_ms = 0
         server_compute_time_ms = 0
-        server_profile_gantt_data = server_profile_res.get('profile', [])
+        server_profile_gantt_data: List[GanttChartData] = server_profile_res.get('profile', [])
         server_fwd_time = server_profile_res.get('server_fwd_time', 0)
         server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
         server_bwd_time = server_profile_res.get('server_bwd_time', 0)
@@ -652,7 +652,7 @@ class Client:
             "max_seq_len": self.client_args.max_seq_len,
             "offload_model_state": self.client_args.offload_model_state,
             "offload_activation": self.client_args.offload_activation,
-            "offload_model_state_ratio": self.client_args.offload_model_state_ratio,
+            "offload_model_state_sp_num": self.client_args.offload_model_state_sp_num,
             "offload_activation_mb_num": self.client_args.offload_activation_mb_num,
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),

@@ -10,7 +10,8 @@ class ModelParamOffload:
         self,
         base_model: nn.Module,
         offload_threshold: int = 0,
-        offload_ratio: float = 1.0,
+        # offload_ratio: float = 1.0,
+        offload_layer_num: int = 4,
         device="cuda",
         load_stream=None,
         offload_stream=None,
@@ -18,7 +19,8 @@ class ModelParamOffload:
     ):
         self.base_model = base_model
         self.offload_threshold = offload_threshold  # Byte
-        self.offload_ratio = offload_ratio  # ratio of parameters to offload
+        # self.offload_ratio = offload_ratio  # ratio of parameters to offload
+        self.offload_layer_num = offload_layer_num
         self.device = device
         self.model_param_on_gpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> parameter state on GPU
         self.model_param_on_cpu: Dict[int, torch.Tensor] = {}  # tensor_ptr -> parameter state on CPU DRAM
@@ -35,9 +37,9 @@ class ModelParamOffload:
         self.offload_timestamp = [0, 0]
         self.reload_timestamp = [0, 0]
         self.except_tensor_idx_list: List[int] = except_tensor_idx_list  # tensor_idx list to be excluded from offloading
+        self.offload_until_param_id: int = -1
         self.param_count = self._get_param_count()
-        self.max_offload_param_count = self.param_count * self.offload_ratio
-        # print(f"Offload threshold: {self.offload_threshold}, Offload param count: {self.max_offload_param_count}")
+        # self.max_offload_param_count = self.param_count * self.offload_ratio
         self._init_param_dict()
 
     def _get_param_count(self):
@@ -60,18 +62,28 @@ class ModelParamOffload:
 
     def _init_param_dict(self):
         curr_count = 0
+        curr_layer_idx = 0
         for name, param in self.base_model.named_parameters():
             if (
                 id(param) in self.except_tensor_idx_list
                 or param.numel() * param.element_size() < self.offload_threshold
-                or curr_count >= self.max_offload_param_count
+                # or curr_count >= self.max_offload_param_count
+                or self.offload_layer_num == 0  # no offloading
+                or curr_layer_idx > self.offload_layer_num
             ):
                 param.data = param.data.cuda(self.device)  # pin on GPU
             else:
+                if f'h.{curr_layer_idx}' in name or f'layers.{curr_layer_idx}' in name:
+                    curr_layer_idx += 1
+                    if curr_layer_idx > self.offload_layer_num:
+                        self.offload_until_param_id = id(param)
+                        param.data = param.data.cuda(self.device)
+                        continue
+                    # print(name)
                 curr_count += param.numel()
                 self.model_param_on_cpu[id(param)] = param
                 self.model_param_on_gpu[id(param)] = param  # use the same tensor for both on CPU and GPU,temporary
-
+        print(f'offload {curr_count} parameters to CPU, {len(self.model_param_on_cpu)} parameters')
 
     # offload model parameters and optimizer states from GPU to CPU
     def offload(self, async_offload=False):
@@ -85,7 +97,7 @@ class ModelParamOffload:
         with torch.cuda.stream(stream):
             # Offload model parameters to CPU
             for idx, tensor in self.model_param_on_gpu.items():
-                assert tensor.is_cuda,'model_param_on_gpu should be on GPU'
+                assert tensor.is_cuda, 'model_param_on_gpu should be on GPU'
                 t_cpu = torch.empty_like(tensor, device="cpu", pin_memory=True)
                 t_cpu.data.copy_(tensor.data, non_blocking=True)
                 self.model_param_on_cpu[id(tensor)] = t_cpu
