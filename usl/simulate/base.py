@@ -13,7 +13,6 @@ class MainVariable:
     total_batch_num: int = 1000  # total batch need to be trained per epoch
     batch_size: int = 8  # batch size per batch
     split_point: int = 4
-    offload: bool = True
     client_offload_mb_num: int = 0
     server_offload_mb_num: int = 0
     client_offload_model_state_sp_num: int = 0
@@ -112,7 +111,7 @@ class MemoryConstant:
     mem_increment_per_sp_server: float = 0.0
     mem_increment_per_sp_mb_client: float = 0.0
     mem_increment_per_sp_mb_server: float = 0.0
-    mem_decrement_if_offload_model_state: float = 3000.0  # 如果卸载模型状态，减少的显存量
+    # mem_decrement_if_offload_model_state: float = 3000.0  # 如果卸载模型状态，减少的显存量
     # do four profile, (sp=1, no off),(sp=2 ,no off),(sp=1 ,off),(sp=2 ,off)
     # base_max_mem_alloc_no_off_client: float = 9899.5542  # unit:MB # sp=1，不做卸载的时候的最大显存分配
     # base_max_mem_alloc_off_client: float = 6804.4971  # unit:MB # sp=1，做卸载的时候的最大显存分配
@@ -136,15 +135,15 @@ class Objective:
     Objective contains the objective function values of different components in the system,used to do the optimization.
     """
 
-    client_idle_rate: float = 0.0  # unit:%
-    server_idle_rate: float = 0.0
-    client_send_rate: float = 0.0
-    server_send_rate: float = 0.0
     client_peak_mem_alloc: float = 0.0  # unit:MB
     server_peak_mem_alloc: float = 0.0
     batch_train_time: float = 0.0
     server_cost: float = 0.0
     epoch_train_time: float = 0.0
+    client_idle_rate: float = 0.0  # unit:%
+    server_idle_rate: float = 0.0
+    client_send_rate: float = 0.0
+    server_send_rate: float = 0.0
 
     pass
 
@@ -168,6 +167,13 @@ class SimulateResult:
             **self.objective.__dict__,
             **self.time_const.__dict__,
             **self.memory_const.__dict__,
+        }
+
+    def to_simple_dict(self):
+        return {
+            "model": self.model_name,
+            **self.main_variable.__dict__,
+            **self.objective.__dict__,
         }
 
     def save_to_json(self, file_path='log/simulate/simulate_result.json'):

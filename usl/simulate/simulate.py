@@ -5,16 +5,18 @@ import random
 import os
 import json
 import time
+from typing import Dict, List
 from usl.utils.usl_gantt_plot import plot_gantt_grouped
 from usl.simulate import *
 from usl.simulate.profile import run_profile
 import pandas as pd
+from dataclasses import dataclass
 
 
 def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, save_gantt: bool = False) -> SimulateResult:
     # simulate the batch training time
     # print(main_var)
-    random_jitter_bound = 3  # random jitter bound for the batch size
+    random_jitter_bound = 1  # random jitter bound for the batch size
     micro_batch_num = (main_var.batch_size + mem_const.micro_batch_size - 1) // mem_const.micro_batch_size
     split_point = main_var.split_point
     base_split_point = mem_const.baseline_split_point
@@ -305,10 +307,11 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
     assert batch_size >= 4, "batch size should be greater than or equal to 4"
     assert client_offload_mb_num >= 0 and server_offload_mb_num >= 0, "client_offload_mb_num and server_offload_mb_num should be greater than 0"
     client_peak_mem_alloc = (
-        memory_const.base_client_mem_alloc
-        + (split_point - base_sp) * memory_const.mem_increment_per_sp_client
-        + (batch_size - base_mb_num) * (split_point - base_sp) * memory_const.mem_increment_per_sp_mb_client
-        - (split_point * (max(0, client_offload_mb_num - 1)) * memory_const.mem_increment_per_sp_mb_client)
+        memory_const.base_client_mem_alloc  # 基础的显存开销
+        + (split_point - base_sp) * memory_const.mem_increment_per_sp_client  # 因为切分层数增加，显存开销增加
+        + (batch_size - base_mb_num) * split_point * memory_const.mem_increment_per_sp_mb_client
+        # 因为模型切分层和batch size增加，激活量引起的显存开销
+        - (split_point * (max(0, client_offload_mb_num - 1)) * memory_const.mem_increment_per_sp_mb_client)  # 因激活量卸载，显存开销减少
         # - (memory_const.base_model_state_mem_alloc_client - os_offload_sp_num * memory_const.model_mem_increment_per_sp_client)
     )
     if os_offload_sp_num > 0:
@@ -338,16 +341,132 @@ def simulate(main_var: MainVariable, time_const: TimeConstant, mem_const: Memory
     return simulate_result
 
 
+@dataclass
+class ParetoPoint:
+    cost: float
+    time: float
+    payload: Dict
+
+
+def _non_dominated_insert(pareto_list: list[ParetoPoint], cand_cost: float, cand_time: float, cand_payload: Dict, eps_cost=0.0, eps_time=0.0):
+    """
+    将候选点插入帕累托集合：
+    - 若被现有点(成本<=cand_cost-eps_cost 且 时间<=cand_time-eps_time)严格支配 -> 丢弃
+    - 否则移除所有被候选点严格支配的点，然后加入
+    """
+    # 检查是否被支配
+    for p in pareto_list:
+        if (
+            (p.cost <= cand_cost - eps_cost)
+            and (p.time <= cand_time - eps_time)
+            and ((p.cost < cand_cost - eps_cost) or (p.time < cand_time - eps_time))
+        ):
+            return  # cand 被支配，直接丢弃
+
+    # 移除被 cand 支配的点
+    new_list = []
+    for p in pareto_list:
+        dominated_by_cand = (
+            (cand_cost <= p.cost - eps_cost)
+            and (cand_time <= p.time - eps_time)
+            and ((cand_cost < p.cost - eps_cost) or (cand_time < p.time - eps_time))
+        )
+        if not dominated_by_cand:
+            new_list.append(p)
+
+    new_list.append(ParetoPoint(cand_cost, cand_time, cand_payload))
+    pareto_list[:] = new_list  # 就地更新
+
+
+def do_optimize(
+    model_name,
+    dataset_size,
+    max_split_point,
+    max_batch_size,
+    time_res,
+    mem_res,
+    max_client_mem_mb,
+):
+    all_data = []
+    pareto_front: List[ParetoPoint] = []  # 存 ParetoPoint
+    best_strategy = None
+    min_cost = float("inf")
+    min_epoch_train_time = float("inf")
+    # ε-容差（可按测量抖动调节，比如 0.5%）
+    EPS_COST_RATIO = 0.005
+    EPS_TIME_RATIO = 0.005
+    # 遍历所有可能的配置
+    time_start = time.time()
+    for bs in range(8, max_batch_size + 1, 2):
+        print(f'searching batch size {bs},time stacked: {time.time() - time_start:.4f}s')
+        skip_curr_bs = False
+        for sp in range(1, max_split_point + 1):
+            # for sp in [4]:
+            if skip_curr_bs:
+                break
+            for c_omb in range(bs, 0, -1):
+                if skip_curr_bs:
+                    break
+                for ossp in range(sp, -1, -1):
+                    if skip_curr_bs:
+                        break
+                    for s_omb in range(bs, 2, -1):
+                        var = MainVariable(
+                            total_batch_num=(dataset_size + bs - 1) // bs,
+                            batch_size=bs,
+                            split_point=sp,
+                            client_offload_mb_num=c_omb,
+                            server_offload_mb_num=s_omb,
+                            client_offload_model_state_sp_num=ossp,
+                        )
+                        sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+                        sim_res.model_name = model_name
+                        # mem_sim_res = _simulate_peak_mem_alloc(var, mem_res)
+                        if sim_res.objective.client_peak_mem_alloc > max_client_mem_mb * 0.95:
+                            skip_curr_bs = True
+                            break
+                        if best_strategy is None and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb * 0.95:  # 0.95 is for safety
+                            best_strategy = sim_res
+                            min_cost = best_strategy.objective.server_cost
+                            min_epoch_train_time = best_strategy.objective.epoch_train_time
+                        # time_sim_res = _simulate_train_time(var, time_res, mem_res, save_gantt=False)
+                        server_cost = sim_res.objective.server_cost
+                        epoch_train_time = sim_res.objective.epoch_train_time
+                        # 维护单目标最优（若仍想保留）
+                        if server_cost < min_cost:
+                            best_strategy = sim_res  # 或者存一个自定义组合对象
+                            min_cost = server_cost
+                            min_epoch_train_time = epoch_train_time
+                        # 维护多目标最优
+                        eps_cost = server_cost * EPS_COST_RATIO
+                        eps_time = epoch_train_time * EPS_TIME_RATIO
+                        _non_dominated_insert(
+                            pareto_front,
+                            cand_cost=server_cost,
+                            cand_time=epoch_train_time,
+                            cand_payload=sim_res.to_simple_dict(),
+                            eps_cost=eps_cost,
+                            eps_time=eps_time,
+                        )
+    print(f"Total time: {time.time() - time_start:.4f}s")
+    # ---- 搜索结束：对帕累托前沿按成本再按时间排序，输出/返回 ----
+    pareto_front.sort(key=lambda p: (p.cost, p.time))
+    df = pd.DataFrame([pf.payload for pf in pareto_front])
+    df = df.round(2)
+    df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}_bs_{max_batch_size}_sp_{max_split_point}.csv', index=False)
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Simulate memory and time profiling with dynamic parameters.')
 
     # Defining the command-line arguments
+    # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
     parser.add_argument('--model', type=str, default='meta-llama/llama3.2-1b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=8, help='The number of layers in the model.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_split_point', '-MSP', type=int, default=4, help='The number of layers in the model.')
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
-    parser.add_argument('--mbps', type=int, default=300, help='The mbps value for the simulation.')
+    parser.add_argument('--mbps', type=int, default=230, help='The mbps value for the simulation.')
     parser.add_argument('--max_batch_size', '-BS', type=int, default=32, help='The max batch size for the simulation.')
     parser.add_argument('--profile_dir', type=str, default='log/sim_profile', help='The profile directory for storing results.')
     parser.add_argument('--save_gantt', action='store_true', help='Whether to save gantt chart or not.')
@@ -366,83 +485,39 @@ if __name__ == "__main__":
     max_client_mem_mb = args.max_client_mem_gb * 1024
     save_gantt = args.save_gantt
     # run profiling
+    profile_start = time.time()
     mem_res, time_res = run_profile(model_name, mbps, lora, base_sp=2, base_bs=8, profile_dir=profile_dir)
+    print(f"Profiling time: {time.time() - profile_start:.4f}s")
     if mem_res is None or time_res is None:
         print("Failed to run profiling.")
         exit(1)
     print(mem_res)
     print(time_res)
-    all_data = []
-    for batch_size in [8]:
-        for sp in [4]:
-            # for omb in [0, 4, 8]:
-            for ossp in [0, 1, 2, 3, 4]:
-                var = MainVariable(
-                    total_batch_num=1000,
-                    batch_size=batch_size,
-                    split_point=sp,
-                    client_offload_mb_num=0,
-                    server_offload_mb_num=0,
-                    client_offload_model_state_sp_num=ossp,
-                )
-                mem_sim_res = _simulate_peak_mem_alloc(var, mem_res)
-                # print(sp, omb, round(res.objective.client_peak_mem_alloc, 2), round(res.objective.server_peak_mem_alloc, 2))
-                time_sim_res = _simulate_train_time(var, time_res, mem_res, save_gantt=False)
-                all_data.append(
-                    {
-                        "split_point": sp,
-                        "batch_size": batch_size,
-                        "client_offload_model_state_sp_num": ossp,
-                        # "client_offload_mb_num": omb,
-                        # "server_offload_mb_num": omb,
-                        "client_peak_mem_alloc": round(mem_sim_res.objective.client_peak_mem_alloc, 2),
-                        "server_peak_mem_alloc": round(mem_sim_res.objective.server_peak_mem_alloc, 2),
-                        "batch_train_time": round(time_sim_res.objective.batch_train_time, 2),
-                    }
-                )
-                # print(
-                #     batch_size,
-                #     sp,
-                #     omb,
-                #     round(time_sim_res.objective.batch_train_time, 2),  # time
-                #     round(mem_sim_res.objective.client_peak_mem_alloc, 2),  # client peak mem
-                #     round(mem_sim_res.objective.server_peak_mem_alloc, 2),  # server peak mem
-                # )
-    df = pd.DataFrame(all_data)
-    df = df.round(2)
-    df.to_csv(f'log/simulate_results_llama.csv', index=False)
-    # create main variable
-    # best_strategy = None
-
-    # _idle_factor_func = lambda a, b, lambda_=0.3: math.sqrt(a**2 + b**2) + lambda_ * abs(a - b)
-
-    # batch_sizes=[2**i for i in range(2,math.ceil(math.log2(max_batch_size+1)))]
-    # for bs in [4, 8, 12, 16, 20, 32, max_batch_size]:
-    #     for sp in range(1, max_split_point + 1):
-    #         for offload in [True, False]:
-    #             var = MainVariable(total_batch_num=(dataset_size + bs - 1) // bs, batch_size=bs, split_point=sp, offload=offload, lora=lora)
-    #             # run simulation
-    #             cur_strategy = simulate(var, time_res, mem_res, save_gantt=False)
-    #             cur_strategy.model_name = model_name
-    #             if best_strategy is None and cur_strategy.objective.client_peak_mem_alloc < max_client_mem_mb * 0.95:  # 0.95 is for safety
-    #                 best_strategy = cur_strategy
-    #                 min_cost = best_strategy.objective.server_cost
-    #                 min_idle_factor = _idle_factor_func(best_strategy.objective.client_idle_rate, best_strategy.objective.server_idle_rate)
-    #             else:
-    #                 server_cost = cur_strategy.objective.server_cost
-    #                 idle_factor = _idle_factor_func(cur_strategy.objective.client_idle_rate, cur_strategy.objective.server_idle_rate)
-    #                 if (
-    #                     cur_strategy.objective.client_peak_mem_alloc * 0.95 < max_client_mem_mb
-    #                     and server_cost < min_cost
-    #                     and idle_factor < min_idle_factor
-    #                 ):
-    #                     best_strategy = cur_strategy
-    #                     min_cost = server_cost
-    #                     min_idle_factor = idle_factor
-    #             save_dir = f'log/profile/simulate/{model_name}'
-    #             if not os.path.exists(save_dir):
-    #                 os.makedirs(save_dir)
-    #             cur_strategy.save_to_json(
-    #                 f'{save_dir}/sp_{sp}_b_{bs}_mb_{cur_strategy.memory_const.micro_batch_size}_s_{cur_strategy.memory_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora"if lora else ""}{'_oa_os' if offload else ''}.json'
-    #             )
-    # print(best_strategy.main_variable, best_strategy.objective)
+    do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb)
+    # do test
+    # all_data = []
+    # for sp in [1, 2, 3, 4]:
+    #     # for cos in [0, 1, 2, 3, 4]:
+    #     for omb in [0, 8, 16, 32, 64]:
+    #         var = MainVariable(
+    #             total_batch_num=1000,
+    #             batch_size=64,
+    #             split_point=sp,
+    #             client_offload_mb_num=omb,
+    #             server_offload_mb_num=omb,
+    #             client_offload_model_state_sp_num=0,
+    #         )
+    #         sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+    #         all_data.append(
+    #             {
+    #                 'split_point': var.split_point,
+    #                 'batch_size': var.batch_size,
+    #                 'client_offload_mb_num': var.client_offload_mb_num,
+    #                 'client_peak_mem_alloc': sim_res.objective.client_peak_mem_alloc,
+    #                 'server_peak_mem_alloc': sim_res.objective.server_peak_mem_alloc,
+    #                 'batch_train_time': sim_res.objective.batch_train_time,
+    #             }
+    #         )
+    # df = pd.DataFrame(all_data)
+    # df = df.round(2)
+    # df.to_csv(f'log/simulate_results_llama.csv', index=False)
