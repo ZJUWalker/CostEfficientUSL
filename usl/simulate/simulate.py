@@ -8,7 +8,7 @@ import time
 from typing import Dict, List
 from usl.utils.usl_gantt_plot import plot_gantt_grouped
 from usl.simulate import *
-from usl.simulate.profile import run_profile
+from usl.simulate.profile_separate_nodes import run_profile
 import pandas as pd
 from dataclasses import dataclass
 
@@ -461,7 +461,7 @@ def parse_arguments():
 
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
-    parser.add_argument('--model', type=str, default='meta-llama/llama3.2-1b', help='The model name.')
+    parser.add_argument('--model', type=str, default='qwen/qwen3-1.7b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     parser.add_argument('--max_split_point', '-MSP', type=int, default=4, help='The number of layers in the model.')
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
@@ -486,38 +486,39 @@ if __name__ == "__main__":
     save_gantt = args.save_gantt
     # run profiling
     profile_start = time.time()
-    mem_res, time_res = run_profile(model_name, mbps, lora, base_sp=2, base_bs=8, profile_dir=profile_dir)
+    mem_res, time_res = run_profile(model_name, mbps, lora, base_sp=1, base_bs=8, profile_dir=profile_dir)
     print(f"Profiling time: {time.time() - profile_start:.4f}s")
     if mem_res is None or time_res is None:
         print("Failed to run profiling.")
         exit(1)
     print(mem_res)
     print(time_res)
-    do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb)
+    # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb)
     # do test
     # all_data = []
-    # for sp in [1, 2, 3, 4]:
-    #     # for cos in [0, 1, 2, 3, 4]:
-    #     for omb in [0, 8, 16, 32, 64]:
-    #         var = MainVariable(
-    #             total_batch_num=1000,
-    #             batch_size=64,
-    #             split_point=sp,
-    #             client_offload_mb_num=omb,
-    #             server_offload_mb_num=omb,
-    #             client_offload_model_state_sp_num=0,
-    #         )
-    #         sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-    #         all_data.append(
-    #             {
-    #                 'split_point': var.split_point,
-    #                 'batch_size': var.batch_size,
-    #                 'client_offload_mb_num': var.client_offload_mb_num,
-    #                 'client_peak_mem_alloc': sim_res.objective.client_peak_mem_alloc,
-    #                 'server_peak_mem_alloc': sim_res.objective.server_peak_mem_alloc,
-    #                 'batch_train_time': sim_res.objective.batch_train_time,
-    #             }
-    #         )
+    for sp in [4]:
+        for cos in [0, 1, 2, 3, 4]:
+            for omb in [0]:
+                var = MainVariable(
+                    total_batch_num=1000,
+                    batch_size=8,
+                    split_point=sp,
+                    client_offload_mb_num=omb,
+                    server_offload_mb_num=omb,
+                    client_offload_model_state_sp_num=cos,
+                )
+                sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+                print(
+                    {
+                        'split_point': var.split_point,
+                        'batch_size': var.batch_size,
+                        'client_server_offload_mb_num': var.client_offload_mb_num,
+                        'client_offload_model_state_sp_num': var.client_offload_model_state_sp_num,
+                        'client_peak_mem_alloc': round(sim_res.objective.client_peak_mem_alloc, 2),
+                        'server_peak_mem_alloc': round(sim_res.objective.server_peak_mem_alloc, 2),
+                        'batch_train_time': round(sim_res.objective.batch_train_time, 2),
+                    }
+                )
     # df = pd.DataFrame(all_data)
     # df = df.round(2)
     # df.to_csv(f'log/simulate_results_llama.csv', index=False)
