@@ -51,27 +51,6 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     tail_bwd_send_time = time_const.tail_gradient_send_time
     server_bwd_send_time = time_const.server_gradient_send_time
 
-    # debug
-    # print(
-    #     {
-    #         'head_fwd_time_per_mb': head_fwd_time_per_mb,
-    #         'head_bwd_time_per_mb': head_bwd_time_per_mb,
-    #         'server_fwd_time_per_mb': server_fwd_time_per_mb,
-    #         'server_bwd_time_per_mb': server_bwd_time_per_mb,
-    #         'tail_fwd_time_per_mb': tail_fwd_time_per_mb,
-    #         'tail_bwd_time_per_mb': tail_bwd_time_per_mb,
-    #         'head_offload_time': head_offload_time,
-    #         'tail_offload_time': tail_offload_time,
-    #         'acti_off_time_per_mb': acti_off_time_per_mb,
-    #         'acti_reload_time_per_mb': acti_reload_time_per_mb,
-    #         'head_fwd_send_time': head_fwd_send_time,
-    #         'server_fwd_send_time': server_fwd_send_time,
-    #         'tail_bwd_send_time': tail_bwd_send_time,
-    #         'server_bwd_send_time': server_bwd_send_time,
-    #         'idle_time_per_mb': time_const.delay_time_avg_ms,
-    #     }
-    # )
-
     # use list to do scheduling, each element is a list of two elements, [start_time, end_time]
     head_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     head_activation_offload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
@@ -323,7 +302,9 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         memory_const.base_server_mem_alloc
         - (split_point - base_sp) * memory_const.mem_increment_per_sp_server
         + (batch_size - base_mb_num) * (max_split_point - split_point) * memory_const.mem_increment_per_sp_mb_server
-        - (max_split_point - split_point) * (max(0, server_offload_mb_num - 3)) * memory_const.mem_increment_per_sp_mb_server
+        - (max_split_point - split_point)
+        * (max(0, server_offload_mb_num - (2 if main_var.lora else 3)))
+        * memory_const.mem_increment_per_sp_mb_server
     )
 
     return SimulateResult(objective=Objective(client_peak_mem_alloc=client_peak_mem_alloc, server_peak_mem_alloc=server_peak_mem_alloc))
@@ -491,34 +472,41 @@ if __name__ == "__main__":
     if mem_res is None or time_res is None:
         print("Failed to run profiling.")
         exit(1)
-    print(mem_res)
-    print(time_res)
+    # print(mem_res)
+    for key, value in mem_res.__dict__.items():
+        print(key, value)
+    # print(time_res)
     # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb)
     # do test
-    # all_data = []
-    for sp in [4]:
-        for cos in [0, 1, 2, 3, 4]:
-            for omb in [0]:
-                var = MainVariable(
-                    total_batch_num=1000,
-                    batch_size=8,
-                    split_point=sp,
-                    client_offload_mb_num=omb,
-                    server_offload_mb_num=omb,
-                    client_offload_model_state_sp_num=cos,
-                )
-                sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-                print(
-                    {
-                        'split_point': var.split_point,
-                        'batch_size': var.batch_size,
-                        'client_server_offload_mb_num': var.client_offload_mb_num,
-                        'client_offload_model_state_sp_num': var.client_offload_model_state_sp_num,
-                        'client_peak_mem_alloc': round(sim_res.objective.client_peak_mem_alloc, 2),
-                        'server_peak_mem_alloc': round(sim_res.objective.server_peak_mem_alloc, 2),
-                        'batch_train_time': round(sim_res.objective.batch_train_time, 2),
-                    }
-                )
-    # df = pd.DataFrame(all_data)
-    # df = df.round(2)
-    # df.to_csv(f'log/simulate_results_llama.csv', index=False)
+    all_data = []
+    for sp in [4, 6]:
+        osr = [0, sp // 2, sp]
+        for bs in [8, 16]:
+            oam = [0, bs // 2, bs]
+            for oa in oam:
+                for osr_ in osr:
+                    var = MainVariable(
+                        total_batch_num=1000,
+                        batch_size=bs,
+                        split_point=sp,
+                        client_offload_mb_num=oa,
+                        server_offload_mb_num=oa,
+                        client_offload_model_state_sp_num=osr_,
+                        lora=lora,
+                    )
+                    sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+                    all_data.append(
+                        {
+                            'batch_size': var.batch_size,
+                            'split_point': var.split_point,
+                            'offload_mb_num': var.client_offload_mb_num,
+                            'offload_ms_sp_num': var.client_offload_model_state_sp_num,
+                            'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
+                            'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
+                            'batch_time': round(sim_res.objective.batch_train_time, 2),
+                        }
+                    )
+                    print(round(sim_res.objective.server_peak_mem_alloc, 2))
+    df = pd.DataFrame(all_data)
+    df = df.round(2)
+    df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)

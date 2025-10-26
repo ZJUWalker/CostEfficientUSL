@@ -26,10 +26,6 @@ class TimeConstant:
     """
 
     rate_mbps: float = 1000  # mbps limit
-    # base_no_off_head_fwd_time: float = 8.99
-    # base_off_head_fwd_time: float = 10.0
-    # base_no_off_head_bwd_time: float = 17.55
-    # base_off_head_bwd_time: float = 19.0
     base_head_fwd_time_per_mb: float = 0.0
     base_head_bwd_time_per_mb: float = 0.0
     base_server_fwd_time_per_mb: float = 0.0
@@ -63,35 +59,6 @@ class TimeConstant:
     tail_gradient_send_time: float = 0
     server_activation_send_time: float = 0
     server_gradient_send_time: float = 0
-    # base_head_gradient_offload_time: float = 10.0
-    # head_gradient_offload_time_increment_per_sp: float = 0.0
-    # base_server_gradient_offload_time: float = 10.0
-    # head_no_off_fwd_time_increment_per_sp: float = 0.0
-    # head_no_off_bwd_time_increment_per_sp: float = 0.0
-    # head_off_fwd_time_increment_per_sp: float = 0.0
-    # head_off_bwd_time_increment_per_sp: float = 0.0
-    # base_no_off_server_fwd_time: float = 43.14
-    # base_no_off_server_bwd_time: float = 87.83
-    # base_off_server_fwd_time: float = 43.14
-    # base_off_server_bwd_time: float = 87.83
-    # server_off_fwd_time_increment_per_sp: float = 0.0
-    # server_off_bwd_time_increment_per_sp: float = 0.0
-    # server_no_off_fwd_time_increment_per_sp: float = 0.0
-    # server_no_off_bwd_time_increment_per_sp: float = 0.0
-
-    # # most of the time,server_activation_recv_time approximates head_gradient_recv_time and server gradient send time
-
-    # base_tail_fwd_time: float = 11.43
-    # base_tail_bwd_time: float = 28.63
-    # tail_fwd_time_increment_per_sp: float = 0.0
-    # tail_bwd_time_increment_per_sp: float = 0.0
-    # # offload and reload time
-    # base_head_offload_time: float = 10.0
-    # head_offload_time_increment_per_sp: float = 0.0
-    # base_tail_offload_time: float = 10.0
-    # tail_offload_time_increment_per_sp: float = 0.0
-    # # idle time between two compute and communication
-    # delay_time_avg_ms: float = 15.0
 
 
 @dataclass
@@ -111,22 +78,9 @@ class MemoryConstant:
     mem_increment_per_sp_server: float = 0.0
     mem_increment_per_sp_mb_client: float = 0.0
     mem_increment_per_sp_mb_server: float = 0.0
-    # mem_decrement_if_offload_model_state: float = 3000.0  # 如果卸载模型状态，减少的显存量
-    # do four profile, (sp=1, no off),(sp=2 ,no off),(sp=1 ,off),(sp=2 ,off)
-    # base_max_mem_alloc_no_off_client: float = 9899.5542  # unit:MB # sp=1，不做卸载的时候的最大显存分配
-    # base_max_mem_alloc_off_client: float = 6804.4971  # unit:MB # sp=1，做卸载的时候的最大显存分配
-    # base_max_mem_alloc_no_off_server: float = 23328.3828  # unit:MB # sp=1，不做卸载的时候的最大显存分配
-    # base_max_mem_alloc_off_server: float = 23328.3828  # unit:MB # sp=1，不做卸载的时候的最大显存分配
-    # no_off_mem_increment_per_sp_client: float = 2560.70  # 不做卸载，每多一个sp，显存的增加量
-    # no_off_mem_decrement_per_sp_server: float = 3313.054  # 不做卸载，每多一个sp，服务端显存的减少量
-    # no_off_mem_increment_per_mb_client: float = 0
-    # no_off_mem_increment_per_mb_server: float = 0
     base_model_state_mem_alloc_client: float = 0
     base_model_state_mem_alloc_except_blocks: float = 0
     model_mem_increment_per_sp_client: float = 1728.1601  # unit:MB，如果做卸载，每加一个sp，最大显存分配减少的量
-    # offload_mem_decrement_per_sp_server: float = 1728.1601  # unit:MB，如果做卸载，每加一个sp，服务端最大显存分配减少的量
-    # offload_mem_increment_per_mb_client: float = 0
-    # offload_mem_increment_per_mb_server: float = 0
 
 
 @dataclass

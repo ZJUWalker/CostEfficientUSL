@@ -108,11 +108,15 @@ def run_profile(
             prof_res[base_sp + 1][""]['client_max_mem_alloc_mb'] - prof_res[base_sp][""]['client_max_mem_alloc_mb'], 2
         )  # checked
         mem_var.mem_increment_per_sp_mb_client = round(
-            (prof_res[base_sp][""]['client_max_mem_alloc_mb'] - prof_res[base_sp]["-OA"]['client_max_mem_alloc_mb']) / (base_bs - 1) / base_sp,
+            (prof_res[(base_sp + 1, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp + 1, base_bs, 0, base_bs)]['client_max_mem_alloc_mb'])
+            / (base_bs - 1)
+            / (base_sp + 1),
             2,
         )  # checked
         mem_var.mem_increment_per_sp_mb_server = round(
-            (prof_res[base_sp][""]['server_max_mem_alloc_mb'] - prof_res[base_sp]["-OA"]['server_max_mem_alloc_mb']) / (base_bs - 3) / base_sp,
+            (prof_res[(base_sp + 1, 0, 0, 0)]['server_max_mem_alloc_mb'] - prof_res[(base_sp + 1, base_bs, 0, base_bs)]['server_max_mem_alloc_mb'])
+            / (base_bs - (2 if lora else 3))
+            / (base_sp + 1),
             2,
         )  # checked
         mem_var.base_client_mem_alloc = round(prof_res[base_sp][""]['client_max_mem_alloc_mb'], 2)

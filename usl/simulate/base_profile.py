@@ -9,14 +9,14 @@ import torch.nn.functional as F
 from typing import List, Tuple, Any, Union
 
 from torch.utils.checkpoint import checkpoint
-from transformers.models.gpt2.modeling_gpt2 import GPT2Block, GPT2LMHeadModel
+from transformers import GPT2LMHeadModel
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaForCausalLM
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM
 from transformers.models.gemma2.modeling_gemma2 import Gemma2DecoderLayer
 from transformers import GPT2Config, LlamaConfig, Qwen2Config, Gemma2Config, AutoConfig
 
 
-TransformerBlock = Union[GPT2Block, LlamaDecoderLayer, Qwen3DecoderLayer, Gemma2DecoderLayer]
+# TransformerBlock = Union[GPT2Block, LlamaDecoderLayer, Qwen3DecoderLayer, Gemma2DecoderLayer]
 
 
 def _load_config(dir='data/models', model_name='gpt2-large') -> AutoConfig:
@@ -123,38 +123,38 @@ class ProfLLMModel(nn.Module):
         return output
 
 
-def mem_profile(model='gpt2-large', layer=1, hidden_size=1280, mb_num=8):
+def mem_profile(model='gpt2-large', layer=1, hidden_size=2560, mb_num=8):
     curr_alloc, max_alloc = _check_mem_alloc(device)
     print(f"[Before Model init]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
     model = ProfLLMModel(name=model, layer=layer, hidden_size=hidden_size).cuda()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     curr_alloc, max_alloc = _check_mem_alloc(device)
     print(f"[After Model init]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
-    model.train()
-    losses = []
-    for bid in range(2):
-        print(f"----------------- Batch {bid} ------------------------")
-        if bid == 1:
-            curr_alloc, max_alloc = _check_mem_alloc(device)
-            print(f"[Before Model forward]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
-        for mb in range(mb_num):
-            input_ids = torch.randint(0, 10000, (1, 512)).cuda()
-            atten_mask = torch.ones(1, 512).cuda()
-            output = model(input_ids, atten_mask=atten_mask, label=input_ids)
-            losses.append(output.loss)
-        if bid == 1:
-            curr_alloc, max_alloc = _check_mem_alloc(device)
-            print(f"[After Model forward]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
-        for loss in losses:
-            loss.backward()
-        losses = []
-        if bid == 1:
-            curr_alloc, max_alloc = _check_mem_alloc(device)
-            print(f"[After Model backward]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
+    # model.train()
+    # losses = []
+    # for bid in range(2):
+    #     print(f"----------------- Batch {bid} ------------------------")
+    #     if bid == 1:
+    #         curr_alloc, max_alloc = _check_mem_alloc(device)
+    #         print(f"[Before Model forward]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
+    #     for mb in range(mb_num):
+    #         input_ids = torch.randint(0, 10000, (1, 512)).cuda()
+    #         atten_mask = torch.ones(1, 512).cuda()
+    #         output = model(input_ids, atten_mask=atten_mask, label=input_ids)
+    #         losses.append(output.loss)
+    #     if bid == 1:
+    #         curr_alloc, max_alloc = _check_mem_alloc(device)
+    #         print(f"[After Model forward]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
+    #     for loss in losses:
+    #         loss.backward()
+    #     losses = []
+    #     if bid == 1:
+    #         curr_alloc, max_alloc = _check_mem_alloc(device)
+    #         print(f"[After Model backward]Current memory allocation: {curr_alloc:.2f} MB, Max memory allocation: {max_alloc:.2f} MB")
+    #     optimizer.step()
+    #     optimizer.zero_grad(set_to_none=True)
 
-    return output
+    # return output
 
 
 import argparse
@@ -165,6 +165,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", '-M', type=str, default='gpt2-large')
     parser.add_argument("--layer", type=int, default=1)
-    parser.add_argument("--hidden_size", type=int, default=1280)
+    parser.add_argument("--hidden_size", type=int, default=2560)
     args = parser.parse_args()
     mem_profile(args.model, layer=args.layer, hidden_size=args.hidden_size)
