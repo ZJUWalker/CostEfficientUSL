@@ -41,8 +41,8 @@ class TimeConstant:
     # activation offload and reload time
     base_head_activation_offload_time_per_mb: float = 0.0
     base_head_activation_reload_time_per_mb: float = 0.0
-    base_server_activation_offload_time: float = 0.0
-    base_server_activation_reload_time: float = 0.0
+    base_server_activation_offload_time_per_mb: float = 0.0
+    base_server_activation_reload_time_per_mb: float = 0.0
     head_activation_offload_time_increment_per_sp: float = 0.0
     server_activation_offload_time_increment_per_sp: float = 0.0
     head_activation_reload_time_increment_per_sp: float = 0.0
