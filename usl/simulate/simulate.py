@@ -38,13 +38,21 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         + (split_point - ms_offload_sp_num - base_split_point) * time_const.tail_model_offload_time_increment_per_sp
     ) * main_var.client_offload_model_state_sp_num
     tail_reload_time = tail_offload_time
-    acti_off_time_per_mb = (
+    head_acti_off_time_per_mb = (
         time_const.base_head_activation_offload_time_per_mb
         + (split_point - base_split_point) * time_const.head_activation_offload_time_increment_per_sp
     )
-    acti_reload_time_per_mb = (
+    head_acti_reload_time_per_mb = (
         time_const.base_head_activation_reload_time_per_mb
         + (split_point - base_split_point) * time_const.head_activation_reload_time_increment_per_sp
+    )
+    server_acti_off_time_per_mb = (
+        time_const.base_server_activation_offload_time_per_mb
+        + (split_point - base_split_point) * time_const.server_activation_offload_time_increment_per_sp
+    )
+    server_acti_reload_time_per_mb = (
+        time_const.base_server_activation_reload_time_per_mb
+        + (split_point - base_split_point) * time_const.server_activation_reload_time_increment_per_sp
     )
     head_fwd_send_time = time_const.head_activation_send_time
     server_fwd_send_time = time_const.server_activation_send_time
@@ -82,7 +90,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         else:
             head_fwd_timestamps[i][0] = head_fwd_timestamps[i - 1][1]
         head_fwd_timestamps[i][1] = head_fwd_timestamps[i][0] + max(
-            head_fwd_time_per_mb, acti_off_time_per_mb if i < main_var.client_offload_mb_num else 0
+            head_fwd_time_per_mb, head_acti_off_time_per_mb if i < main_var.client_offload_mb_num else 0
         )
     # step 1.1 do model state offload if needed
     # if main_var.offload:
@@ -104,10 +112,23 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         if i == 0:
             server_fwd_timestamps[0][0] = head_activation_send_timestamps[0][1] + time_const.delay_time_avg_ms
         else:
-            server_fwd_timestamps[i][0] = max(head_activation_send_timestamps[i][1] + time_const.delay_time_avg_ms, server_fwd_timestamps[i - 1][1])
+            if i > 1:
+                pre_mb_idx = i - 2
+                if pre_mb_idx < main_var.client_offload_mb_num:
+                    server_fwd_timestamps[i][0] = max(
+                        head_activation_send_timestamps[i][1] + time_const.delay_time_avg_ms,
+                        server_fwd_timestamps[i - 1][1],
+                        server_fwd_timestamps[pre_mb_idx][1] + server_acti_off_time_per_mb,
+                    )
+                else:
+                    server_fwd_timestamps[i][0] = max(
+                        head_activation_send_timestamps[i][1] + time_const.delay_time_avg_ms, server_fwd_timestamps[i - 1][1]
+                    )
         server_fwd_timestamps[i][1] = server_fwd_timestamps[i][0] + server_fwd_time_per_mb * (
             1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
         )
+        if i == micro_batch_num - 1 and micro_batch_num == main_var.client_offload_mb_num:
+            server_fwd_timestamps[i][1] += server_acti_off_time_per_mb
     # step4 : do server activation send
     for i in range(micro_batch_num):
         if i == 0:
@@ -124,7 +145,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                 head_fwd_timestamps[-1][1] + head_offload_time,
                 head_fwd_timestamps[-1][1] + tail_reload_time,
                 server_activation_send_timestamps[0][1] + time_const.delay_time_avg_ms,
-            )
+            ) + (head_acti_reload_time_per_mb if main_var.client_offload_mb_num > 0 else 0)
         else:
             tail_fwd_timestamps[i][0] = max(tail_bwd_timestamps[i - 1][1], server_activation_send_timestamps[i][1] + time_const.delay_time_avg_ms)
         tail_fwd_timestamps[i][1] = tail_fwd_timestamps[i][0] + tail_fwd_time_per_mb * (
@@ -148,9 +169,22 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     # step7 : do server bwd
     for i in range(micro_batch_num):
         if i == 0:
-            server_bwd_timestamps[0][0] = max(server_fwd_timestamps[-1][1], tail_gradient_send_timestamps[0][1] + time_const.delay_time_avg_ms)
+            server_bwd_timestamps[0][0] = (
+                max(server_fwd_timestamps[-1][1], tail_gradient_send_timestamps[0][1] + time_const.delay_time_avg_ms) + server_acti_reload_time_per_mb
+            )
         else:
-            server_bwd_timestamps[i][0] = max(server_bwd_timestamps[i - 1][1], tail_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms)
+            if i < main_var.server_offload_mb_num:
+                server_bwd_timestamps[i][0] = max(
+                    server_bwd_timestamps[i - 1][1],
+                    server_bwd_timestamps[i - 1][0] + server_acti_reload_time_per_mb,
+                    tail_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms,
+                )
+            else:
+                server_bwd_timestamps[i][0] = max(
+                    server_bwd_timestamps[i - 1][1],
+                    tail_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms,
+                )
+
         server_bwd_timestamps[i][1] = server_bwd_timestamps[i][0] + server_bwd_time_per_mb * (
             1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
         )
@@ -176,14 +210,14 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                 tail_bwd_timestamps[-1][1] + tail_offload_time,
                 tail_bwd_timestamps[-1][1] + head_reload_time,
                 server_gradient_send_timestamps[0][1] + time_const.delay_time_avg_ms,
-            ) + (acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0)
+            ) + (head_acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0)
             head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + head_bwd_time_per_mb * (
                 1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
             )
         else:
             head_bwd_timestamps[i][0] = max(head_bwd_timestamps[i - 1][1], server_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms)
             head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + max(
-                head_bwd_time_per_mb, acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0
+                head_bwd_time_per_mb, head_acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0
             )
     # print(head_fwd_timestamps)
     if save_gantt:
@@ -444,9 +478,15 @@ def parse_arguments():
 
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
+<<<<<<< HEAD
     parser.add_argument('--model', type=str, default='meta-llama/llama3.2-1b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The number of layers in the model.')
+=======
+    parser.add_argument('--model', type=str, default='qwen/qwen3-4b', help='The model name.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_split_point', '-MSP', type=int, default=18, help='The number of layers in the model.')
+>>>>>>> bcaa93d829d2008270d4a598f594d6da9551ba48
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
     parser.add_argument('--mbps', type=int, default=230, help='The mbps value for the simulation.')
@@ -477,7 +517,10 @@ if __name__ == "__main__":
     # print(mem_res)
     for key, value in mem_res.__dict__.items():
         print(key, value)
+    for key, value in time_res.__dict__.items():
+        print(key, value)
     # print(time_res)
+<<<<<<< HEAD
     do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb,lora)
     # do 
     # all_data = []
@@ -512,3 +555,45 @@ if __name__ == "__main__":
     # df = pd.DataFrame(all_data)
     # df = df.round(2)
     # df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
+=======
+    # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb)
+    # do test
+    all_data = []
+    for sp in [4, 8]:
+        osr = [0, sp // 2, sp]
+        for bs in [8, 16]:
+            # if bs == 8:
+            #     time_res.delay_time_avg_ms = 180.0
+            # else:
+            #     time_res.delay_time_avg_ms = 14.0
+            if (sp == 4 and bs == 16) or (sp == 8 and bs == 8):
+                continue
+            oam = [0, bs // 2, bs]
+            for oa in oam:
+                for osr_ in osr:
+                    var = MainVariable(
+                        total_batch_num=1000,
+                        batch_size=bs,
+                        split_point=sp,
+                        client_offload_mb_num=oa,
+                        server_offload_mb_num=oa,
+                        client_offload_model_state_sp_num=osr_,
+                        lora=lora,
+                    )
+                    sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+                    all_data.append(
+                        {
+                            'batch_size': var.batch_size,
+                            'split_point': var.split_point,
+                            'offload_mb_num': var.client_offload_mb_num,
+                            'offload_ms_sp_num': var.client_offload_model_state_sp_num,
+                            'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
+                            'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
+                            'batch_time': round(sim_res.objective.batch_train_time, 2),
+                        }
+                    )
+                    print(round(sim_res.objective.batch_train_time, 2))
+    df = pd.DataFrame(all_data)
+    df = df.round(2)
+    df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
+>>>>>>> bcaa93d829d2008270d4a598f594d6da9551ba48

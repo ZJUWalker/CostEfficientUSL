@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 from queue import Queue, Empty
 import threading
@@ -47,7 +48,7 @@ def convert_pipeline_mode(pmode: str) -> str:
 @dataclass
 class ServerArgs:
     port: int = 8000
-    step: int = 10
+    step: int = 5
     use_lora: bool = False
     model: str = "meta-llama/llama3.2-1b"
     server_device: str = "cuda:0"
@@ -61,6 +62,7 @@ class ServerArgs:
     offload_activation_mb_num: int = 0
     micro_batch_size: int = 1
     batch_size: int = 4
+    prof: bool = False
 
     def effective_rate_limit(self) -> float:
         # Prefer the correctly spelled one if provided
@@ -111,6 +113,7 @@ class SingleServer:
         self.server_fwd_send_time = 0
         self.server_bwd_time = 0
         self.server_bwd_send_time = 0
+        self.activation_offload_time = 0
 
         # ---- Executors & coordination
         self.main_executor: Optional[ThreadPoolExecutor] = None
@@ -144,7 +147,10 @@ class SingleServer:
         self.offload_activation_mb_num = self.server_args.offload_activation_mb_num
         if self.offload_activation_mb_num > 0:
             self.activation_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-                num_minibatch=self.offload_activation_mb_num, load_stream=self.load_stream, offload_stream=self.offload_stream
+                num_minibatch=self.offload_activation_mb_num,
+                load_stream=self.load_stream,
+                offload_stream=self.offload_stream,
+                compute_stream=self.compute_stream,
             )
             self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(self.activation_offload_handler)
         # print(self.server_args.offload_activation)
@@ -365,6 +371,12 @@ class SingleServer:
                             "server_fwd_send_time": self.server_fwd_send_time,
                             "server_bwd_time": self.server_bwd_time,
                             "server_bwd_send_time": self.server_bwd_send_time,
+                            "server_offload_time_durations": (
+                                self.activation_offload_handler.offload_time_durations if self.server_args.offload_activation else 0
+                            ),
+                            "server_reload_time_durations": (
+                                self.activation_offload_handler.reload_time_durations if self.server_args.offload_activation else 0
+                            ),
                             "file_suffix": f'soa_{self.server_args.offload_activation_mb_num}' if self.server_args.offload_activation else '',
                         }
                     )
@@ -378,7 +390,7 @@ class SingleServer:
             print("_handle_client_send finished")
 
         except Exception as e:
-            self.logger.error(f"Client {self.communicator.addr} error: {e}")
+            self.logger.error(f"Client {self.communicator.addr} error: {e} ,line 398")
         finally:
             self.shutdown()
 
@@ -541,44 +553,51 @@ class SingleServer:
     def _compute_task_gpipe_or_pipe_dream_wc(self):
 
         self._init_cuda()
-        # with torch.profiler.profile(
-        #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-        #     schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
-        #     on_trace_ready=(torch.profiler.tensorboard_trace_handler("./log/trace", worker_name="server")),  # 保存到 TensorBoard
-        #     # on_trace_ready=None,
-        #     record_shapes=True,
-        #     profile_memory=True,
-        #     with_stack=True,
-        #     with_flops=True,
-        # ) as prof:
-        """Non-busy compute loop using queue.get(timeout) for backpressure."""
-        curr_phase = "FWD"
-        if self.server_args.offload_activation:
-            self.activation_offload_handler.start_fwd()  # mark the start of bwd
-        while not self.stop_event.is_set():
-            # --- Forward one minibatch ---
-            if curr_phase == "FWD":
-                try:
-                    data = self._do_one_fwd_task()
-                    curr_phase = data.phase
-                    if curr_phase == 'BWD' and self.server_args.offload_activation:
-                        self.activation_offload_handler.start_bwd()  # mark the start of bwd
-                except Empty:
-                    pass
-            else:
-                # --- Backward one minibatch ---
-                try:
-                    data = self._do_one_bwd_task()
-                    curr_phase = data.phase
-                    if curr_phase == 'FWD' and self.server_args.offload_activation:
-                        self.activation_offload_handler.start_fwd()
-                        # prof.step()  # 记录当前 step 的性能数据
-                except Empty:
-                    pass
-            self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))
-            # Small cooperative yield
-            time.sleep(0.001)
-        print("Server finished training")
+        with (
+            torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                schedule=torch.profiler.schedule(
+                    wait=1, warmup=self.server_args.step - 3, active=2, repeat=0
+                ),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
+                on_trace_ready=(torch.profiler.tensorboard_trace_handler("./log/trace", worker_name="server")),  # 保存到 TensorBoard
+                # on_trace_ready=None,
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+                with_flops=True,
+            )
+            if self.server_args.prof
+            else nullcontext()
+        ) as prof:
+            # """Non-busy compute loop using queue.get(timeout) for backpressure."""
+            curr_phase = "FWD"
+            if self.server_args.offload_activation:
+                self.activation_offload_handler.start_fwd()  # mark the start of bwd
+            while not self.stop_event.is_set():
+                # --- Forward one minibatch ---
+                if curr_phase == "FWD":
+                    try:
+                        data = self._do_one_fwd_task()
+                        curr_phase = data.phase
+                        if curr_phase == 'BWD' and self.server_args.offload_activation:
+                            self.activation_offload_handler.start_bwd()  # mark the start of bwd
+                    except Empty:
+                        pass
+                else:
+                    # --- Backward one minibatch ---
+                    try:
+                        data = self._do_one_bwd_task()
+                        curr_phase = data.phase
+                        if curr_phase == 'FWD' and self.server_args.offload_activation:
+                            self.activation_offload_handler.start_fwd()
+                            if self.server_args.prof:
+                                prof.step()  # 记录当前 step 的性能数据
+                    except Empty:
+                        pass
+                self.max_cuda_memory_allocated = max(self.max_cuda_memory_allocated, torch.cuda.max_memory_allocated(self.server_device))
+                # Small cooperative yield
+                time.sleep(0.001)
+            print("Server finished training")
 
     # --------------- Compute loop ---------------
     def _compute_task_sequential(self):

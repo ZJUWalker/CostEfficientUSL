@@ -483,7 +483,6 @@ class Client:
                         print("send stop flag")
                         continue
                     else:
-                        self.sent_payload_bytes += payload.payload_nbytes()
                         mb_idx = payload.mb_idx
                         self.profile_data[mb_idx].head_fwd_send_timestamp[0] = start_send
                         self.profile_data[mb_idx].head_fwd_send_timestamp[1] = end_time
@@ -533,7 +532,6 @@ class Client:
                 print(f"get profile data")
                 try:
                     if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
-                        print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
                         self.communicator.close()
                         self.main_executor.shutdown(wait=False)
                         sys.exit(1)
@@ -560,6 +558,8 @@ class Client:
         server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
         server_bwd_time = server_profile_res.get('server_bwd_time', 0)
         server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
+        server_offload_time_durations = server_profile_res.get('server_offload_time_durations', [])
+        server_reload_time_durations = server_profile_res.get('server_reload_time_durations', [])
         server_policy_str = server_profile_res.get('file_suffix', '')
         if server_policy_str:
             server_policy_str = f"_{server_policy_str}"
@@ -682,6 +682,8 @@ class Client:
             "tail_os_reload_time_ms": round((self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0]) * 1000, 2),
             "activation_offload_time_ms": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
             "activation_reload_time_ms": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
+            "server_activation_offload_time_ms": server_offload_time_durations,
+            "server_activation_reload_time_ms": server_reload_time_durations,
             "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
             "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
             "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
@@ -690,7 +692,7 @@ class Client:
             "bytes_sent_per_ms": round(self.sent_payload_bytes / client_send_time_ms, 0),
             "mini_batch_data": [asdict(item) for item in self.profile_data],
         }
-        print(data_dict["client_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
+        print(data_dict["client_max_mem_alloc_mb"], data_dict["server_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
         # dt_save_dir = f"{self.client_args.save_dir}/{self.client_args.model}"
         dt_save_dir = os.path.join(self.client_args.save_dir, self.client_args.model)
         if not os.path.exists(dt_save_dir):

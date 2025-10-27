@@ -190,6 +190,20 @@ def run_profile(
         time_var.head_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
             base_activation_reload_time_ms
         ) / len(base_activation_reload_time_ms)
+
+        # server activation offload time
+        base_activation_offload_time_ms = prof_res[base_sp]["-OA"]['server_activation_offload_time_ms'][:-1]
+        base_1_activation_offload_time_ms = prof_res[base_sp + 1]["-OA"]['server_activation_offload_time_ms'][:-1]
+        time_var.base_server_activation_offload_time_per_mb = sum(base_activation_offload_time_ms) / len(base_activation_offload_time_ms)
+        time_var.server_activation_offload_time_increment_per_sp = sum(base_1_activation_offload_time_ms) / len(
+            base_1_activation_offload_time_ms
+        ) - sum(base_activation_offload_time_ms) / len(base_activation_offload_time_ms)
+        base_activation_reload_time_ms = prof_res[base_sp]["-OA"]['server_activation_reload_time_ms'][:-1]
+        base_1_activation_reload_time_ms = prof_res[base_sp + 1]["-OA"]['server_activation_reload_time_ms'][:-1]
+        time_var.base_server_activation_reload_time_per_mb = sum(base_activation_reload_time_ms) / len(base_activation_reload_time_ms)
+        time_var.server_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
+            base_activation_reload_time_ms
+        ) / len(base_activation_reload_time_ms)
         # delay time
         time_var.delay_time_avg_ms = (prof_res[base_sp][""]['delay_time_avg_ms'] + prof_res[base_sp]["-OA"]['delay_time_avg_ms']) / 2
         # network time
