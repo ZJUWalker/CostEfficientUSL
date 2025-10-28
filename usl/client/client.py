@@ -792,12 +792,17 @@ class Client:
                 with_stack=True,
                 with_flops=True,
             ) as prof:
+                useable_batch_num = 0
                 for batch_idx, batch in enumerate(self.train_loader, 1):
-                    self.train_large_batch_overlapped_accum(batch, batch_idx)
+                    input_ids = batch["input_ids"]
+                    if len(input_ids[1]) != self.client_args.max_seq_len:
+                        continue
+                    useable_batch_num += 1
+                    self.train_large_batch_overlapped_accum(batch, useable_batch_num)
                     self.curr_step_idx += 1
                     if profile:
                         prof.step()
-                    if batch_idx == self.client_args.step:
+                    if useable_batch_num == self.client_args.step:
                         break
         # self.stop_event.set()
         # wait for send/recv to finish
