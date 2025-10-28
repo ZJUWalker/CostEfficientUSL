@@ -101,7 +101,12 @@ def load_client(
 
 
 def load_dataset(
-    dataset_name: str = "gsm8k", tokenizer: AutoTokenizer = None, client_ids: List[int] = [0], batch_size: int = 4, max_seq_len: int = 256
+    dataset_name: str = "dialogsum",
+    tokenizer: AutoTokenizer = None,
+    client_ids: List[int] = [0],
+    batch_size: int = 4,
+    max_seq_len: int = 256,
+    shuffle=False,
 ):
     # usl_dataset = get_dataset(dataset_name=dataset_name, tokenizer=tokenizer, client_ids=client_ids)
     client_dataloaders = get_client_dataloaders(
@@ -111,7 +116,7 @@ def load_dataset(
         batch_size=batch_size,
         max_seq_len=max_seq_len,
         splits=["train", "test"],
-        shuffle=False,
+        shuffle=shuffle,
     )
     return client_dataloaders
 
