@@ -22,6 +22,7 @@ def run_server(server_args: ServerArgs):
         console_output=False,
     )
     matrix_logger.info(f"step | mem alloc(GB) | mem reserved(GB) | avg_loss ")
+    print(f"Server args: {server_args}")
     # =====================================================================
     model_dir = os.path.join("data/models", server_args.model)
     split_point = server_args.split_point
@@ -30,7 +31,9 @@ def run_server(server_args: ServerArgs):
     torch.cuda.init()
     torch.cuda.set_device(server_args.server_device)
     torch.cuda.reset_peak_memory_stats()
+    print(f"Server device: {server_args.server_device}")
     server = SingleServer(server_args, server_model, logger=logger, matrix_logger=matrix_logger)
+    print("Server started")
     server.run()
 
 
@@ -39,7 +42,7 @@ if __name__ == "__main__":
     parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
-    parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
+    parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="Model card")
     parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
