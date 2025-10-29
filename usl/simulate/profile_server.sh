@@ -2,10 +2,10 @@
 
 MBPS=230
 MODEL_NAME=qwen/qwen3-1.7b #qwen/qwen3-1.7b | meta-llama/llama3.2-1b
-LORA="--lora"
+LORA=""
 MAX_SP=14 # 模型的层数//2
 BS=8
-SP_LIST=(3 4)
+SP_LIST=(1 2)
 # SAVE_DIR=$7
 
 run_exp() {

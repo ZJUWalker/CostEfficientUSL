@@ -46,10 +46,11 @@ if __name__ == "__main__":
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--mbps", type=int, default=300)
     parser.add_argument("--pmode", type=str, default="pdwc", help='mode of pipeline, "strict" or "loose" or "1f1b"')
-    parser.add_argument("--offload_activation", "-OA", action="store_true", default=False)
+    parser.add_argument("--offload_activation", "-OA", action="store_true")
     parser.add_argument("--offload_activation_mb_num", "-OAM", type=int, default=0)
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("--micro_batch_size", type=int, default=1)
+    parser.add_argument("--prof", action="store_true")
     args = parser.parse_args()
     server_args = ServerArgs(
         port=args.port,
@@ -66,6 +67,7 @@ if __name__ == "__main__":
         offload_activation_mb_num=args.offload_activation_mb_num,
         batch_size=args.batch_size,
         micro_batch_size=args.micro_batch_size,
+        prof=args.prof,
     )
     # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size

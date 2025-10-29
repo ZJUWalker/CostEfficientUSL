@@ -48,6 +48,7 @@ class ClientArgs:
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
     save_dir: str = 'log/profile'
     max_client_mem_mb: int = 12288  # 12GB
+    mps_thread_percentage: int = 100  # 100%
 
     def build_filename(self, prefix: str = "", ext: str = "json") -> str:
         """
@@ -76,6 +77,8 @@ class ClientArgs:
         # parts.append('{}')
         if self.sort_batch != "no":
             parts.append(f"sort_{self.sort_batch}")
+        if self.mps_thread_percentage != 100:
+            parts.append(f"mps_{self.mps_thread_percentage}")
 
         base = "_".join(parts)
         # name = f"{prefix}{base}{suffix}.{ext}"
@@ -646,6 +649,7 @@ class Client:
         layer_num = self.client_args.split_point if self.client_args.split_point > 0 else 1
         data_dict = {
             "mbps": self.client_args.rate_mbps,
+            "gpu_threads_percentage": self.client_args.mps_thread_percentage,
             "split_point": self.client_args.split_point,
             "batch_size": self.client_args.batch_size,
             "micro_batch_size": self.client_args.micro_batch_size,

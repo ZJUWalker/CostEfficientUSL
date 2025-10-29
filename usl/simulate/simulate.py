@@ -420,57 +420,60 @@ def do_optimize(
             # for sp in [4]:
             if skip_curr_bs:
                 break
-            # for c_omb in range(bs, 0, -1):
-            #     if skip_curr_bs:
-            #         break
-            #     for ossp in range(sp, -1, -1):
-            #         if skip_curr_bs:
-            #             break
-            #         for s_omb in range(bs, 2, -1):
-            var = MainVariable(
-                total_batch_num=(dataset_size + bs - 1) // bs,
-                batch_size=bs,
-                split_point=sp,
-                client_offload_mb_num=bs,
-                server_offload_mb_num=bs,
-                client_offload_model_state_sp_num=sp,
-                lora=lora
-            )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-            sim_res.model_name = model_name
-            # mem_sim_res = _simulate_peak_mem_alloc(var, mem_res)
-            if sim_res.objective.client_peak_mem_alloc > max_client_mem_mb * 0.80:
-                skip_curr_bs = True
-                break
-            if best_strategy is None and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb * 0.80:  # 0.95 is for safety
-                best_strategy = sim_res
-                min_cost = best_strategy.objective.server_cost
-                min_epoch_train_time = best_strategy.objective.epoch_train_time
-            # time_sim_res = _simulate_train_time(var, time_res, mem_res, save_gantt=False)
-            server_cost = sim_res.objective.server_cost
-            epoch_train_time = sim_res.objective.epoch_train_time
-            # 维护单目标最优（若仍想保留）
-            if server_cost < min_cost:
-                best_strategy = sim_res  # 或者存一个自定义组合对象
-                min_cost = server_cost
-                min_epoch_train_time = epoch_train_time
-            # 维护多目标最优
-            eps_cost = server_cost * EPS_COST_RATIO
-            eps_time = epoch_train_time * EPS_TIME_RATIO
-            _non_dominated_insert(
-                pareto_front,
-                cand_cost=server_cost,
-                cand_time=epoch_train_time,
-                cand_payload=sim_res.to_simple_dict(),
-                eps_cost=eps_cost,
-                eps_time=eps_time,
-            )
+            for c_omb in range(bs, 0, -1):
+                if skip_curr_bs:
+                    break
+                for ossp in range(sp, -1, -1):
+                    if skip_curr_bs:
+                        break
+                    for s_omb in range(bs, 2, -1):
+                        var = MainVariable(
+                            total_batch_num=(dataset_size + bs - 1) // bs,
+                            batch_size=bs,
+                            split_point=sp,
+                            client_offload_mb_num=c_omb,
+                            server_offload_mb_num=s_omb,
+                            client_offload_model_state_sp_num=ossp,
+                            lora=lora,
+                        )
+                        sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+                        sim_res.model_name = model_name
+                        # mem_sim_res = _simulate_peak_mem_alloc(var, mem_res)
+                        if sim_res.objective.client_peak_mem_alloc > max_client_mem_mb * 0.85:
+                            skip_curr_bs = True
+                            break
+                        if best_strategy is None and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb * 0.85:  # 0.95 is for safety
+                            best_strategy = sim_res
+                            min_cost = best_strategy.objective.server_cost
+                            min_epoch_train_time = best_strategy.objective.epoch_train_time
+                        # time_sim_res = _simulate_train_time(var, time_res, mem_res, save_gantt=False)
+                        server_cost = sim_res.objective.server_cost
+                        epoch_train_time = sim_res.objective.epoch_train_time
+                        # 维护单目标最优（若仍想保留）
+                        if server_cost < min_cost:
+                            best_strategy = sim_res  # 或者存一个自定义组合对象
+                            min_cost = server_cost
+                            min_epoch_train_time = epoch_train_time
+                        # 维护多目标最优
+                        eps_cost = server_cost * EPS_COST_RATIO
+                        eps_time = epoch_train_time * EPS_TIME_RATIO
+                        _non_dominated_insert(
+                            pareto_front,
+                            cand_cost=server_cost,
+                            cand_time=epoch_train_time,
+                            cand_payload=sim_res.to_simple_dict(),
+                            eps_cost=eps_cost,
+                            eps_time=eps_time,
+                        )
     print(f"Total time: {time.time() - time_start:.4f}s")
     # ---- 搜索结束：对帕累托前沿按成本再按时间排序，输出/返回 ----
     pareto_front.sort(key=lambda p: (p.cost, p.time))
     df = pd.DataFrame([pf.payload for pf in pareto_front])
     df = df.round(2)[:100]
-    df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}_bs_{max_batch_size}_sp_{max_split_point}{'_lora' if lora else ''}.csv', index=False)
+    df.to_csv(
+        f'log/simulate_results_{model_name.split("/")[-1]}_bs_{max_batch_size}_sp_{max_split_point}{f'_mps_{mps_gpu}' if mps_gpu<100 else ''}{'_lora' if lora else ''}.csv',
+        index=False,
+    )
 
 
 def parse_arguments():
@@ -478,20 +481,16 @@ def parse_arguments():
 
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
-<<<<<<< HEAD
-    parser.add_argument('--model', type=str, default='meta-llama/llama3.2-1b', help='The model name.')
+    parser.add_argument('--model', type=str, default='qwen/qwen3-1.7b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The number of layers in the model.')
-=======
-    parser.add_argument('--model', type=str, default='qwen/qwen3-4b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=18, help='The number of layers in the model.')
->>>>>>> bcaa93d829d2008270d4a598f594d6da9551ba48
+    parser.add_argument('--max_split_point', '-MSP', type=int, default=14, help='The number of layers in the model.')
+    parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
     parser.add_argument('--mbps', type=int, default=230, help='The mbps value for the simulation.')
+    parser.add_argument('--mps_gpu', type=int, default=100, help='The max percentage of GPU active threads used for the simulation.')
     parser.add_argument('--max_batch_size', '-BS', type=int, default=32, help='The max batch size for the simulation.')
-    parser.add_argument('--profile_dir', type=str, default='log/sim_profile', help='The profile directory for storing results.')
+    parser.add_argument('--profile_dir', type=str, default='log/profile/sim_profile', help='The profile directory for storing results.')
     parser.add_argument('--save_gantt', action='store_true', help='Whether to save gantt chart or not.')
     return parser.parse_args()
 
@@ -507,9 +506,11 @@ if __name__ == "__main__":
     dataset_size = args.dataset_size
     max_client_mem_mb = args.max_client_mem_gb * 1024
     save_gantt = args.save_gantt
+    max_sequence_len = args.max_sequence_len
+    mps_gpu = args.mps_gpu
     # run profiling
     profile_start = time.time()
-    mem_res, time_res = run_profile(model_name, mbps, lora, base_sp=2, base_bs=8, profile_dir=profile_dir)
+    mem_res, time_res = run_profile(model_name, mbps, lora, base_sp=1, base_bs=8, mps_gpu=mps_gpu, profile_dir=profile_dir)
     print(f"Profiling time: {time.time() - profile_start:.4f}s")
     if mem_res is None or time_res is None:
         print("Failed to run profiling.")
@@ -519,10 +520,30 @@ if __name__ == "__main__":
         print(key, value)
     for key, value in time_res.__dict__.items():
         print(key, value)
+    # var = MainVariable(
+    #     total_batch_num=1000,
+    #     batch_size=16,
+    #     split_point=6,
+    #     client_offload_mb_num=0,
+    #     server_offload_mb_num=0,
+    #     client_offload_model_state_sp_num=6,
+    #     lora=lora,
+    # )
+    # sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+    # print(
+    #     {
+    #         'batch_size': var.batch_size,
+    #         'split_point': var.split_point,
+    #         'offload_mb_num': var.client_offload_mb_num,
+    #         'offload_ms_sp_num': var.client_offload_model_state_sp_num,
+    #         'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
+    #         'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
+    #         'batch_time': round(sim_res.objective.batch_train_time, 2),
+    #     }
+    # )
     # print(time_res)
-<<<<<<< HEAD
-    do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb,lora)
-    # do 
+    do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
+    # do
     # all_data = []
     # for sp in [4, 6]:
     #     osr = [0, sp // 2, sp]
@@ -555,45 +576,3 @@ if __name__ == "__main__":
     # df = pd.DataFrame(all_data)
     # df = df.round(2)
     # df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
-=======
-    # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb)
-    # do test
-    all_data = []
-    for sp in [4, 8]:
-        osr = [0, sp // 2, sp]
-        for bs in [8, 16]:
-            # if bs == 8:
-            #     time_res.delay_time_avg_ms = 180.0
-            # else:
-            #     time_res.delay_time_avg_ms = 14.0
-            if (sp == 4 and bs == 16) or (sp == 8 and bs == 8):
-                continue
-            oam = [0, bs // 2, bs]
-            for oa in oam:
-                for osr_ in osr:
-                    var = MainVariable(
-                        total_batch_num=1000,
-                        batch_size=bs,
-                        split_point=sp,
-                        client_offload_mb_num=oa,
-                        server_offload_mb_num=oa,
-                        client_offload_model_state_sp_num=osr_,
-                        lora=lora,
-                    )
-                    sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-                    all_data.append(
-                        {
-                            'batch_size': var.batch_size,
-                            'split_point': var.split_point,
-                            'offload_mb_num': var.client_offload_mb_num,
-                            'offload_ms_sp_num': var.client_offload_model_state_sp_num,
-                            'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
-                            'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
-                            'batch_time': round(sim_res.objective.batch_train_time, 2),
-                        }
-                    )
-                    print(round(sim_res.objective.batch_train_time, 2))
-    df = pd.DataFrame(all_data)
-    df = df.round(2)
-    df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
->>>>>>> bcaa93d829d2008270d4a598f594d6da9551ba48
