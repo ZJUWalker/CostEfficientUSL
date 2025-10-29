@@ -5,6 +5,7 @@ import argparse
 from typing import Tuple
 from usl.simulate import MemoryConstant, TimeConstant
 from transformers import AutoConfig
+from typing_extensions import deprecated
 
 OFFLOAD_VALUES = ["", "-OA", "-OS"]
 
@@ -25,6 +26,11 @@ def _get_layer_num(dir='data/models', model_name='gpt2-large') -> AutoConfig:
         raise ValueError(f"Failed to get layer number from config {config}")
 
 
+@deprecated(
+    version='0.1.0',
+    reason="This function is deprecated and will be removed in the future. \
+        Please use the new function `profile_separate_nodes/run_profile` instead.",
+)
 def run_profile(
     model: str, mbps: float, lora: bool, base_bs=4, base_sp=2, profile_dir: str = 'log/profile/sim_profile'
 ) -> Tuple[MemoryConstant, TimeConstant]:

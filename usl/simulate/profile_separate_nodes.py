@@ -26,7 +26,7 @@ def _get_layer_num(dir='data/models', model_name='gpt2-large') -> AutoConfig:
 
 
 def run_profile(
-    model: str, mbps: float, lora: bool, base_bs=4, base_sp=2, profile_dir: str = 'log/profile/sim_profile'
+    model: str, mbps: float, lora: bool, base_bs=4, base_sp=2, mps_gpu=100, profile_dir: str = 'log/profile/sim_profile'
 ) -> Tuple[MemoryConstant, TimeConstant]:
     """
     _summary_
@@ -82,10 +82,9 @@ def run_profile(
     def get_file_name(sp, coa, cos, soa):
         offload_str = f"_coa_{coa}" if coa > 0 else ""
         offload_str += f"_cos_{cos}" if cos > 0 else ""
+        offload_str += f"_mps_{mps_gpu}" if mps_gpu != 100 else ""
         offload_str += f"_soa_{soa}" if soa > 0 else ""
-        file_path = (
-            f"log/profile/sim_profile/{model}/sp_{sp}_b_{base_bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{offload_str}.json"
-        )
+        file_path = f"{profile_dir}/{model}/sp_{sp}_b_{base_bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{offload_str}.json"
         return file_path
 
     for comb in combinations:
@@ -202,7 +201,19 @@ def run_profile(
     time_var.head_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
         base_activation_reload_time_ms
     ) / len(base_activation_reload_time_ms)
-
+    # server activation offload time
+    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
+    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
+    time_var.base_server_activation_offload_time_per_mb = sum(base_activation_offload_time_ms) / len(base_activation_offload_time_ms)
+    time_var.server_activation_offload_time_increment_per_sp = sum(base_1_activation_offload_time_ms) / len(base_1_activation_offload_time_ms) - sum(
+        base_activation_offload_time_ms
+    ) / len(base_activation_offload_time_ms)
+    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
+    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
+    time_var.base_server_activation_reload_time_per_mb = sum(base_activation_reload_time_ms) / len(base_activation_reload_time_ms)
+    time_var.server_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
+        base_activation_reload_time_ms
+    ) / len(base_activation_reload_time_ms)
     # delay time
     time_var.delay_time_avg_ms = (
         prof_res[(base_sp, 0, 0, 0)]['delay_time_avg_ms'] + prof_res[(base_sp, base_bs, 0, base_bs)]['delay_time_avg_ms']

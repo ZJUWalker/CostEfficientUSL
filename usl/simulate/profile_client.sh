@@ -2,10 +2,10 @@
 
 MBPS=230
 MODEL_NAME=qwen/qwen3-1.7b #qwen/qwen3-1.7b | meta-llama/llama3.2-1b
-LORA="--lora"
+LORA=""
 MAX_SP=14 # 模型的层数//2
 BS=8
-SP_LIST=(3 4)
+SP_LIST=(1 2)
 SAVE_DIR='log/profile/sim_profile'
 
 run_exp() {
@@ -18,7 +18,7 @@ run_exp() {
     python experiment/client_run.py -SP=$SP \
         --mbps=$MBPS --batch_size=$BS --micro_batch_size=1 \
         --pmode=pipedream_wc --model=$MODEL_NAME \
-        $LORA $CLIENT_OFFLOAD_ARG --step=4 --save_dir=$SAVE_DIR
+        $LORA $CLIENT_OFFLOAD_ARG --step=4 --save_dir=$SAVE_DIR --gpu_mps=30
     sleep 3
 }
 
