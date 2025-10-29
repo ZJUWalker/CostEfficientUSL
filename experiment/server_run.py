@@ -76,7 +76,7 @@ if __name__ == "__main__":
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size
     if server_args.offload_activation or server_args.offload_activation_mb_num > 0:
         server_args.offload_activation_mb_num = max(
-            0, min(server_args.batch_size // server_args.micro_batch_size, server_args.offload_activation_mb_num)
+            0, min(server_args.offload_activation_mb_num)
         )
         server_args.offload_activation = True
     else:

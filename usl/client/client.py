@@ -535,10 +535,9 @@ class Client:
                 print(f"get profile data")
                 try:
                     if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
-                        self.communicator.close()
-                        self.main_executor.shutdown(wait=False)
-                        sys.exit(1)
-                    self._save_profile_res(data)
+                        print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
+                    else:
+                        self._save_profile_res(data)
                 except Exception as e:
                     print(f"error when save profile data: {e}")
                 finally:

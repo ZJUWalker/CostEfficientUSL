@@ -71,25 +71,26 @@ def run_profile(
     #             continue
     combinations = [
         # sp,coa,cos,soa
-        (base_sp, 0, 0, 0),  # 什么都不做
-        (base_sp, base_bs, 0, base_bs),  # 卸载激活量
-        (base_sp + 1, 0, 0, 0),
-        (base_sp + 1, base_bs, 0, base_bs),  # 卸载激活量
-        (base_sp, 0, base_sp, 0),  # 卸载一层模型参数
-        (base_sp + 1, 0, base_sp + 1, 0),  # 卸载两层模型参数
+        (base_sp, base_bs, 0, 0, 0),  # 什么都不做
+        (base_sp, base_bs, base_bs, 0, base_bs),  # 卸载激活量
+        (base_sp + 1, base_bs, 0, 0, 0),
+        (base_sp + 1, base_bs, base_bs, 0, base_bs),  # 卸载激活量
+        (base_sp, base_bs, 0, base_sp, 0),  # 卸载一层模型参数
+        (base_sp + 1, base_bs, 0, base_sp + 1, 0),  # 卸载两层模型参数
+        (base_sp, base_bs + 1, base_bs + 1, 0, base_bs + 1),  # 卸载激活量
     ]
 
-    def get_file_name(sp, coa, cos, soa):
+    def get_file_name(sp, bs, coa, cos, soa):
         offload_str = f"_coa_{coa}" if coa > 0 else ""
         offload_str += f"_cos_{cos}" if cos > 0 else ""
         offload_str += f"_mps_{mps_gpu}" if mps_gpu != 100 else ""
         offload_str += f"_soa_{soa}" if soa > 0 else ""
-        file_path = f"{profile_dir}/{model}/sp_{sp}_b_{base_bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{offload_str}.json"
+        file_path = f"{profile_dir}/{model}/sp_{sp}_b_{bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{offload_str}.json"
         return file_path
 
     for comb in combinations:
-        sp, coa, cos, soa = comb
-        file_path = get_file_name(sp, coa, cos, soa)
+        sp, bs, coa, cos, soa = comb
+        file_path = get_file_name(sp, bs, coa, cos, soa)
         if not os.path.exists(file_path):
             print(f"File {file_path} not found. Skipping.")
             continue
@@ -105,63 +106,80 @@ def run_profile(
     # MemoryVariable calculations
     mem_var = MemoryConstant(max_split_point=max_split_point, baseline_split_point=base_sp, baseline_minibatch_num=base_bs)
     mem_var.mem_increment_per_sp_server = round(
-        prof_res[(base_sp + 1, 0, 0, 0)]['server_max_mem_alloc_mb'] - prof_res[(base_sp, 0, 0, 0)]['server_max_mem_alloc_mb'], 2
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['server_max_mem_alloc_mb'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['server_max_mem_alloc_mb'], 2
     )  # checked
     mem_var.mem_increment_per_sp_client = round(
-        prof_res[(base_sp + 1, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp, 0, 0, 0)]['client_max_mem_alloc_mb'], 2
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb'], 2
+    )  # checked
+    mem_var.mem_increment_per_mb_client_if_oa = round(
+        prof_res[(base_sp, base_bs + 1, base_bs + 1, 0, base_bs + 1)]['client_max_mem_alloc_mb']
+        - prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['client_max_mem_alloc_mb'],
+        2,
+    )  # checked
+    mem_var.mem_increment_per_mb_server_if_oa = round(
+        prof_res[(base_sp, base_bs + 1, base_bs + 1, 0, base_bs + 1)]['server_max_mem_alloc_mb']
+        - prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_max_mem_alloc_mb'],
+        2,
     )  # checked
     mem_var.mem_increment_per_sp_mb_client = round(
-        (prof_res[(base_sp + 1, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp + 1, base_bs, 0, base_bs)]['client_max_mem_alloc_mb'])
+        (
+            prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb']
+            - prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['client_max_mem_alloc_mb']
+        )
         / (base_bs - 1)
         / (base_sp + 1),
         2,
     )  # checked
     mem_var.mem_increment_per_sp_mb_server = round(
-        (prof_res[(base_sp + 1, 0, 0, 0)]['server_max_mem_alloc_mb'] - prof_res[(base_sp + 1, base_bs, 0, base_bs)]['server_max_mem_alloc_mb'])
+        (
+            prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['server_max_mem_alloc_mb']
+            - prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['server_max_mem_alloc_mb']
+        )
         / (base_bs - (2 if lora else 3))
         / (base_sp + 1),
         2,
     )  # checked
-    mem_var.base_client_mem_alloc = round(prof_res[(base_sp, 0, 0, 0)]['client_max_mem_alloc_mb'], 2)
+    mem_var.base_client_mem_alloc = round(prof_res[(base_sp, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb'], 2)
     mem_var.base_server_mem_alloc = (
-        round(prof_res[(base_sp, 0, 0, 0)]['server_max_mem_alloc_mb'], 2) + (max_split_point - base_sp * 2) * mem_var.mem_increment_per_sp_server
+        round(prof_res[(base_sp, base_bs, 0, 0, 0)]['server_max_mem_alloc_mb'], 2)
+        + (max_split_point - base_sp * 2) * mem_var.mem_increment_per_sp_server
     )  # checked
     mem_var.base_model_state_mem_alloc_client = round(
-        prof_res[(base_sp, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp, 0, base_sp, 0)]['client_max_mem_alloc_mb'], 2
+        prof_res[(base_sp, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp, base_bs, 0, base_sp, 0)]['client_max_mem_alloc_mb'], 2
     )  # checked
     mem_var.model_mem_increment_per_sp_client = (
-        prof_res[(base_sp + 1, 0, 0, 0)]['client_max_mem_alloc_mb']
-        - prof_res[(base_sp + 1, 0, base_sp + 1, 0)]['client_max_mem_alloc_mb']
-        - (prof_res[(base_sp, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp, 0, base_sp, 0)]['client_max_mem_alloc_mb'])
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb']
+        - prof_res[(base_sp + 1, base_bs, 0, base_sp + 1, 0)]['client_max_mem_alloc_mb']
+        - (prof_res[(base_sp, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp, base_bs, 0, base_sp, 0)]['client_max_mem_alloc_mb'])
     )  # checked ,but some loss
     mem_var.base_model_state_mem_alloc_except_blocks = mem_var.base_model_state_mem_alloc_client - base_sp * mem_var.model_mem_increment_per_sp_client
     # TimeVariable calculations
     time_var = TimeConstant(rate_mbps=mbps)
     # base time
-    time_var.base_head_fwd_time_per_mb = prof_res[(base_sp, 0, 0, 0)]['head_fwd_time_avg_ms']
-    time_var.base_head_bwd_time_per_mb = prof_res[(base_sp, 0, 0, 0)]['head_bwd_time_avg_ms']
-    time_var.base_tail_fwd_time_per_mb = prof_res[(base_sp, 0, 0, 0)]['tail_fwd_time_avg_ms']
-    time_var.base_tail_bwd_time_per_mb = prof_res[(base_sp, 0, 0, 0)]['tail_bwd_time_avg_ms']
-    time_var.base_server_fwd_time_per_mb = prof_res[(base_sp, 0, 0, 0)]['server_fwd_time_avg_ms']
-    time_var.base_server_bwd_time_per_mb = prof_res[(base_sp, 0, 0, 0)]['server_bwd_time_avg_ms']
+    time_var.base_head_fwd_time_per_mb = prof_res[(base_sp, base_bs, 0, 0, 0)]['head_fwd_time_avg_ms']
+    time_var.base_head_bwd_time_per_mb = prof_res[(base_sp, base_bs, 0, 0, 0)]['head_bwd_time_avg_ms']
+    time_var.base_tail_fwd_time_per_mb = prof_res[(base_sp, base_bs, 0, 0, 0)]['tail_fwd_time_avg_ms']
+    time_var.base_tail_bwd_time_per_mb = prof_res[(base_sp, base_bs, 0, 0, 0)]['tail_bwd_time_avg_ms']
+    time_var.base_server_fwd_time_per_mb = prof_res[(base_sp, base_bs, 0, 0, 0)]['server_fwd_time_avg_ms']
+    time_var.base_server_bwd_time_per_mb = prof_res[(base_sp, base_bs, 0, 0, 0)]['server_bwd_time_avg_ms']
     # increment per sp
     time_var.head_fwd_time_increment_per_sp = (
-        prof_res[(base_sp + 1, 0, 0, 0)]['head_fwd_time_avg_ms'] - prof_res[(base_sp, 0, 0, 0)]['head_fwd_time_avg_ms']
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['head_fwd_time_avg_ms'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['head_fwd_time_avg_ms']
     )
     time_var.head_bwd_time_increment_per_sp = (
-        prof_res[(base_sp + 1, 0, 0, 0)]['head_bwd_time_avg_ms'] - prof_res[(base_sp, 0, 0, 0)]['head_bwd_time_avg_ms']
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['head_bwd_time_avg_ms'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['head_bwd_time_avg_ms']
     )
     time_var.tail_fwd_time_increment_per_sp = (
-        prof_res[(base_sp + 1, 0, 0, 0)]['tail_fwd_time_avg_ms'] - prof_res[(base_sp, 0, 0, 0)]['tail_fwd_time_avg_ms']
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['tail_fwd_time_avg_ms'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['tail_fwd_time_avg_ms']
     )
     time_var.tail_bwd_time_increment_per_sp = (
-        prof_res[(base_sp + 1, 0, 0, 0)]['tail_bwd_time_avg_ms'] - prof_res[(base_sp, 0, 0, 0)]['tail_bwd_time_avg_ms']
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['tail_bwd_time_avg_ms'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['tail_bwd_time_avg_ms']
     )
     time_var.server_fwd_time_increment_per_sp = (
-        prof_res[(base_sp + 1, 0, 0, 0)]['server_fwd_time_avg_ms'] - prof_res[(base_sp, 0, 0, 0)]['server_fwd_time_avg_ms']
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['server_fwd_time_avg_ms'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['server_fwd_time_avg_ms']
     )
     time_var.server_bwd_time_increment_per_sp = (
-        prof_res[(base_sp + 1, 0, 0, 0)]['server_bwd_time_avg_ms'] - prof_res[(base_sp, 0, 0, 0)]['server_bwd_time_avg_ms']
+        prof_res[(base_sp + 1, base_bs, 0, 0, 0)]['server_bwd_time_avg_ms'] - prof_res[(base_sp, base_bs, 0, 0, 0)]['server_bwd_time_avg_ms']
     )
     # model state offload time
     # "head_m_offload_time_ms": 10.86,
@@ -175,61 +193,68 @@ def run_profile(
     # "activation_offload_time_ms": 0,
     # "activation_reload_time_ms": 0,
     time_var.base_head_model_state_offload_time = (
-        prof_res[(base_sp, 0, base_sp, 0)]['head_m_offload_time_ms'] + prof_res[(base_sp, 0, base_sp, 0)]['head_os_offload_time_ms']
+        prof_res[(base_sp, base_bs, 0, base_sp, 0)]['head_m_offload_time_ms'] + prof_res[(base_sp, base_bs, 0, base_sp, 0)]['head_os_offload_time_ms']
     )
     time_var.base_tail_model_state_offload_time = min(
-        prof_res[(base_sp, 0, base_sp, 0)]['tail_m_offload_time_ms'] + prof_res[(base_sp, 0, base_sp, 0)]['tail_os_offload_time_ms'],
+        prof_res[(base_sp, base_bs, 0, base_sp, 0)]['tail_m_offload_time_ms']
+        + prof_res[(base_sp, base_bs, 0, base_sp, 0)]['tail_os_offload_time_ms'],
         time_var.base_head_model_state_offload_time,
     )
     # time_var.head_model_offload_time_increment_per_sp = (
-    #     prof_res[(base_sp + 1, 0, base_sp + 1, 0)]['head_m_offload_time_ms']
-    #     + prof_res[(base_sp + 1, 0, base_sp + 1, 0)]['head_os_offload_time_ms']
-    #     - (prof_res[(base_sp, 0, base_sp, 0)]['head_m_offload_time_ms'] + prof_res[(base_sp, 0, base_sp, 0)]['head_os_offload_time_ms'])
+    #     prof_res[(base_sp + 1, base_bs,0, base_sp + 1, 0)]['head_m_offload_time_ms']
+    #     + prof_res[(base_sp + 1, base_bs,0, base_sp + 1, 0)]['head_os_offload_time_ms']
+    #     - (prof_res[(base_sp, base_bs,0, base_sp, 0)]['head_m_offload_time_ms'] + prof_res[(base_sp, base_bs,0, base_sp, 0)]['head_os_offload_time_ms'])
     # )
-    time_var.head_model_offload_time_increment_per_sp = prof_res[(base_sp, 0, base_sp, 0)]['head_m_offload_time_ms'] / base_sp * 3  # param+os
+    time_var.head_model_offload_time_increment_per_sp = (
+        prof_res[(base_sp, base_bs, 0, base_sp, 0)]['head_m_offload_time_ms'] / base_sp * 3
+    )  # param+os
     time_var.tail_model_offload_time_increment_per_sp = time_var.head_model_offload_time_increment_per_sp
     # head activation offload time
-    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
-    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
+    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
+    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
     time_var.base_head_activation_offload_time_per_mb = sum(base_activation_offload_time_ms) / len(base_activation_offload_time_ms)
     time_var.head_activation_offload_time_increment_per_sp = sum(base_1_activation_offload_time_ms) / len(base_1_activation_offload_time_ms) - sum(
         base_activation_offload_time_ms
     ) / len(base_activation_offload_time_ms)
-    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, 0, base_bs)]['activation_reload_time_ms'][:-1]
-    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, 0, base_bs)]['activation_reload_time_ms'][:-1]
+    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_reload_time_ms'][:-1]
+    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_reload_time_ms'][:-1]
     time_var.base_head_activation_reload_time_per_mb = sum(base_activation_reload_time_ms) / len(base_activation_reload_time_ms)
     time_var.head_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
         base_activation_reload_time_ms
     ) / len(base_activation_reload_time_ms)
     # server activation offload time
-    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
-    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
+    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
+    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
     time_var.base_server_activation_offload_time_per_mb = sum(base_activation_offload_time_ms) / len(base_activation_offload_time_ms)
     time_var.server_activation_offload_time_increment_per_sp = sum(base_1_activation_offload_time_ms) / len(base_1_activation_offload_time_ms) - sum(
         base_activation_offload_time_ms
     ) / len(base_activation_offload_time_ms)
-    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
-    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
+    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
+    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
     time_var.base_server_activation_reload_time_per_mb = sum(base_activation_reload_time_ms) / len(base_activation_reload_time_ms)
     time_var.server_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
         base_activation_reload_time_ms
     ) / len(base_activation_reload_time_ms)
     # delay time
     time_var.delay_time_avg_ms = (
-        prof_res[(base_sp, 0, 0, 0)]['delay_time_avg_ms'] + prof_res[(base_sp, base_bs, 0, base_bs)]['delay_time_avg_ms']
+        prof_res[(base_sp, base_bs, 0, 0, 0)]['delay_time_avg_ms'] + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['delay_time_avg_ms']
     ) / 2
     # network time
     time_var.head_activation_send_time = (
-        prof_res[(base_sp, 0, 0, 0)]['head_fwd_send_time_avg_ms'] + prof_res[(base_sp, base_bs, 0, base_bs)]['head_fwd_send_time_avg_ms']
+        prof_res[(base_sp, base_bs, 0, 0, 0)]['head_fwd_send_time_avg_ms']
+        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['head_fwd_send_time_avg_ms']
     ) / 2
     time_var.server_activation_send_time = (
-        prof_res[(base_sp, 0, 0, 0)]['server_fwd_send_time_avg_ms'] + prof_res[(base_sp, base_bs, 0, base_bs)]['server_fwd_send_time_avg_ms']
+        prof_res[(base_sp, base_bs, 0, 0, 0)]['server_fwd_send_time_avg_ms']
+        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_fwd_send_time_avg_ms']
     ) / 2
     time_var.tail_gradient_send_time = (
-        prof_res[(base_sp, 0, 0, 0)]['tail_bwd_send_time_avg_ms'] + prof_res[(base_sp, base_bs, 0, base_bs)]['tail_bwd_send_time_avg_ms']
+        prof_res[(base_sp, base_bs, 0, 0, 0)]['tail_bwd_send_time_avg_ms']
+        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['tail_bwd_send_time_avg_ms']
     ) / 2
     time_var.server_gradient_send_time = (
-        prof_res[(base_sp, 0, 0, 0)]['server_bwd_send_time_avg_ms'] + prof_res[(base_sp, base_bs, 0, base_bs)]['server_bwd_send_time_avg_ms']
+        prof_res[(base_sp, base_bs, 0, 0, 0)]['server_bwd_send_time_avg_ms']
+        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_bwd_send_time_avg_ms']
     ) / 2
     # round all values to 2 decimal places
     keys = time_var.__dict__.keys()

@@ -75,7 +75,9 @@ class MemoryConstant:
     base_client_mem_alloc: float = 1024.0  # unit:MB
     base_server_mem_alloc: float = 1024.0  # unit:MB
     mem_increment_per_sp_client: float = 0.0
+    mem_increment_per_mb_client_if_oa: float = 0.0
     mem_increment_per_sp_server: float = 0.0
+    mem_increment_per_mb_server_if_oa: float = 0.0
     mem_increment_per_sp_mb_client: float = 0.0
     mem_increment_per_sp_mb_server: float = 0.0
     base_model_state_mem_alloc_client: float = 0
