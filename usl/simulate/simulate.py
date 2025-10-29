@@ -434,15 +434,15 @@ def do_optimize(
                 client_offload_mb_num=bs,
                 server_offload_mb_num=bs,
                 client_offload_model_state_sp_num=sp,
-                lora=lora
+                lora=lora,
             )
             sim_res = simulate(var, time_res, mem_res, save_gantt=False)
             sim_res.model_name = model_name
             # mem_sim_res = _simulate_peak_mem_alloc(var, mem_res)
-            if sim_res.objective.client_peak_mem_alloc > max_client_mem_mb * 0.80:
+            if sim_res.objective.client_peak_mem_alloc > max_client_mem_mb * 0.85:
                 skip_curr_bs = True
                 break
-            if best_strategy is None and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb * 0.80:  # 0.95 is for safety
+            if best_strategy is None and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb * 0.85:  # 0.95 is for safety
                 best_strategy = sim_res
                 min_cost = best_strategy.objective.server_cost
                 min_epoch_train_time = best_strategy.objective.epoch_train_time
@@ -469,7 +469,7 @@ def do_optimize(
     # ---- 搜索结束：对帕累托前沿按成本再按时间排序，输出/返回 ----
     pareto_front.sort(key=lambda p: (p.cost, p.time))
     df = pd.DataFrame([pf.payload for pf in pareto_front])
-    df = df.round(2)[:100]
+    df = df.round(2)
     df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}_bs_{max_batch_size}_sp_{max_split_point}{'_lora' if lora else ''}.csv', index=False)
 
 
@@ -478,15 +478,9 @@ def parse_arguments():
 
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
-<<<<<<< HEAD
-    parser.add_argument('--model', type=str, default='meta-llama/llama3.2-1b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The number of layers in the model.')
-=======
     parser.add_argument('--model', type=str, default='qwen/qwen3-4b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=18, help='The number of layers in the model.')
->>>>>>> bcaa93d829d2008270d4a598f594d6da9551ba48
+    parser.add_argument('--max_client_mem_gb', type=int, default=12, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_split_point', '-MSP', type=int, default=17, help='The number of layers in the model.')
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
     parser.add_argument('--mbps', type=int, default=230, help='The mbps value for the simulation.')
@@ -520,9 +514,8 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     # print(time_res)
-<<<<<<< HEAD
-    do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb,lora)
-    # do 
+    do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
+    # do
     # all_data = []
     # for sp in [4, 6]:
     #     osr = [0, sp // 2, sp]
@@ -555,45 +548,3 @@ if __name__ == "__main__":
     # df = pd.DataFrame(all_data)
     # df = df.round(2)
     # df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
-=======
-    # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb)
-    # do test
-    all_data = []
-    for sp in [4, 8]:
-        osr = [0, sp // 2, sp]
-        for bs in [8, 16]:
-            # if bs == 8:
-            #     time_res.delay_time_avg_ms = 180.0
-            # else:
-            #     time_res.delay_time_avg_ms = 14.0
-            if (sp == 4 and bs == 16) or (sp == 8 and bs == 8):
-                continue
-            oam = [0, bs // 2, bs]
-            for oa in oam:
-                for osr_ in osr:
-                    var = MainVariable(
-                        total_batch_num=1000,
-                        batch_size=bs,
-                        split_point=sp,
-                        client_offload_mb_num=oa,
-                        server_offload_mb_num=oa,
-                        client_offload_model_state_sp_num=osr_,
-                        lora=lora,
-                    )
-                    sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-                    all_data.append(
-                        {
-                            'batch_size': var.batch_size,
-                            'split_point': var.split_point,
-                            'offload_mb_num': var.client_offload_mb_num,
-                            'offload_ms_sp_num': var.client_offload_model_state_sp_num,
-                            'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
-                            'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
-                            'batch_time': round(sim_res.objective.batch_train_time, 2),
-                        }
-                    )
-                    print(round(sim_res.objective.batch_train_time, 2))
-    df = pd.DataFrame(all_data)
-    df = df.round(2)
-    df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
->>>>>>> bcaa93d829d2008270d4a598f594d6da9551ba48
