@@ -215,7 +215,11 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                 1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
             )
         else:
-            head_bwd_timestamps[i][0] = max(head_bwd_timestamps[i - 1][1], server_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms)
+            head_bwd_timestamps[i][0] = max(
+                head_bwd_timestamps[i - 1][0] + head_acti_reload_time_per_mb,
+                head_bwd_timestamps[i - 1][1],
+                server_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms,
+            )
             head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + max(
                 head_bwd_time_per_mb, head_acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0
             )
