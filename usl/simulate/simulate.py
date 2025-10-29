@@ -325,6 +325,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         + (batch_size - base_mb_num) * split_point * memory_const.mem_increment_per_sp_mb_client
         # 因为模型切分层和batch size增加，激活量引起的显存开销
         - (split_point * (max(0, client_offload_mb_num - 1)) * memory_const.mem_increment_per_sp_mb_client)  # 因激活量卸载，显存开销减少
+        + (client_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_client_if_oa
         # - (memory_const.base_model_state_mem_alloc_client - os_offload_sp_num * memory_const.model_mem_increment_per_sp_client)
     )
     if os_offload_sp_num > 0:
@@ -339,6 +340,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         - (max_split_point - split_point)
         * (max(0, server_offload_mb_num - (2 if main_var.lora else 3)))
         * memory_const.mem_increment_per_sp_mb_server
+        + (server_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_server_if_oa
     )
 
     return SimulateResult(objective=Objective(client_peak_mem_alloc=client_peak_mem_alloc, server_peak_mem_alloc=server_peak_mem_alloc))
@@ -481,7 +483,7 @@ def parse_arguments():
 
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
-    parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
+    parser.add_argument('--model', type=str, default='qwen/qwen3-4b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The number of layers in the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
@@ -544,7 +546,7 @@ if __name__ == "__main__":
     # print(time_res)
     # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
     # do
-    real_data = pd.read_csv('log/extracted_optim/qwen3-8b_lora.csv')
+    real_data = pd.read_csv(f'log/extracted_optim/{model_name.split("/")[-1]}{f'_lora' if lora else '' }.csv')
     # all_data = []
     sim_client_mem = []
     sim_server_mem = []
