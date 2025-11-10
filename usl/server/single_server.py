@@ -7,7 +7,6 @@ from queue import Queue, Empty
 import threading
 import logging
 import time
-import traceback
 from enum import Enum
 from typing import Dict, Any, Optional, List, Tuple, Type, Union
 
@@ -150,7 +149,6 @@ class SingleServer:
                 num_minibatch=self.offload_activation_mb_num,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
-                compute_stream=self.compute_stream,
             )
             self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(self.activation_offload_handler)
         # print(self.server_args.offload_activation)
