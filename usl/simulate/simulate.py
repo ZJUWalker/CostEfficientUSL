@@ -487,7 +487,7 @@ def parse_arguments():
 
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
-    parser.add_argument('--model', type=str, default='qwen/qwen3-4b', help='The model name.')
+    parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The number of layers in the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
@@ -526,78 +526,84 @@ if __name__ == "__main__":
         print(key, value)
     for key, value in time_res.__dict__.items():
         print(key, value)
-    # var = MainVariable(
-    #     total_batch_num=1000,
-    #     batch_size=16,
-    #     split_point=6,
-    #     client_offload_mb_num=0,
-    #     server_offload_mb_num=0,
-    #     client_offload_model_state_sp_num=6,
-    #     lora=lora,
-    # )
-    # sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-    # print(
-    #     {
-    #         'batch_size': var.batch_size,
-    #         'split_point': var.split_point,
-    #         'offload_mb_num': var.client_offload_mb_num,
-    #         'offload_ms_sp_num': var.client_offload_model_state_sp_num,
-    #         'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
-    #         'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
-    #         'batch_time': round(sim_res.objective.batch_train_time, 2),
-    #     }
-    # )
+    all_data = []
+    for sp in [1, 2, 3, 4, 5, 6, 7]:
+        for bs in [4, 8, 12, 16, 24, 32]:
+            var = MainVariable(
+                total_batch_num=1000,
+                batch_size=bs,
+                split_point=sp,
+                client_offload_mb_num=0,
+                server_offload_mb_num=0,
+                client_offload_model_state_sp_num=0,
+                lora=lora,
+            )
+            sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+            all_data.append(
+                {
+                    'split_point': var.split_point,
+                    'batch_size': var.batch_size,
+                    # 'offload_mb_num': var.client_offload_mb_num,
+                    # 'offload_ms_sp_num': var.client_offload_model_state_sp_num,
+                    'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
+                    'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
+                    # 'batch_time': round(sim_res.objective.batch_train_time, 2),
+                }
+            )
+    df = pd.DataFrame(all_data)
+    df = df.round(2)
+    df.to_csv('tmp.csv', index=False)
     # print(time_res)
     # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
     # do
-    real_data = pd.read_csv(f'log/extracted_optim/{model_name.split("/")[-1]}{f'_lora' if lora else '' }.csv')
-    # all_data = []
-    sim_client_mem = []
-    sim_server_mem = []
-    sim_batch_time = []
-    '''
-    batch_size,split_point,offload_mb_num,offload_ms_sp_num,client_mem,server_mem,batch_time
-    8,1,8,1,7589.69,36199.55,7706.2
-    16,1,16,1,7857.76,36339.55,14582.88
-    24,1,24,1,8125.82,36479.55,21728.18
-    '''
-    for bs, sp, oam, osr in zip(
-        real_data['batch_size'].values, real_data['split_point'].values, real_data['offload_mb_num'].values, real_data['offload_ms_sp_num'].values
-    ):
-        # for bs in real_data['batch_size'].values:
-        #     for sp in real_data['split_point'].values:
-        #         # osr = sp
-        #         # oam = bs
-        #         for oam in real_data['offload_mb_num'].values:
-        #             for osr in real_data['offload_ms_sp_num'].values:
-        var = MainVariable(
-            total_batch_num=1000,
-            batch_size=bs,
-            split_point=sp,
-            client_offload_mb_num=oam,
-            server_offload_mb_num=oam,
-            client_offload_model_state_sp_num=osr,
-            lora=lora,
-        )
-        sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-        sim_client_mem.append(sim_res.objective.client_peak_mem_alloc)
-        sim_server_mem.append(sim_res.objective.server_peak_mem_alloc)
-        sim_batch_time.append(sim_res.objective.batch_train_time)
-        # all_data.append(
-        #     {
-        #         'batch_size': var.batch_size,
-        #         'split_point': var.split_point,
-        #         'offload_mb_num': var.client_offload_mb_num,
-        #         'offload_ms_sp_num': var.client_offload_model_state_sp_num,
-        #         'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
-        #         'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
-        #         'batch_time': round(sim_res.objective.batch_train_time, 2),
-        #     }
-        # )
-    # print(round(sim_res.objective.server_peak_mem_alloc, 2))
-    real_data['sim_client_mem'] = sim_client_mem
-    real_data['sim_server_mem'] = sim_server_mem
-    real_data['sim_batch_time'] = sim_batch_time
-    df = pd.DataFrame(real_data)
-    df = df.round(2)
-    df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
+    # real_data = pd.read_csv(f'log/extracted_optim/{model_name.split("/")[-1]}{f'_lora' if lora else '' }.csv')
+    # # all_data = []
+    # sim_client_mem = []
+    # sim_server_mem = []
+    # sim_batch_time = []
+    # '''
+    # batch_size,split_point,offload_mb_num,offload_ms_sp_num,client_mem,server_mem,batch_time
+    # 8,1,8,1,7589.69,36199.55,7706.2
+    # 16,1,16,1,7857.76,36339.55,14582.88
+    # 24,1,24,1,8125.82,36479.55,21728.18
+    # '''
+    # for bs, sp, oam, osr in zip(
+    #     real_data['batch_size'].values, real_data['split_point'].values, real_data['offload_mb_num'].values, real_data['offload_ms_sp_num'].values
+    # ):
+    #     # for bs in real_data['batch_size'].values:
+    #     #     for sp in real_data['split_point'].values:
+    #     #         # osr = sp
+    #     #         # oam = bs
+    #     #         for oam in real_data['offload_mb_num'].values:
+    #     #             for osr in real_data['offload_ms_sp_num'].values:
+    #     var = MainVariable(
+    #         total_batch_num=1000,
+    #         batch_size=bs,
+    #         split_point=sp,
+    #         client_offload_mb_num=oam,
+    #         server_offload_mb_num=oam,
+    #         client_offload_model_state_sp_num=osr,
+    #         lora=lora,
+    #     )
+    #     sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+    #     sim_client_mem.append(sim_res.objective.client_peak_mem_alloc)
+    #     sim_server_mem.append(sim_res.objective.server_peak_mem_alloc)
+    #     sim_batch_time.append(sim_res.objective.batch_train_time)
+    #     # all_data.append(
+    #     #     {
+    #     #         'batch_size': var.batch_size,
+    #     #         'split_point': var.split_point,
+    #     #         'offload_mb_num': var.client_offload_mb_num,
+    #     #         'offload_ms_sp_num': var.client_offload_model_state_sp_num,
+    #     #         'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
+    #     #         'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
+    #     #         'batch_time': round(sim_res.objective.batch_train_time, 2),
+    #     #     }
+    #     # )
+    # # print(round(sim_res.objective.server_peak_mem_alloc, 2))
+    # real_data['sim_client_mem'] = sim_client_mem
+    # real_data['sim_server_mem'] = sim_server_mem
+    # real_data['sim_batch_time'] = sim_batch_time
+    # df = pd.DataFrame(real_data)
+    # df = df.round(2)
+    # df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)

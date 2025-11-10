@@ -45,9 +45,9 @@ if __name__ == "__main__":
     parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="Model card")
     parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
-    parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
+    parser.add_argument("-DS", "--dataset", type=str, default="dialogsum")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--mbps", type=int, default=300)
+    parser.add_argument("--mbps", type=int, default=230)
     parser.add_argument("--pmode", type=str, default="pdwc", help='mode of pipeline, "strict" or "loose" or "1f1b"')
     parser.add_argument("--offload_activation", "-OA", action="store_true")
     parser.add_argument("--offload_activation_mb_num", "-OAM", type=int, default=0)
@@ -75,9 +75,7 @@ if __name__ == "__main__":
     # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size
     if server_args.offload_activation or server_args.offload_activation_mb_num > 0:
-        server_args.offload_activation_mb_num = max(
-            0, min(server_args.offload_activation_mb_num)
-        )
+        server_args.offload_activation_mb_num = max(0, server_args.offload_activation_mb_num)
         server_args.offload_activation = True
     else:
         server_args.offload_activation_mb_num = 0

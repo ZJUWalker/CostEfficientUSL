@@ -135,7 +135,6 @@ class SocketCommunicator:
             if not length_bytes:
                 return None
             length = int.from_bytes(length_bytes, "big")
-
             data = bytearray()
             while len(data) < length:
                 packet = self.conn.recv(min(self.buffer_size, length - len(data)))

@@ -48,7 +48,6 @@ class ClientArgs:
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
     save_dir: str = 'log/profile'
     max_client_mem_mb: int = 12288  # 12GB
-    mps_thread_percentage: int = 100  # 100%
 
     def build_filename(self, prefix: str = "", ext: str = "json") -> str:
         """
@@ -735,7 +734,7 @@ class Client:
 
         total_bs = input_ids.size(0)
         micro_bs, grad_accum_steps = self._resolve_micro_bs(total_bs)
-        self.logger.info(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
+        # self.logger.info(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps}")
         self.profile_data = [GanttChartData(mini_batch_idx=i) for i in range(grad_accum_steps)]
         # —— 每个“大 batch”一次 step —— 梯度先清零
         self.optimizer_head.zero_grad(set_to_none=True)
@@ -765,9 +764,9 @@ class Client:
         batch_loss = self._train_minibatches(grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx)
         # --------------------------------------------------------main loop end--------------------------------------------------------
         self.logger.info(
-            f"[Client] big batch {global_batch_idx}: loss={batch_loss/grad_accum_steps:.4f},max mem alloc: {torch.cuda.max_memory_allocated(device=self.client_device)/1024**2:.2f} MB",
+            f"[Client] big batch {global_batch_idx}: loss={batch_loss:.4f},max mem alloc: {torch.cuda.max_memory_allocated(device=self.client_device)/1024**2:.2f} MB",
         )
-        print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps},loss = {batch_loss/grad_accum_steps:.4f}")
+        print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps},loss = {batch_loss:.4f}")
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
         # print(self.profile_data)
         if global_batch_idx == self.client_args.step:
@@ -798,11 +797,13 @@ class Client:
                 useable_batch_num = 0
                 for batch_idx, batch in enumerate(self.train_loader, 1):
                     input_ids = batch["input_ids"]
+                    if len(input_ids) != self.client_args.batch_size:
+                        print(f"batch_idx -> {batch_idx}, len(input_ids) -> {len(input_ids)}")
+                        continue
                     if len(input_ids[1]) != self.client_args.max_seq_len:
                         continue
                     useable_batch_num += 1
                     self.train_large_batch_overlapped_accum(batch, useable_batch_num)
-                    self.curr_step_idx += 1
                     if profile:
                         prof.step()
                     if useable_batch_num == self.client_args.step:

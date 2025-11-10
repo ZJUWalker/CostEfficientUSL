@@ -2,7 +2,7 @@ import os
 import argparse
 import warnings
 import sys
-
+import psutil
 
 import torch
 from usl.client import ClientArgs
@@ -35,7 +35,7 @@ def run_client(args: ClientArgs, profile=False):
     device = "cuda:1" if torch.cuda.is_available() else "cpu"
 
     log_dir = f"log/{args.model}/client"
-    logger = create_logger(log_file_name="client.log", console_output=False, log_dir=log_dir)
+    logger = create_logger(log_file_name=args.build_filename(ext="log").format(''), console_output=False, log_dir=log_dir)
     logger.info(f"client start with args: {args}")
 
     # ---------------load model and tokenizer --------------------------
@@ -83,7 +83,7 @@ def main():
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("--lora", action="store_true", default=False)
-    parser.add_argument("--mbps", type=int, default=300)
+    parser.add_argument("--mbps", type=int, default=230)
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--offload_activation_mb_num", "-OAM", type=int, default=0)
     parser.add_argument("--offload_model_state_sp_num", "-OSSP", type=int, default=0)
@@ -94,7 +94,6 @@ def main():
     parser.add_argument("--profile", "-PROF", action="store_true", default=False)
     parser.add_argument("--save_dir", type=str, default="log/profile")
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
-    parser.add_argument('--mps_gpu', type=int, default=100, help='The max percentage of GPU active threads during training.')
     args = parser.parse_args()
     profile = args.profile
     args = ClientArgs(
@@ -118,7 +117,6 @@ def main():
         save_dir=args.save_dir,
         pipeline_mode=convert_pipeline_mode(args.pmode),
         max_client_mem_mb=args.max_client_mem_gb * 1024,
-        mps_thread_percentage=args.mps_gpu,
     )
     # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size
