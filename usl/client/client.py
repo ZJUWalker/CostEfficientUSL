@@ -76,8 +76,6 @@ class ClientArgs:
         # parts.append('{}')
         if self.sort_batch != "no":
             parts.append(f"sort_{self.sort_batch}")
-        if self.mps_thread_percentage != 100:
-            parts.append(f"mps_{self.mps_thread_percentage}")
 
         base = "_".join(parts)
         # name = f"{prefix}{base}{suffix}.{ext}"
@@ -647,7 +645,6 @@ class Client:
         layer_num = self.client_args.split_point if self.client_args.split_point > 0 else 1
         data_dict = {
             "mbps": self.client_args.rate_mbps,
-            "gpu_threads_percentage": self.client_args.mps_thread_percentage,
             "split_point": self.client_args.split_point,
             "batch_size": self.client_args.batch_size,
             "micro_batch_size": self.client_args.micro_batch_size,
