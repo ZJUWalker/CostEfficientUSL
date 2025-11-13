@@ -77,7 +77,7 @@ def main():
     parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
-    parser.add_argument("-S", "--step", type=int, default=10)
+    parser.add_argument("-S", "--step", type=int, default=5)
     parser.add_argument("-DS", "--dataset", type=str, default="dialogsum")
     parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=4)

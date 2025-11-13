@@ -160,7 +160,7 @@ class OptimizerStateOffload:
         stream.wait_stream(self.compute_stream)  # offload should be done after compute
         # record start offload event used for profiling
         self.start_offload_event.record(stream)
-        self.offload_timestamp[0] = time.perf_counter()
+        self.offload_timestamp[0] = time.time()
 
         with torch.cuda.stream(stream):
             self._offload()
@@ -171,7 +171,7 @@ class OptimizerStateOffload:
         else:
             # wait for all optimizer state offloaded
             self.compute_stream.wait_stream(stream)
-            self.offload_timestamp[1] = time.perf_counter()
+            self.offload_timestamp[1] = time.time()
             # release GPU memory for optimizer state
 
     # wait for all optimizer state offloaded to finish
@@ -189,7 +189,7 @@ class OptimizerStateOffload:
         stream.wait_stream(self.compute_stream)  # reload should be done after compute
         # used for profiling
         self.start_reload_event.record(stream)
-        self.reload_timestamp[0] = time.perf_counter()
+        self.reload_timestamp[0] = time.time()
         with torch.cuda.stream(stream):
             self._reload()
 
@@ -199,7 +199,7 @@ class OptimizerStateOffload:
         else:
             # wait for all optimizer states reloaded
             self.compute_stream.wait_stream(stream)
-            self.reload_timestamp[1] = time.perf_counter()
+            self.reload_timestamp[1] = time.time()
 
     def wait_reload(self):
         if self.load_stream != self.compute_stream:

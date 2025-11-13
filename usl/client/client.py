@@ -353,7 +353,7 @@ class Client:
         y: torch.Tensor,
     ):
         torch.cuda.current_stream().synchronize()
-        self.profile_data[mb_idx].head_fwd_timestamp[0] = time.perf_counter()
+        self.profile_data[mb_idx].head_fwd_timestamp[0] = time.time()
         # if self.offload_activation:
         # if mb_idx < self.client_args.offload_activation_mb_num:
         #     with self.activation_offload_ctx:
@@ -364,6 +364,7 @@ class Client:
         with self.activation_offload_ctx if mb_idx < self.client_args.offload_activation_mb_num else nullcontext():
             head_outs = self.head_model.forward(x, m)
             torch.cuda.current_stream().synchronize()
+            self.profile_data[mb_idx].head_fwd_timestamp[1] = time.time()
             head_outs[0].requires_grad_(True)
             self.head_fwd_activation_dict[mb_idx] = head_outs[0]
             token = uuid.uuid4().hex
@@ -376,7 +377,6 @@ class Client:
                 is_activation=True,
                 phase="FWD" if mb_idx < grad_accum_steps - 1 else "BWD",
             )
-            self.profile_data[mb_idx].head_fwd_timestamp[1] = time.perf_counter()
             if self.curr_step_idx > 0:
                 self.head_fwd_time += self.profile_data[mb_idx].head_fwd_timestamp[1] - self.profile_data[mb_idx].head_fwd_timestamp[0]
             if mb_idx < self.client_args.offload_activation_mb_num:
@@ -387,11 +387,12 @@ class Client:
         # 解析 server 传来的 payload
         mb_idx = server_forward_output.mb_idx
         mb_total = server_forward_output.mb_total
-        torch.cuda.current_stream().synchronize()
-        self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.perf_counter()
+
         activation_cpu: torch.Tensor = server_forward_output.tensor
         activation_to_tail = activation_cpu.to(self.client_device, non_blocking=True).requires_grad_(True)
         # tail forward
+        torch.cuda.current_stream().synchronize()
+        self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.time()
         output: CausalLMOutputWithPast = self.tail_model.forward(
             hidden_states=activation_to_tail,
             attention_mask=self.atten_mask_dict[mb_idx],
@@ -399,7 +400,7 @@ class Client:
             labels=self.labels_dict[mb_idx],
         )
         torch.cuda.current_stream().synchronize()
-        self.profile_data[mb_idx].tail_fwd_timestamp[1] = time.perf_counter()
+        self.profile_data[mb_idx].tail_fwd_timestamp[1] = time.time()
         if self.curr_step_idx > 0:
             self.tail_fwd_time += self.profile_data[mb_idx].tail_fwd_timestamp[1] - self.profile_data[mb_idx].tail_fwd_timestamp[0]
         # 可选：按 accum 步数归一化，保证与“单大 batch 一次性训练”的梯度数值一致
@@ -417,7 +418,7 @@ class Client:
         mb_total: int,
     ) -> Tuple[Payload, torch.Tensor]:
         torch.cuda.current_stream().synchronize()
-        self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.perf_counter()
+        self.profile_data[mb_idx].tail_bwd_timestamp[0] = time.time()
         loss.backward()
         torch.cuda.current_stream().synchronize()
         grad_payload = self._to_cpu_payload(
@@ -429,7 +430,7 @@ class Client:
             is_activation=False,
             phase="BWD" if mb_idx < mb_total - 1 else "FWD",
         )
-        self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.perf_counter()
+        self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.time()
         if self.curr_step_idx > 0:
             self.tail_bwd_time += self.profile_data[mb_idx].tail_bwd_timestamp[1] - self.profile_data[mb_idx].tail_bwd_timestamp[0]
         return grad_payload
@@ -439,16 +440,17 @@ class Client:
         mb_idx = server_bwd_output.mb_idx
         grad_cpu: torch.Tensor = server_bwd_output.tensor
         # load grad and activation
-        torch.cuda.current_stream().synchronize()
-        self.profile_data[mb_idx].head_bwd_timestamp[0] = time.perf_counter()
+
         grad_to_head = grad_cpu.to(self.client_device, non_blocking=True)
         head_activation = self.head_fwd_activation_dict[mb_idx]
         # real head model backward
         if mb_idx < self.client_args.offload_activation_mb_num:
             self.activation_offload_handler.on_minibatch_commit_backward()
+        torch.cuda.current_stream().synchronize()
+        self.profile_data[mb_idx].head_bwd_timestamp[0] = time.time()
         head_activation.backward(grad_to_head)
         torch.cuda.current_stream().synchronize()
-        self.profile_data[mb_idx].head_bwd_timestamp[1] = time.perf_counter()
+        self.profile_data[mb_idx].head_bwd_timestamp[1] = time.time()
         if self.curr_step_idx > 0:
             self.head_bwd_time += self.profile_data[mb_idx].head_bwd_timestamp[1] - self.profile_data[mb_idx].head_bwd_timestamp[0]
         # remove not needed tensors to save memory
@@ -476,9 +478,9 @@ class Client:
             try:
                 payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
-                    start_send = time.perf_counter()
+                    start_send = time.time()
                     self.communicator.send(payload)
-                    end_time = time.perf_counter()
+                    end_time = time.time()
                     if isinstance(payload, dict) and "stop" in payload:
                         print("send stop flag")
                         continue
@@ -501,9 +503,9 @@ class Client:
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
                     self.sent_payload_bytes += payload.payload_nbytes()
-                    start_send = time.perf_counter()
+                    start_send = time.time()
                     self.communicator.send(payload)
-                    end_time = time.perf_counter()
+                    end_time = time.time()
                     mb_idx = payload.mb_idx
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[0] = start_send
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[1] = end_time
@@ -774,7 +776,7 @@ class Client:
 
     def train_epoch(self, profile: bool = False):
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
-        start_time = time.perf_counter()
+        start_time = time.time()
         send_future = self.main_executor.submit(self._head_client_send)
         recv_future = self.main_executor.submit(self._handle_server_send)
         for epoch in range(self.local_ep):
@@ -791,7 +793,7 @@ class Client:
                 with_stack=True,
                 with_flops=True,
             ) as prof:
-                useable_batch_num = 0
+                # global_batch_idx = 0
                 for batch_idx, batch in enumerate(self.train_loader, 1):
                     input_ids = batch["input_ids"]
                     if len(input_ids) != self.client_args.batch_size:
@@ -799,11 +801,15 @@ class Client:
                         continue
                     if len(input_ids[1]) != self.client_args.max_seq_len:
                         continue
-                    useable_batch_num += 1
-                    self.train_large_batch_overlapped_accum(batch, useable_batch_num)
+                    # global_batch_idx += 1
+                    self.train_large_batch_overlapped_accum(batch, self.curr_step_idx)
+                    self.curr_step_idx+=1
                     if profile:
                         prof.step()
-                    if useable_batch_num == self.client_args.step:
+                    if self.curr_step_idx == self.client_args.step:
+                        # if global_batch_idx == self.client_args.step:
+                        print(f"client finished training and need reduce profile data")
+                        self.activation_to_server_queue.put({"stop": True})
                         break
         # self.stop_event.set()
         # wait for send/recv to finish
@@ -811,5 +817,5 @@ class Client:
         recv_future.result()
         self.communicator.close()
         self.main_executor.shutdown(wait=True)
-        end_time = time.perf_counter()
+        end_time = time.time()
         self.logger.info(f"[Client Finished] epoch time: {end_time - start_time:.2f} s")

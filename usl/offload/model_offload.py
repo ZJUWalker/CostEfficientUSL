@@ -92,7 +92,7 @@ class ModelParamOffload:
         # record start offload event used for profiling
         self.start_offload_event.record(stream)
         self.start_offload_event.synchronize()
-        self.offload_timestamp[0] = time.perf_counter()
+        self.offload_timestamp[0] = time.time()
         # ----------------------------------------------------
         with torch.cuda.stream(stream):
             # Offload model parameters to CPU
@@ -108,7 +108,7 @@ class ModelParamOffload:
             else:
                 # wait for all tensors offloaded
                 self.compute_stream.wait_stream(stream)
-                self.offload_timestamp[1] = time.perf_counter()
+                self.offload_timestamp[1] = time.time()
                 # release GPU memory
                 self._release_gpu_memory()
 
@@ -143,7 +143,7 @@ class ModelParamOffload:
         # used for profiling
         self.start_reload_event.record(stream)
         self.start_reload_event.synchronize()
-        self.reload_timestamp[0] = time.perf_counter()
+        self.reload_timestamp[0] = time.time()
         # ----------------------------------------------------
         with torch.cuda.stream(stream):
             # Reload model parameters from CPU to GPU
@@ -158,7 +158,7 @@ class ModelParamOffload:
             else:
                 # wait for all tensors reloaded
                 self.compute_stream.wait_stream(stream)
-                self.reload_timestamp[1] = time.perf_counter()
+                self.reload_timestamp[1] = time.time()
 
     def wait_reload(self):
         if self.load_stream != self.compute_stream:

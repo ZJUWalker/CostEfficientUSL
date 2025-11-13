@@ -231,7 +231,7 @@ class SingleServer:
     ) -> torch.Tensor:
         try:
             torch.cuda.current_stream().synchronize()
-            self.profile_data[mb_idx].server_fwd_timestamp[0] = time.perf_counter()
+            self.profile_data[mb_idx].server_fwd_timestamp[0] = time.time()
             hidden_status_from_head = activation.to(self.server_device, non_blocking=activation.is_pinned())
             hidden_status_from_head.requires_grad_(True)
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
@@ -263,7 +263,7 @@ class SingleServer:
             }
             activation_to_tail = server_output.detach().cpu()
             torch.cuda.current_stream().synchronize()
-            self.profile_data[mb_idx].server_fwd_timestamp[1] = time.perf_counter()
+            self.profile_data[mb_idx].server_fwd_timestamp[1] = time.time()
             if self.global_step > 0:
                 self.server_fwd_time += self.profile_data[mb_idx].server_fwd_timestamp[1] - self.profile_data[mb_idx].server_fwd_timestamp[0]
             return activation_to_tail
@@ -279,13 +279,13 @@ class SingleServer:
             server_output = ctx["server_output"]
             hidden_from_head = ctx["hidden_from_head"]
             torch.cuda.current_stream().synchronize()
-            self.profile_data[mb_idx].server_bwd_timestamp[0] = time.perf_counter()
+            self.profile_data[mb_idx].server_bwd_timestamp[0] = time.time()
             server_grad = server_grad.to(self.server_device, non_blocking=server_grad.is_pinned())
             if mb_idx < self.server_args.offload_activation_mb_num:
                 self.activation_offload_handler.on_minibatch_commit_backward()
             server_output.backward(server_grad, retain_graph=False)
             grad_to_head = hidden_from_head.grad.cpu()
-            self.profile_data[mb_idx].server_bwd_timestamp[1] = time.perf_counter()
+            self.profile_data[mb_idx].server_bwd_timestamp[1] = time.time()
             if self.global_step > 0:
                 self.server_bwd_time += self.profile_data[mb_idx].server_bwd_timestamp[1] - self.profile_data[mb_idx].server_bwd_timestamp[0]
             return grad_to_head
@@ -306,9 +306,9 @@ class SingleServer:
                 try:
                     response: Payload = self.activation_to_tail_queue.get_nowait()
                     if response is not None:
-                        start_send_time = time.perf_counter()
+                        start_send_time = time.time()
                         self.communicator.send(response)
-                        end_send_time = time.perf_counter()
+                        end_send_time = time.time()
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[1] = end_send_time
                         if self.global_step > 0:
@@ -323,9 +323,9 @@ class SingleServer:
                 try:
                     response: Payload = self.gradient_to_head_queue.get_nowait()
                     if response is not None:  # 可能是 None（队列空）
-                        start_send_time = time.perf_counter()
+                        start_send_time = time.time()
                         self.communicator.send(response)
-                        end_send_time = time.perf_counter()
+                        end_send_time = time.time()
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[1] = end_send_time
                         if self.global_step > 0:
@@ -393,9 +393,9 @@ class SingleServer:
             self.shutdown()
 
     def _do_one_fwd_task(self, block=False) -> Payload:
-        fwd_wait_start = time.perf_counter()
+        fwd_wait_start = time.time()
         data: Optional[Dict | Payload] = self.activation_from_head_queue.get_nowait() if not block else self.activation_from_head_queue.get(block)
-        self.idle_time += time.perf_counter() - fwd_wait_start
+        self.idle_time += time.time() - fwd_wait_start
 
         token = data.token
         group_id = data.group_id
@@ -440,9 +440,9 @@ class SingleServer:
         return data
 
     def _do_one_bwd_task(self, block=False) -> Payload:
-        bwd_wait_start = time.perf_counter()
+        bwd_wait_start = time.time()
         data: Payload = self.gradient_from_tail_queue.get_nowait() if not block else self.gradient_from_tail_queue.get(block)
-        self.idle_time += time.perf_counter() - bwd_wait_start
+        self.idle_time += time.time() - bwd_wait_start
 
         token = data.token
         group_id = data.group_id
