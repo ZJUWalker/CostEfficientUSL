@@ -5,7 +5,7 @@ from torch.nn import CrossEntropyLoss
 from transformers import LlamaPreTrainedModel, LlamaConfig, LlamaForCausalLM
 from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaRotaryEmbedding
 
 # from transformers.modeling_attn_mask_utils import
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -26,6 +26,8 @@ class LlamaServer(PreTrainedModel):
         for i in range(from_l, to_l):
             hidden_layers[i].self_attn.layer_idx = i
             self.layers.append(hidden_layers[i])
+        # 加载 RotaryEmbedding
+        self.rotary_emb = pretrained_model.model.rotary_emb
 
     def _load_weight_from_pretrained_model_physically(self, pretrained_model: LlamaForCausalLM, from_l, to_l):
         hidden_layers = pretrained_model.model.layers
@@ -33,6 +35,9 @@ class LlamaServer(PreTrainedModel):
         self.layers = nn.ModuleList([LlamaDecoderLayer(self.config, layer_idx + to_l) for layer_idx in range(to_l - from_l)])
         for i in range(from_l, to_l):
             self.layers[i - from_l].load_state_dict(hidden_layers[i].state_dict())
+        # 加载 RotaryEmbedding
+        self.rotary_emb = LlamaRotaryEmbedding(config=pretrained_model.config)
+        self.rotary_emb.load_state_dict(pretrained_model.model.rotary_emb.state_dict())
 
     def load_from_pretrained_model(self, pretrained_model: LlamaForCausalLM, logical=True):
         from_l = self.split_config.head_layer_num
@@ -50,7 +55,10 @@ class LlamaServer(PreTrainedModel):
         **kwargs
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         # 来自head model的输出
-
+        if position_embeddings is None:
+            # calculate position_embeddings
+            position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for decoder_layer in self.layers:
             # print("hidden_states:", hidden_states)
             layer_outputs = decoder_layer(

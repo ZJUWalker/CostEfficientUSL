@@ -31,6 +31,8 @@ class Qwen3Server(PreTrainedModel):
         for i in range(from_l, to_l):
             hidden_layers[i].self_attn.layer_idx = i
             self.layers.append(hidden_layers[i])
+        # 加载 RotaryEmbedding
+        self.rotary_emb = pretrained_model.model.rotary_emb
 
     def _load_weight_from_pretrained_model_physically(self, pretrained_model: Qwen3ForCausalLM, from_l, to_l):
         hidden_layers = pretrained_model.model.layers
@@ -38,6 +40,9 @@ class Qwen3Server(PreTrainedModel):
         self.layers = nn.ModuleList([Qwen3DecoderLayer(self.config, layer_idx + to_l) for layer_idx in range(to_l - from_l)])
         for i in range(from_l, to_l):
             self.layers[i - from_l].load_state_dict(hidden_layers[i].state_dict())
+        # 加载 RotaryEmbedding
+        self.rotary_emb = Qwen3RotaryEmbedding(config=pretrained_model.config)
+        self.rotary_emb.load_state_dict(pretrained_model.model.rotary_emb.state_dict())
 
     def load_from_pretrained_model(self, pretrained_model: Qwen3ForCausalLM, logical=True):
         from_l = self.split_config.head_layer_num
@@ -55,7 +60,10 @@ class Qwen3Server(PreTrainedModel):
         **kwargs
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         # 来自head model的输出
-
+        if position_embeddings is None:
+            # calculate position_embeddings
+            position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for decoder_layer in self.layers:
 
             layer_outputs = decoder_layer(

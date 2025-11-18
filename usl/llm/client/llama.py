@@ -122,6 +122,8 @@ class LlamaClientTail(PreTrainedModel):
         # 加载最后的Norm和lm_head
         self.norm = pretrained_model.model.norm
         self.lm_head = pretrained_model.lm_head
+        # 加载 RotaryEmbedding
+        self.rotary_emb = pretrained_model.model.rotary_emb
 
     def _load_weight_from_pretrained_model_physically(self, pretrained_model: LlamaForCausalLM, from_l, to_l):
         hidden_layers = pretrained_model.model.layers
@@ -133,6 +135,8 @@ class LlamaClientTail(PreTrainedModel):
         self.norm.load_state_dict(pretrained_model.model.norm.state_dict())
         self.lm_head = nn.Linear(pretrained_model.config.hidden_size, pretrained_model.config.vocab_size, bias=False)
         self.lm_head.load_state_dict(pretrained_model.lm_head.state_dict())
+        self.rotary_emb = LlamaRotaryEmbedding(config=pretrained_model.config)
+        self.rotary_emb.load_state_dict(pretrained_model.model.rotary_emb.state_dict())
 
     def load_from_pretrained_model(self, pretrained_model: LlamaForCausalLM, logical=True):
         from_l = self.split_config.head_layer_num + self.split_config.server_layer_num
@@ -151,6 +155,10 @@ class LlamaClientTail(PreTrainedModel):
         lm_mask: Optional[torch.LongTensor] = None,
         **kwargs
     ) -> CausalLMOutputWithPast:
+        if position_embeddings is None:
+            # calculate position_embeddings
+            position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for decoder_layer in self.layers:
             layer_outputs = decoder_layer(
                 hidden_states,
