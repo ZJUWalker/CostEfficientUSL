@@ -13,59 +13,10 @@ from typing import Dict, Any, Optional, List, Tuple, Type, Union
 import torch
 import torch.nn as nn
 
+from usl.server.base import PipelineMode, ServerArgs
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData
 from usl.offload import CpuOffloadHookWithOffloadHandler, AsyncDoubleBufferGroupOffloadHandler
-
-
-class PipelineMode(Enum):
-    GPIPE = "gpipe"
-    PIPE_DREAM_STRICT = "pipedream_strict"  # use pipedream
-    PIPE_DREAM_WC = "pipedream_wc"  # use pipedream's warm-up and cool-down phases,no 1f1b
-    PIPE_DREAM_WC_EAGER = "pipedream_wc_eager"  # use pipedream's warm-up and cool-down phases, no 1f1b,but eager
-    NAIVE = "naive"
-
-
-def convert_pipeline_mode(pmode: str) -> str:
-
-    try:
-        pmode = pmode.lower()
-        if 'pds' in pmode:
-            return PipelineMode.PIPE_DREAM_STRICT
-        elif 'pdwc' in pmode and 'e' not in pmode:
-            return PipelineMode.PIPE_DREAM_WC
-        elif 'pdwce' in pmode:
-            return PipelineMode.PIPE_DREAM_WC_EAGER
-        return PipelineMode(value=pmode)
-    except KeyError:
-        return PipelineMode.NAIVE
-
-
-# -------------------------------
-# Args
-# -------------------------------
-@dataclass
-class ServerArgs:
-    port: int = 8000
-    step: int = 5
-    use_lora: bool = False
-    model: str = "meta-llama/llama3.2-1b"
-    server_device: str = "cuda:0"
-    split_point: int = 2
-    dataset: str = "gsm8k"
-    learning_rate: float = 5e-4
-    pipeline_mode: PipelineMode = PipelineMode.GPIPE  # "strict" or "loose"
-    # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
-    rate_limit_mbps: float = 10
-    offload_activation: bool = False
-    offload_activation_mb_num: int = 0
-    micro_batch_size: int = 1
-    batch_size: int = 4
-    prof: bool = False
-
-    def effective_rate_limit(self) -> float:
-        # Prefer the correctly spelled one if provided
-        return self.rate_limit_mbps if self.rate_limit_mbps is not None else self.rate_limit_mbps
 
 
 # -------------------------------
