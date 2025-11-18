@@ -208,11 +208,20 @@ class Client:
         self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
 
         # ---- Communicator
-        self.communicator = SocketCommunicator(
+        # ---- Communicators：发送一个，接收一个
+        self.send_communicator = SocketCommunicator(
             host=self.client_args.host,
             is_server=False,
-            port=client_args.port,
-            buffer_size=1024 * 4,  # 4KB
+            port=client_args.port,  # 比如连 rank0
+            buffer_size=1024 * 4,
+            rate_limit_mbps=client_args.rate_mbps,
+        )
+
+        self.recv_communicator = SocketCommunicator(
+            host=self.client_args.host,
+            is_server=False,
+            port=client_args.port + 1,  # 比如连 rankN
+            buffer_size=1024 * 4,
             rate_limit_mbps=client_args.rate_mbps,
         )
 
@@ -462,24 +471,28 @@ class Client:
         )
         pass
 
-    def _check_communication(self):
-        # 异步 send
-        if not self.communicator.conn:
-            # Wait for run() to set a connection; this path is rarely hit.
-            while not self.stop_event.is_set() and not self.communicator.conn:
+    def _check_send_comm(self):
+        if not self.send_communicator.conn:
+            while not self.stop_event.is_set() and not self.send_communicator.conn:
                 time.sleep(0.05)
-        return self.communicator.conn
+        return self.send_communicator.conn
+
+    def _check_recv_comm(self):
+        if not self.recv_communicator.conn:
+            while not self.stop_event.is_set() and not self.recv_communicator.conn:
+                time.sleep(0.05)
+        return self.recv_communicator.conn
 
     # TODO:处理client端的send操作
     @torch.no_grad()
     def _head_client_send(self):
-        self._check_communication()
+        self._check_send_comm()
         while not self.stop_event.is_set():
             try:
                 payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
                     start_send = time.time()
-                    self.communicator.send(payload)
+                    self.send_communicator.send(payload)
                     end_time = time.time()
                     if isinstance(payload, dict) and "stop" in payload:
                         print("send stop flag")
@@ -504,7 +517,7 @@ class Client:
                     # print(f'send gradient payload')
                     self.sent_payload_bytes += payload.payload_nbytes()
                     start_send = time.time()
-                    self.communicator.send(payload)
+                    self.send_communicator.send(payload)
                     end_time = time.time()
                     mb_idx = payload.mb_idx
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[0] = start_send
@@ -521,11 +534,11 @@ class Client:
     # TODO: 处理recv操作
     @torch.no_grad()
     def _handle_server_send(self):
-        self._check_communication()
-        self.communicator.conn.settimeout(60.0)
+        self._check_recv_comm()
+        self.recv_communicator.conn.settimeout(60.0)
         while not self.stop_event.is_set():
             try:
-                data: Optional[Dict | Payload] = self.communicator.receive()
+                data: Optional[Dict | Payload] = self.recv_communicator.receive()
             except Exception as e:
                 break
             if data is None:
@@ -803,7 +816,7 @@ class Client:
                         continue
                     # global_batch_idx += 1
                     self.train_large_batch_overlapped_accum(batch, self.curr_step_idx)
-                    self.curr_step_idx+=1
+                    self.curr_step_idx += 1
                     if profile:
                         prof.step()
                     if self.curr_step_idx == self.client_args.step:
@@ -815,7 +828,8 @@ class Client:
         # wait for send/recv to finish
         send_future.result()
         recv_future.result()
-        self.communicator.close()
+        self.send_communicator.close()
+        self.recv_communicator.close()
         self.main_executor.shutdown(wait=True)
         end_time = time.time()
         self.logger.info(f"[Client Finished] epoch time: {end_time - start_time:.2f} s")

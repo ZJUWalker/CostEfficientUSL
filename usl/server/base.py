@@ -8,6 +8,7 @@ MSG_TYPE_ACTIVATION = 1
 MSG_TYPE_GRADIENT = 2
 MSG_TYPE_ATTENTION_MASK = 3
 MSG_TYPE_POSITION_EMBEDDINGS = 4
+MSG_TYPE_STOP = 5
 
 
 class PipelineMode(Enum):
@@ -70,7 +71,7 @@ class AtomicInt:
         with self._lock:
             return self._value
 
-    def set(self, value: int):
+    def set(self, value: int = 0):
         """线程安全地写入整数"""
         with self._lock:
             self._value = value

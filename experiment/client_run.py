@@ -9,7 +9,7 @@ from usl.client import ClientArgs
 from usl.utils.log_utils import create_logger
 from usl.utils.load_utils import load_client, load_dataset
 from usl.utils.exp import set_seed
-from usl.server.single_server import PipelineMode, convert_pipeline_mode
+from usl.server.base import *
 from usl.client import (
     GPipeClientTrainer,
     SequentialClientTrainer,

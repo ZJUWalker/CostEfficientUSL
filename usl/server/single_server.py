@@ -44,7 +44,13 @@ class SingleServer:
         self.matrix_logger = matrix_logger
 
         # ---- Communicator
-        self.communicator = SocketCommunicator(
+        self.send_communicator = SocketCommunicator(
+            is_server=True,
+            port=server_args.port + 1,
+            buffer_size=1024 * 4,  # 4KB
+            rate_limit_mbps=server_args.effective_rate_limit(),
+        )
+        self.recv_communicator = SocketCommunicator(
             is_server=True,
             port=server_args.port,
             buffer_size=1024 * 4,  # 4KB
@@ -112,16 +118,17 @@ class SingleServer:
         self.compute_future = self.main_executor.submit(self._compute_loop_wrapper)
 
         # Accept a single client (blocking here; compute loop runs on executor)
-        while not self.stop_event.is_set():
-            self.communicator.accept_client()
-            if self.communicator.conn is None:
-                # accept_client returns (None, None) on timeout; keep waiting unless stopping
-                continue
-            self.logger.info(f"Connected from {self.communicator.conn}")
-            # Start client communication loop on executor
-            self.client_future = self.main_executor.submit(self._client_send_loop_wrapper)
-            self.server_future = self.main_executor.submit(self._server_send_loop_wrapper)
-            break
+        # while not self.stop_event.is_set():
+        self.send_communicator.accept_client()
+        self.recv_communicator.accept_client()
+        # if self.send_communicator.conn is None:
+        # accept_client returns (None, None) on timeout; keep waiting unless stopping
+        # continue
+        self.logger.info(f"Connected from {self.send_communicator.conn}")
+        # Start client communication loop on executor
+        self.client_future = self.main_executor.submit(self._client_send_loop_wrapper)
+        self.server_future = self.main_executor.submit(self._server_send_loop_wrapper)
+        # break
 
         self.logger.info("Client connected")
 
@@ -131,7 +138,7 @@ class SingleServer:
             print("Shutting down server...")
             self.stop_event.set()
             try:
-                self.communicator.close()
+                self.send_communicator.close()
             except Exception as e:
                 self.logger.error(f"Error during shutdown: {e}")
 
@@ -246,19 +253,19 @@ class SingleServer:
 
     def _handle_server_send(self):
         try:
-            if not self.communicator.conn:
-                # Wait for run() to set a connection; this path is rarely hit.
-                while not self.stop_event.is_set() and not self.communicator.conn:
-                    time.sleep(0.05)
-            if not self.communicator.conn:
-                return
+            # if not self.send_communicator.conn:
+            #     # Wait for run() to set a connection; this path is rarely hit.
+            #     while not self.stop_event.is_set() and not self.send_communicator.conn:
+            #         time.sleep(0.05)
+            # if not self.send_communicator.conn:
+            #     return
             while not self.stop_event.is_set():
 
                 try:
                     response: Payload = self.activation_to_tail_queue.get_nowait()
                     if response is not None:
                         start_send_time = time.time()
-                        self.communicator.send(response)
+                        self.send_communicator.send(response)
                         end_send_time = time.time()
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_fwd_send_timestamp[1] = end_send_time
@@ -275,7 +282,7 @@ class SingleServer:
                     response: Payload = self.gradient_to_head_queue.get_nowait()
                     if response is not None:  # 可能是 None（队列空）
                         start_send_time = time.time()
-                        self.communicator.send(response)
+                        self.send_communicator.send(response)
                         end_send_time = time.time()
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[0] = start_send_time
                         self.profile_data[response.mb_idx].server_bwd_send_timestamp[1] = end_send_time
@@ -288,7 +295,7 @@ class SingleServer:
                 time.sleep(0.001)
             print("_handle_server_send finished")
         except Exception as e:
-            self.logger.error(f"Client {self.communicator.addr} error: {e}")
+            self.logger.error(f"Client {self.send_communicator.addr} error: {e}")
         finally:
             self.shutdown()
         pass
@@ -296,23 +303,23 @@ class SingleServer:
     # --------------- Client loop ---------------
     def _handle_client_send(self):
         try:
-            if not self.communicator.conn:
-                # Wait for run() to set a connection; this path is rarely hit.
-                while not self.stop_event.is_set() and not self.communicator.conn:
-                    time.sleep(0.05)
-            if not self.communicator.conn:
-                return
+            # if not self.recv_communicator.conn:
+            #     # Wait for run() to set a connection; this path is rarely hit.
+            #     while not self.stop_event.is_set() and not self.recv_communicator.conn:
+            #         time.sleep(0.05)
+            # if not self.recv_communicator.conn:
+            #     return
 
-            self.communicator.conn.settimeout(60.0)
+            self.recv_communicator.conn.settimeout(60.0)
             while not self.stop_event.is_set():
 
-                data: Union[Payload, Dict] = self.communicator.receive()
+                data: Union[Payload, Dict] = self.recv_communicator.receive()
                 if data is None:
-                    self.logger.info(f"Client {self.communicator.addr} disconnected")
+                    self.logger.info(f"Client {self.recv_communicator.addr} disconnected")
                     break
                 if isinstance(data, dict) and "stop" in data.keys():
                     print("Client requested stop")
-                    self.communicator.send(
+                    self.send_communicator.send(
                         {
                             "profile": self.profile_data,
                             "max_mem_alloc": round(self.max_cuda_memory_allocated / 1024**2, 4),
@@ -329,7 +336,7 @@ class SingleServer:
                             "file_suffix": f'soa_{self.server_args.offload_activation_mb_num}' if self.server_args.offload_activation else '',
                         }
                     )
-                    self.logger.info(f"Client {self.communicator.addr} requested profile data and finished training")
+                    self.logger.info(f"Client {self.send_communicator.addr} requested profile data and finished training")
                     break
                 data.tensor = data.tensor.pin_memory()  # 锁页内存
                 if data.is_activation:
@@ -339,7 +346,7 @@ class SingleServer:
             print("_handle_client_send finished")
 
         except Exception as e:
-            self.logger.error(f"Client {self.communicator.addr} error: {e} ,line 398")
+            self.logger.error(f"Client {self.send_communicator.addr} error: {e} ,line 398")
         finally:
             self.shutdown()
 

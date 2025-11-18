@@ -3,38 +3,43 @@ import time
 import torch
 import argparse
 from transformers import AutoConfig
-
-# from usl.server.single_server import PipelineMode, SingleServer, ServerArgs, convert_pipeline_mode
+from usl.server.base import *
 from usl.utils.exp import set_seed
-from usl.utils.load_utils import *
+from usl.utils.load_utils import load_stage_server_model
 from usl.utils.log_utils import create_logger
-from usl.server import *
+from usl.server.multi_node_server_gpipe import GpipeServer
+
+# from usl.server import *
+import torch.multiprocessing as mp
+import torch.distributed as dist
 
 SEED = 0
+os.environ['WORLD_SIZE'] = str(torch.cuda.device_count())
+os.environ['MASTER_ADDR'] = 'localhost'
+os.environ['MASTER_PORT'] = '12355'
 
 
-def run_server(server_args: ServerArgs):
+def run_server(rank, world_size, server_args: ServerArgs):
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    # rank = dist.get_rank()
+    # world_size = dist.get_world_size()
     # =====================================================================
     log_dir = f"log/{server_args.model}/server"
-    logger = create_logger(log_file_name="training_steps.log", log_dir=log_dir, console_output=False)
-    matrix_logger = create_logger(
-        log_file_name="training_metrics.log",
-        log_dir=log_dir,
-        console_output=False,
-    )
-    matrix_logger.info(f"step | mem alloc(GB) | mem reserved(GB) | avg_loss ")
-    print(f"Server args: {server_args}")
+    logger = create_logger(log_file_name=f"training_steps_r_{rank}_w_{world_size}.log", log_dir=log_dir, console_output=False)
+    # print(f"Server args: {server_args}")
     # =====================================================================
     model_dir = os.path.join("data/models", server_args.model)
     split_point = server_args.split_point
-    server_model = load_server_model(model_dir, server_args.model, split_point, use_lora=server_args.use_lora)  # use_lora=True for LoRA
+    server_model = load_stage_server_model(
+        model_dir, server_args.model, split_point, rank, world_size, use_lora=server_args.use_lora
+    )  # use_lora=True for LoRA
     # =====================================================================
     torch.cuda.init()
-    torch.cuda.set_device(server_args.server_device)
+    torch.cuda.set_device(rank)
+    server_args.server_device = f'cuda:{rank}'
     torch.cuda.reset_peak_memory_stats()
-    print(f"Server device: {server_args.server_device}")
-    server = SingleServer(server_args, server_model, logger=logger, matrix_logger=matrix_logger)
-    print("Server started")
+    server = GpipeServer(server_args, server_model, logger=logger)
+    print(f"[rank {rank}] Server started")
     server.run()
 
 
@@ -44,7 +49,7 @@ if __name__ == "__main__":
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="Model card")
-    parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
+    # parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-DS", "--dataset", type=str, default="dialogsum")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
@@ -61,7 +66,6 @@ if __name__ == "__main__":
         step=args.step,
         use_lora=args.lora,
         model=args.model,
-        server_device=args.server_device,
         split_point=args.split_point,
         dataset=args.dataset,
         learning_rate=args.learning_rate,
@@ -85,4 +89,15 @@ if __name__ == "__main__":
     if server_args.offload_activation and server_args.pipeline_mode != PipelineMode.PIPE_DREAM_WC:
         print("Warning!Offload activation is only supported in pipedream_wc mode, or else it will not be effective.")
     set_seed(SEED)
-    run_server(server_args)
+    # run_server(server_args)
+
+    world_size = int(os.environ['WORLD_SIZE'])
+    mp.spawn(
+        run_server,
+        args=(
+            world_size,
+            server_args,
+        ),
+        nprocs=world_size,
+        join=True,
+    )

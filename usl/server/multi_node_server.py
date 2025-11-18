@@ -35,7 +35,6 @@ class PipelineServer(ABC):
 
         # ---- Config & logging
         self.server_args = server_args
-        self.device = torch.cuda.device(dist.get_rank())
         self.logger: logging.Logger = logger or logging.getLogger(__name__)
 
         # ---- Profile Metrics
@@ -53,8 +52,11 @@ class PipelineServer(ABC):
         self.client_future: Optional[Future] = None
         self.server_future: Optional[Future] = None
         self.stop_event = threading.Event()
-
+        # ---- init communication and pipeline info
+        self._init_comminication()
         # ---- CUDA streams
+        self.device = torch.cuda.device(dist.get_rank())
+        print(f"Rank {self.rank} Device {self.device}")
         torch.cuda.set_stream(torch.cuda.Stream(self.device))  # set cuda compute stream
         self.load_stream = torch.cuda.Stream(self.device)  # set cuda load stream
         self.offload_stream = torch.cuda.Stream(self.device)  # set cuda offload stream
@@ -63,7 +65,8 @@ class PipelineServer(ABC):
 
         # ---- Model & optimizer
         self.lr = server_args.learning_rate
-        self.trunk_model = server_model.to(self.device).train()
+        self.trunk_model = server_model
+        self.trunk_model.to(f'cuda:{self.rank}')
         self.optimizer: torch.optim.Optimizer = optimizer_clz(self.trunk_model.parameters(), lr=self.lr)
         self.offload_activation_mb_num = self.server_args.offload_activation_mb_num
         if self.offload_activation_mb_num > 0:
@@ -73,14 +76,15 @@ class PipelineServer(ABC):
                 offload_stream=self.offload_stream,
             )
             self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(self.activation_offload_handler)
-        # init communication and pipeline info
-        self._init_comminication()
-        self._init_pipeline_info()
 
     def _init_comminication(self):
         # thread-safe queues for tensor send and recv
+        self._init_pipeline_info()
         self._init_tensor_queues()
         # ---- Communicator
+        # mutil processing node server(GPU2GPU communication)
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
         # the first and last node need a socket to communicate with the client
         if self.rank == 0 or self.rank == self.world_size - 1:
             self.communicator = SocketCommunicator(
@@ -89,11 +93,6 @@ class PipelineServer(ABC):
                 buffer_size=1024 * 4,  # 4KB
                 rate_limit_mbps=self.server_args.rate_limit_mbps,
             )
-        # mutil processing node server(GPU2GPU communication)
-        self.rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
-        dist.init_process_group(backend="nccl")
-
         # ---- Micro-batch context/state
         # self.ctx: Dict[str, Dict[str, torch.Tensor]] = {}
         # self.group_state: Dict[str, Dict[str, Any]] = {}
@@ -151,6 +150,8 @@ class PipelineServer(ABC):
             self._compute_task()
         except Exception as e:
             self.logger.exception(f"Compute loop crashed: {e}")
+        finally:
+            print(f"Rank {self.rank} Compute loop exited")
             self.shutdown()
 
     @abstractmethod
@@ -225,6 +226,7 @@ class PipelineServer(ABC):
         pass
 
     def _put_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
+        print(f'put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
         if msg_type == MSG_TYPE_ACTIVATION:
             self.activation_to_next_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
         elif msg_type == MSG_TYPE_GRADIENT:
@@ -234,13 +236,47 @@ class PipelineServer(ABC):
         else:
             raise ValueError(f"Unknown msg_type: {msg_type}")
 
+    def _recv_mb_fwd_tensors(self, dtype: torch.dtype, block: bool = False):
+        """
+        接收前向传播的激活张量和attention mask
+        """
+        # recv activation
+        self._recv_tensor(self.recv_fwd_acti_rank, dtype, block=block)
+        if self.recv_fwd_acti_rank != -1:
+            # recv attention mask
+            self._recv_tensor(self.recv_fwd_acti_rank, dtype, block=block)
+
+    def _recv_mb_bwd_grads(self, dtype: torch.dtype, block: bool = False):
+        """
+        接收反向传播的梯度张量
+        """
+        # recv gradient
+        self._recv_tensor(self.recv_bwd_grad_rank, dtype, block=block)
+
+    def _send_mb_fwd_tensors(self, block: bool = False):
+        """
+        发送前向传播的激活张量和attention mask
+        """
+        # send activation
+        self._send_tensor(self.send_fwd_acti_rank, self.activation_from_pre_rank_queue, block=block)
+        if self.send_fwd_acti_rank != -1:
+            # send attention mask
+            self._send_tensor(self.send_fwd_acti_rank, self.attention_mask_queue, block=block)
+
+    def _send_mb_bwd_grads(self, block: bool = False):
+        """
+        发送反向传播的梯度张量
+        """
+        # send gradient
+        self._send_tensor(self.send_bwd_grad_rank, self.gradient_from_next_rank_queue, block=block)
+
     def _recv_tensor(self, src_rank: int, dtype: torch.dtype, block: bool = False):
 
         if src_rank == -1:  # 从 socket 接收
-            payload = self._recv_socket_msg(src_rank, dtype, block)
+            payload = self._recv_socket_msg()
             if isinstance(payload, dict) and "stop" in payload.keys():
-                # print("Client requested stop") TODO
-                pass
+                print("Client requested stop")  # TODO
+                # self._put_tensor_to_queue(MSG_TYPE_STOP, -1, None, block)
             else:
                 payload: Payload
                 msg_type = MSG_TYPE_ACTIVATION if payload.is_activation else MSG_TYPE_GRADIENT
@@ -249,20 +285,20 @@ class PipelineServer(ABC):
                 # 放到对应队列中
                 self._put_tensor_to_queue(msg_type, mb_idx, tensor, block)
                 if msg_type == MSG_TYPE_ACTIVATION:
-                    attention_mask_msg = (MSG_TYPE_ATTENTION_MASK, mb_idx, payload.attention_mask)
+                    attention_mask_msg = (MSG_TYPE_ATTENTION_MASK, mb_idx, payload.attention_mask.to(self.device, dtype=dtype))
                     self._put_tensor_to_queue(*attention_mask_msg, block=block)
         else:
-            msg = self._recv_nccl_msg(src_rank, dtype, block)
+            msg = self._recv_nccl_msg(src_rank, dtype)
             # 放到对应队列中
             self._put_tensor_to_queue(*msg, block=block)
 
-    @torch.no_grad()
     def _recv_socket_msg(self) -> Union[Payload, Dict]:
         """
         接收 socket 消息
         """
         self.communicator.conn.settimeout(60.0)
         data: Union[Payload, Dict] = self.communicator.receive()
+        print(f"Rank {self.rank} Received data, is activation {data.is_activation},mb_idx {data.mb_idx}")
         return data
 
     @torch.no_grad()
@@ -290,6 +326,7 @@ class PipelineServer(ABC):
         dist.recv(flat_tensor, src=src_rank, tag=1)
 
         tensor = flat_tensor.view(*real_shape)
+        print(f"Rank {self.rank} Received tensor, msg_type {msg_type}, mb_idx {microbatch_idx}")
         return (msg_type, microbatch_idx, tensor)
 
     @torch.no_grad()

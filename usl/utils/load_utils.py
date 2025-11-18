@@ -162,7 +162,7 @@ def load_server_model(
     return server
 
 
-def load_server_model_multi_card(
+def load_stage_server_model(
     model_dir: str,
     model_name: str,
     split_point: int = 2,
@@ -180,7 +180,7 @@ def load_server_model_multi_card(
         use_qlora_4bit=use_qlora_4bit,
         use_qlora_8bit=use_qlora_8bit,
     )
-    
+
     # ---------------- 按模型类型加载 ----------------
     if "gpt" in model_name.lower():
         server = load_gpt_server_model(model, split_config)
@@ -190,7 +190,7 @@ def load_server_model_multi_card(
         server = load_qwen3_server(model, split_config)
     else:
         raise ValueError(f"unsupported model card {model_name}")
-    
+
     # ---------------- LoRA 配置 ----------------
     if use_lora:
         lora_config = LoraConfig(
@@ -201,28 +201,24 @@ def load_server_model_multi_card(
             target_modules=["q_proj", "k_proj", "v_proj"],
         )
         server = get_peft_model(server, lora_config)
-    
+
     # ---------------- 多卡切分 ----------------
     if world_size > 1:
-        server = split_server_into_stages(server, rank, world_size)
-    
+        server = _split_server_into_stages(server, rank, world_size)
+
     return server
 
 
-def split_server_into_stages(
-    server: nn.Module,
-    rank: int,
-    world_size: int
-) -> nn.Module:
+def _split_server_into_stages(server: nn.Module, rank: int, world_size: int) -> nn.Module:
 
     layers = server.layers
-    
+
     total_layers = len(layers)
-    
+
     # 计算每张卡分配的层数
     layers_per_stage = total_layers // world_size
     remainder = total_layers % world_size
-    
+
     # 计算当前rank的层范围
     if rank < remainder:
         start_layer = rank * (layers_per_stage + 1)
@@ -230,12 +226,16 @@ def split_server_into_stages(
     else:
         start_layer = remainder * (layers_per_stage + 1) + (rank - remainder) * layers_per_stage
         end_layer = start_layer + layers_per_stage
-    
+
     stage_model = nn.Module()
 
     # 分配当前stage
     stage_model.layers = nn.ModuleList(layers[start_layer:end_layer])
     stage_model.start_layer = start_layer
     stage_model.end_layer = end_layer
-    
+
+    # 删除其他stage的层
+    del layers[:start_layer]
+    del layers[end_layer:]
+
     return stage_model
