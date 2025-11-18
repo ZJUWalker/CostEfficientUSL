@@ -160,3 +160,82 @@ def load_server_model(
         model = get_peft_model(model, lora_config)
 
     return server
+
+
+def load_server_model_multi_card(
+    model_dir: str,
+    model_name: str,
+    split_point: int = 2,
+    rank: int = 0,
+    world_size: int = 1,
+    use_lora: bool = False,
+    use_qlora_4bit: bool = False,
+    use_qlora_8bit: bool = False,
+) -> nn.Module:
+
+    # ---------------- 加载模型 ----------------
+    model, _, split_config = _load_orginal_model(
+        model_dir,
+        split_point=split_point,
+        use_qlora_4bit=use_qlora_4bit,
+        use_qlora_8bit=use_qlora_8bit,
+    )
+    
+    # ---------------- 按模型类型加载 ----------------
+    if "gpt" in model_name.lower():
+        server = load_gpt_server_model(model, split_config)
+    elif "llama" in model_name.lower():
+        server = load_llama_server(model, split_config)
+    elif "qwen" in model_name.lower():
+        server = load_qwen3_server(model, split_config)
+    else:
+        raise ValueError(f"unsupported model card {model_name}")
+    
+    # ---------------- LoRA 配置 ----------------
+    if use_lora:
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=8,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            target_modules=["q_proj", "k_proj", "v_proj"],
+        )
+        server = get_peft_model(server, lora_config)
+    
+    # ---------------- 多卡切分 ----------------
+    if world_size > 1:
+        server = split_server_into_stages(server, rank, world_size)
+    
+    return server
+
+
+def split_server_into_stages(
+    server: nn.Module,
+    rank: int,
+    world_size: int
+) -> nn.Module:
+
+    layers = server.layers
+    
+    total_layers = len(layers)
+    
+    # 计算每张卡分配的层数
+    layers_per_stage = total_layers // world_size
+    remainder = total_layers % world_size
+    
+    # 计算当前rank的层范围
+    if rank < remainder:
+        start_layer = rank * (layers_per_stage + 1)
+        end_layer = start_layer + layers_per_stage + 1
+    else:
+        start_layer = remainder * (layers_per_stage + 1) + (rank - remainder) * layers_per_stage
+        end_layer = start_layer + layers_per_stage
+    
+    stage_model = nn.Module()
+
+    # 分配当前stage
+    stage_model.layers = nn.ModuleList(layers[start_layer:end_layer])
+    stage_model.start_layer = start_layer
+    stage_model.end_layer = end_layer
+    
+    return stage_model
