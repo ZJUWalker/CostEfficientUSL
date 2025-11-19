@@ -216,6 +216,7 @@ class Client:
             buffer_size=1024 * 4,
             rate_limit_mbps=client_args.rate_mbps,
         )
+        print(self.communicator_rank_0.conn)
 
         self.communicator_rank_n = SocketCommunicator(
             host=self.client_args.host,
@@ -224,6 +225,7 @@ class Client:
             buffer_size=1024 * 4,
             rate_limit_mbps=client_args.rate_mbps,
         )
+        print(self.communicator_rank_n.conn)
 
         # ---- Queues (compute pipeline)
         self.activation_to_server_queue: Queue[Payload] = Queue()  # used for serve fwd
@@ -484,7 +486,7 @@ class Client:
                         print("send stop flag")
                         continue
                     else:
-                        print(f'rank 0 send payload: {payload.mb_idx}, {payload.is_activation}')
+                        print(f'rank 0 ,communicator:{self.communicator_rank_0.conn},send payload: {payload.mb_idx}, {payload.is_activation}')
                         mb_idx = payload.mb_idx
                         self.profile_data[mb_idx].head_fwd_send_timestamp[0] = start_send
                         self.profile_data[mb_idx].head_fwd_send_timestamp[1] = end_time

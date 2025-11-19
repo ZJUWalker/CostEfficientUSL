@@ -55,7 +55,7 @@ class PipelineServer(ABC):
         # ---- init communication and pipeline info
         self._init_comminication()
         # ---- CUDA streams
-        self.device = torch.cuda.device(dist.get_rank())
+        self.device = f'cuda:{self.rank}'
         print(f"Rank {self.rank} Device {self.device}")
         torch.cuda.set_stream(torch.cuda.Stream(self.device))  # set cuda compute stream
         self.load_stream = torch.cuda.Stream(self.device)  # set cuda load stream
@@ -66,7 +66,7 @@ class PipelineServer(ABC):
         # ---- Model & optimizer
         self.lr = server_args.learning_rate
         self.trunk_model = server_model
-        self.trunk_model.to(f'cuda:{self.rank}')
+        self.trunk_model.to(self.device)
         self.optimizer: torch.optim.Optimizer = optimizer_clz(self.trunk_model.parameters(), lr=self.lr)
         self.offload_activation_mb_num = self.server_args.offload_activation_mb_num
         if self.offload_activation_mb_num > 0:
@@ -100,6 +100,7 @@ class PipelineServer(ABC):
     def _init_tensor_queues(self):
         # ---- Queues (compute pipeline)
         # FWD activation queues
+        # print(self.num_micro_batches)
         self.activation_from_pre_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         self.activation_to_next_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         # BWD gradient queues
@@ -173,9 +174,9 @@ class PipelineServer(ABC):
             # 1. set stop event to signal loops to exit
             self.stop_event.set()
             # 2. wait for loops to exit
-            self.client_future.result()
-            self.server_future.result()
-            self.compute_future.result()
+            # self.client_future.result()
+            # self.server_future.result()
+            # self.compute_future.result()
             # 3. close sockets if open
             if self.rank == 0 or self.rank == self.world_size - 1:
                 self.communicator.close()
@@ -225,22 +226,34 @@ class PipelineServer(ABC):
             self._send_nccl_msg(dst_rank, retrive_queue, block=block)
         pass
 
-    def _put_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
-        print(f'put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
+    def _put_recv_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
+        print(f'Rank {self.rank} put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
         if msg_type == MSG_TYPE_ACTIVATION:
-            self.activation_to_next_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
+            self.activation_from_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
         elif msg_type == MSG_TYPE_GRADIENT:
-            self.gradient_to_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
+            self.gradient_from_next_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
         elif msg_type == MSG_TYPE_ATTENTION_MASK:
             self.attention_mask_queue.put((msg_type, microbatch_idx, tensor), block=block)
         else:
             raise ValueError(f"Unknown msg_type: {msg_type}")
+
+    # def _put_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
+    #     print(f'put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
+    #     if msg_type == MSG_TYPE_ACTIVATION:
+    #         self.activation_from_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
+    #     elif msg_type == MSG_TYPE_GRADIENT:
+    #         self.gradient_to_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
+    #     elif msg_type == MSG_TYPE_ATTENTION_MASK:
+    #         self.attention_mask_queue.put((msg_type, microbatch_idx, tensor), block=block)
+    #     else:
+    #         raise ValueError(f"Unknown msg_type: {msg_type}")
 
     def _recv_mb_fwd_tensors(self, dtype: torch.dtype, block: bool = False):
         """
         接收前向传播的激活张量和attention mask
         """
         # recv activation
+        # print(f"Rank {self.rank} try to recv activation from {self.recv_fwd_acti_rank}")
         self._recv_tensor(self.recv_fwd_acti_rank, dtype, block=block)
         if self.recv_fwd_acti_rank != -1:
             # recv attention mask
@@ -270,36 +283,46 @@ class PipelineServer(ABC):
         # send gradient
         self._send_tensor(self.send_bwd_grad_rank, self.gradient_from_next_rank_queue, block=block)
 
+    @torch.no_grad()
     def _recv_tensor(self, src_rank: int, dtype: torch.dtype, block: bool = False):
 
         if src_rank == -1:  # 从 socket 接收
-            payload = self._recv_socket_msg()
-            if isinstance(payload, dict) and "stop" in payload.keys():
-                print("Client requested stop")  # TODO
-                # self._put_tensor_to_queue(MSG_TYPE_STOP, -1, None, block)
-            else:
-                payload: Payload
-                msg_type = MSG_TYPE_ACTIVATION if payload.is_activation else MSG_TYPE_GRADIENT
-                mb_idx = payload.mb_idx
-                tensor = payload.tensor.to(self.device, dtype=dtype)
-                # 放到对应队列中
-                self._put_tensor_to_queue(msg_type, mb_idx, tensor, block)
-                if msg_type == MSG_TYPE_ACTIVATION:
-                    attention_mask_msg = (MSG_TYPE_ATTENTION_MASK, mb_idx, payload.attention_mask.to(self.device, dtype=dtype))
-                    self._put_tensor_to_queue(*attention_mask_msg, block=block)
+            # print(f'Rank {self.rank} try to recv tensor from socket, sock={self.communicator.conn}')
+            payload = self.communicator.receive()
+
+            if payload is None:
+                print(f"Rank {self.rank} receive None (peer closed?)")
+                return
+
+            if isinstance(payload, dict) and "stop" in payload:
+                print("Client requested stop")
+                # TODO: 标记 stop，或者放一个特殊消息进队列
+                return
+
+            payload: Payload
+            msg_type = MSG_TYPE_ACTIVATION if payload.is_activation else MSG_TYPE_GRADIENT
+            mb_idx = payload.mb_idx
+            print(f"Rank {self.rank} Received tensor, msg_type {msg_type}, mb_idx {mb_idx}, load to gpu {self.device}")
+
+            tensor = payload.tensor.to(self.device, dtype=dtype)
+            self._put_recv_tensor_to_queue(msg_type, mb_idx, tensor, block)
+
+            if msg_type == MSG_TYPE_ACTIVATION:
+                attn = payload.attention_mask.to(self.device, dtype=dtype) if payload.attention_mask is not None else None
+                self._put_recv_tensor_to_queue(MSG_TYPE_ATTENTION_MASK, mb_idx, attn, block=block)
+
         else:
             msg = self._recv_nccl_msg(src_rank, dtype)
             # 放到对应队列中
-            self._put_tensor_to_queue(*msg, block=block)
+            self._put_recv_tensor_to_queue(*msg, block=block)
 
-    def _recv_socket_msg(self) -> Union[Payload, Dict]:
-        """
-        接收 socket 消息
-        """
-        self.communicator.conn.settimeout(60.0)
-        data: Union[Payload, Dict] = self.communicator.receive()
-        print(f"Rank {self.rank} Received data, is activation {data.is_activation},mb_idx {data.mb_idx}")
-        return data
+    # def _recv_socket_msg(self) -> Union[Payload, Dict]:
+    #     """
+    #     接收 socket 消息
+    #     """
+    #     self.communicator.sock.settimeout(60.0)
+
+    #     return data
 
     @torch.no_grad()
     def _recv_nccl_msg(self, src_rank: int, dtype: torch.dtype) -> torch.Tensor:
@@ -337,7 +360,7 @@ class PipelineServer(ABC):
         if retrive_queue == self.attention_mask_queue:
             # 不用发送attention mask到 client 端
             return
-        msg_type, microbatch_idx, tensor = retrive_queue.get(block=block)
+        msg_type, microbatch_idx, tensor = retrive_queue.get_nowait()
         if tensor.is_cuda:
             cpu_tensor = tensor.cpu().pin_memory()
         # send CPU payload to client
@@ -359,7 +382,7 @@ class PipelineServer(ABC):
         """
         发送 NCCL 消息
         """
-        msg_type, microbatch_idx, tensor = retrive_queue.get(block=block)
+        msg_type, microbatch_idx, tensor = retrive_queue.get_nowait()
 
         assert tensor.is_cuda, "NCCL 要求 tensor 在 GPU 上"
         shape = list(tensor.shape)

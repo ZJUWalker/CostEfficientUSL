@@ -32,7 +32,7 @@ class GpipeServer(PipelineServer):
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(server_args, server_model, optimizer_clz, logger)
-        self.block = False
+        self.block = True
         self.curr_fwd_mb_idx = AtomicInt(0)
         self.curr_bwd_mb_idx = AtomicInt(0)
         self.activation_dict: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}  # store fwd input and output activation for bwd
@@ -84,12 +84,17 @@ class GpipeServer(PipelineServer):
                 # do forward pass
                 try:
                     # 1. get activation from queue
-                    msg_type, mb_idx_acti, activation_from_pre_rank = self.activation_from_pre_rank_queue.get(block=self.block, timeout=timeout)
+                    # print(f'[rank {self.rank}] try to get activation from pre rank')
+                    msg_type, mb_idx, activation_from_pre_rank = self.activation_from_pre_rank_queue.get(block=self.block, timeout=timeout)
+                    print(
+                        f'Rank {self.rank} get activation from pre rank, mb_idx: {mb_idx}, activation_from_pre_rank: {activation_from_pre_rank.shape}'
+                    )
                     assert msg_type == MSG_TYPE_ACTIVATION, 'msg_type is not activation!'
                     # 记录前向传播的输入和输出激活，用于后续的反向传播
                     msg_type, mb_idx_mask, attention_mask = self.attention_mask_queue.get(True, timeout=timeout)
+                    print(f'Rank {self.rank} get attention mask, mb_idx: {mb_idx_mask}, attention_mask: {attention_mask.shape}')
                     assert msg_type == MSG_TYPE_ATTENTION_MASK, 'msg_type is not attention_mask!'
-                    assert mb_idx_acti == mb_idx_mask, 'acti and mask should have the same mb_idx!'
+                    assert mb_idx == mb_idx_mask, 'acti and mask should have the same mb_idx!'
                     # 2. forward pass
                     activation_from_pre_rank = activation_from_pre_rank.requires_grad_(True)
                     activation_to_next_rank: torch.Tensor = self.trunk_model(
@@ -111,7 +116,7 @@ class GpipeServer(PipelineServer):
                     # print(f"Rank {self.rank} Timeout when getting activation from pre rank,maybe the client is disconnected.")
                     pass
                 except Exception as e:
-                    print(f"Error in _compute_task fwd phase: {e}")
+                    print(f"Rank {self.rank} Error in _compute_task fwd phase: {e}")
                     break
                 time.sleep(0.001)
             else:
