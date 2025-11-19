@@ -23,6 +23,7 @@ from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_gantt_grouped
 from usl.utils.tensor_utils import pad_inputs
 from transformers import PreTrainedModel
+from typing_extensions import deprecated
 
 
 @dataclass
@@ -152,7 +153,7 @@ class Client:
         self.losses = []
         self.profile_data: List[GanttChartData] = []
         # ---- Executors & coordination
-        self.main_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=2)
+        self.main_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=4)
         self.compute_future: Optional[Future] = None
         self.server_future: Optional[Future] = None
         self.stop_event = threading.Event()
@@ -208,8 +209,7 @@ class Client:
         self.pin_on_gpu_tensors_idx = []  # used to pin tensors on GPU that don't need to be offloaded
 
         # ---- Communicator
-        # ---- Communicators：发送一个，接收一个
-        self.send_communicator = SocketCommunicator(
+        self.communicator_rank_0 = SocketCommunicator(
             host=self.client_args.host,
             is_server=False,
             port=client_args.port,  # 比如连 rank0
@@ -217,7 +217,7 @@ class Client:
             rate_limit_mbps=client_args.rate_mbps,
         )
 
-        self.recv_communicator = SocketCommunicator(
+        self.communicator_rank_n = SocketCommunicator(
             host=self.client_args.host,
             is_server=False,
             port=client_args.port + 1,  # 比如连 rankN
@@ -363,13 +363,6 @@ class Client:
     ):
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_fwd_timestamp[0] = time.time()
-        # if self.offload_activation:
-        # if mb_idx < self.client_args.offload_activation_mb_num:
-        #     with self.activation_offload_ctx:
-        #         head_outs = self.head_model.forward(x, m)
-        #         # self.activation_offload_handler.on_minibatch_commit_forward()
-        # else:
-        #     head_outs = self.head_model.forward(x, m)
         with self.activation_offload_ctx if mb_idx < self.client_args.offload_activation_mb_num else nullcontext():
             head_outs = self.head_model.forward(x, m)
             torch.cuda.current_stream().synchronize()
@@ -471,33 +464,27 @@ class Client:
         )
         pass
 
-    def _check_send_comm(self):
-        if not self.send_communicator.conn:
-            while not self.stop_event.is_set() and not self.send_communicator.conn:
+    def _check_comm(self, communicator: SocketCommunicator):
+        if not communicator.sock:
+            while not self.stop_event.is_set() and not communicator.sock:
                 time.sleep(0.05)
-        return self.send_communicator.conn
+        return communicator.sock
 
-    def _check_recv_comm(self):
-        if not self.recv_communicator.conn:
-            while not self.stop_event.is_set() and not self.recv_communicator.conn:
-                time.sleep(0.05)
-        return self.recv_communicator.conn
-
-    # TODO:处理client端的send操作
     @torch.no_grad()
-    def _head_client_send(self):
-        self._check_send_comm()
+    def _handle_client_rank_0_send(self):
+        self._check_comm(self.communicator_rank_0)
         while not self.stop_event.is_set():
             try:
                 payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
                     start_send = time.time()
-                    self.send_communicator.send(payload)
+                    self.communicator_rank_0.send(payload)
                     end_time = time.time()
                     if isinstance(payload, dict) and "stop" in payload:
                         print("send stop flag")
                         continue
                     else:
+                        print(f'rank 0 send payload: {payload.mb_idx}, {payload.is_activation}')
                         mb_idx = payload.mb_idx
                         self.profile_data[mb_idx].head_fwd_send_timestamp[0] = start_send
                         self.profile_data[mb_idx].head_fwd_send_timestamp[1] = end_time
@@ -507,17 +494,26 @@ class Client:
                     continue
             except Empty:
                 pass
+            time.sleep(0.001)  # 避免频繁发送
+        print("client rank-0 send thread exit")
+        pass
+
+    @torch.no_grad()
+    def _handle_client_rank_n_send(self):
+        self._check_comm(self.communicator_rank_n)
+        while not self.stop_event.is_set():
             try:
                 if self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_WC:
                     if not self.activation_to_server_queue.empty():
                         time.sleep(0.001)  # 发送给服务器的等待队列中有数据，避免频繁发送
                         continue
                 payload = self.gradient_to_server_queue.get(timeout=0.001)
+                print(f'rank n send payload: {payload.mb_idx}, {payload.is_activation}')
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
                     self.sent_payload_bytes += payload.payload_nbytes()
                     start_send = time.time()
-                    self.send_communicator.send(payload)
+                    self.communicator_rank_n.send(payload)
                     end_time = time.time()
                     mb_idx = payload.mb_idx
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[0] = start_send
@@ -528,17 +524,17 @@ class Client:
                     continue
             except Empty:
                 pass
-        print("client send thread exit")
+            time.sleep(0.001)  # 避免频繁发送
+        print("client rank-0 send thread exit")
         pass
 
     # TODO: 处理recv操作
     @torch.no_grad()
-    def _handle_server_send(self):
-        self._check_recv_comm()
-        self.recv_communicator.conn.settimeout(60.0)
+    def _handle_server_rank_0_send(self):
+        self._check_comm(self.communicator_rank_0)
         while not self.stop_event.is_set():
             try:
-                data: Optional[Dict | Payload] = self.recv_communicator.receive()
+                data: Optional[Dict | Payload] = self.communicator_rank_0.receive()
             except Exception as e:
                 break
             if data is None:
@@ -555,12 +551,30 @@ class Client:
                 finally:
                     self.stop_event.set()
                     break
+            print(f'rank 0 recv payload: {data.mb_idx}, {data.is_activation}')
+            assert not data.is_activation, "rank n recv data should be gradient"
             data.tensor = data.tensor.pin_memory()
-            if data.is_activation:
-                self.activation_from_server_queue.put(data)
-            else:
-                self.gradient_from_server_queue.put(data)
-        print("server send thread exit")
+            self.gradient_from_server_queue.put(data)
+            time.sleep(0.001)  # 避免频繁发送
+
+        print("server rank 0 send thread exit")
+
+    @torch.no_grad()
+    def _handle_server_rank_n_send(self):
+        self._check_comm(self.communicator_rank_n)
+        while not self.stop_event.is_set():
+            try:
+                data: Optional[Dict | Payload] = self.communicator_rank_n.receive()
+            except Exception as e:
+                break
+            if data is None:
+                break
+            print(f'rank n recv payload: {data.mb_idx}, {data.is_activation}')
+            assert data.is_activation, "rank 0 recv data should be activation"
+            data.tensor = data.tensor.pin_memory()
+            self.activation_from_server_queue.put(data)
+            time.sleep(0.001)  # 避免频繁发送
+        print("server rank n send thread exit")
 
     @torch.no_grad()
     def _save_profile_res(self, server_profile_res: Dict[str, Any]):
@@ -790,8 +804,10 @@ class Client:
     def train_epoch(self, profile: bool = False):
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
         start_time = time.time()
-        send_future = self.main_executor.submit(self._head_client_send)
-        recv_future = self.main_executor.submit(self._handle_server_send)
+        send_0_future = self.main_executor.submit(self._handle_client_rank_0_send)
+        send_n_future = self.main_executor.submit(self._handle_client_rank_n_send)
+        recv_0_future = self.main_executor.submit(self._handle_server_rank_0_send)
+        recv_n_future = self.main_executor.submit(self._handle_server_rank_n_send)
         for epoch in range(self.local_ep):
             self.logger.info(f"[Client] start (overlap+accum) epoch {epoch+1}, len: {len(self.train_loader)}")
             with torch.profiler.profile(
@@ -826,10 +842,12 @@ class Client:
                         break
         # self.stop_event.set()
         # wait for send/recv to finish
-        send_future.result()
-        recv_future.result()
-        self.send_communicator.close()
-        self.recv_communicator.close()
+        send_0_future.result()
+        send_n_future.result()
+        recv_0_future.result()
+        recv_n_future.result()
+        self.communicator_rank_0.close()
+        self.communicator_rank_n.close()
         self.main_executor.shutdown(wait=True)
         end_time = time.time()
         self.logger.info(f"[Client Finished] epoch time: {end_time - start_time:.2f} s")
