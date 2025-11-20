@@ -107,8 +107,9 @@ class PipelineServer(ABC):
         self.gradient_from_next_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         self.gradient_to_pre_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         # ----------- FWD appendix queues -----------
-        # Attention mask queue
-        self.attention_mask_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
+        # Attention mask queue (tensors in attention_mask_from_pre_rank_queue is same as attention_mask_to_next_rank_queue)
+        self.attention_mask_from_pre_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
+        self.attention_mask_to_next_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         # Position embeddings queue (Model with ROPE)
         # self.position_embeddings_queue: Queue[Tuple[int, int, Tuple[torch.Tensor, torch.Tensor]]] = Queue()
 
@@ -227,15 +228,16 @@ class PipelineServer(ABC):
         pass
 
     def _put_recv_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
-        print(f'Rank {self.rank} put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
+        # print(f'Rank {self.rank} put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
         if msg_type == MSG_TYPE_ACTIVATION:
             self.activation_from_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
         elif msg_type == MSG_TYPE_GRADIENT:
             self.gradient_from_next_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
         elif msg_type == MSG_TYPE_ATTENTION_MASK:
-            self.attention_mask_queue.put((msg_type, microbatch_idx, tensor), block=block)
+            self.attention_mask_from_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
         else:
             raise ValueError(f"Unknown msg_type: {msg_type}")
+        print(f'Rank {self.rank} put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
 
     # def _put_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
     #     print(f'put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
@@ -274,7 +276,7 @@ class PipelineServer(ABC):
         self._send_tensor(self.send_fwd_acti_rank, self.activation_from_pre_rank_queue, block=block)
         if self.send_fwd_acti_rank != -1:
             # send attention mask
-            self._send_tensor(self.send_fwd_acti_rank, self.attention_mask_queue, block=block)
+            self._send_tensor(self.send_fwd_acti_rank, self.attention_mask_to_next_rank_queue, block=block)
 
     def _send_mb_bwd_grads(self, block: bool = False):
         """
@@ -357,7 +359,7 @@ class PipelineServer(ABC):
         """
         发送 socket 消息
         """
-        if retrive_queue == self.attention_mask_queue:
+        if retrive_queue == self.attention_mask_to_next_rank_queue:
             # 不用发送attention mask到 client 端
             return
         msg_type, microbatch_idx, tensor = retrive_queue.get_nowait()

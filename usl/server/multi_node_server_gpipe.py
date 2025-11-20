@@ -91,7 +91,7 @@ class GpipeServer(PipelineServer):
                     )
                     assert msg_type == MSG_TYPE_ACTIVATION, 'msg_type is not activation!'
                     # 记录前向传播的输入和输出激活，用于后续的反向传播
-                    msg_type, mb_idx_mask, attention_mask = self.attention_mask_queue.get(True, timeout=timeout)
+                    msg_type, mb_idx_mask, attention_mask = self.attention_mask_from_pre_rank_queue.get(True, timeout=timeout)
                     print(f'Rank {self.rank} get attention mask, mb_idx: {mb_idx_mask}, attention_mask: {attention_mask.shape}')
                     assert msg_type == MSG_TYPE_ATTENTION_MASK, 'msg_type is not attention_mask!'
                     assert mb_idx == mb_idx_mask, 'acti and mask should have the same mb_idx!'
@@ -106,7 +106,7 @@ class GpipeServer(PipelineServer):
                     activation_to_next_rank = activation_to_next_rank.requires_grad_(True)
 
                     self.activation_to_next_rank_queue.put((MSG_TYPE_ACTIVATION, mb_idx, activation_to_next_rank))
-                    self.attention_mask_queue.put((MSG_TYPE_ATTENTION_MASK, mb_idx, attention_mask))
+                    self.attention_mask_to_next_rank_queue.put((MSG_TYPE_ATTENTION_MASK, mb_idx, attention_mask))
                     # 4. save input and output activation for bwd
                     self.activation_dict[mb_idx] = (activation_from_pre_rank, activation_to_next_rank)
                     # 5. update curr_fwd_mb_idx

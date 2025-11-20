@@ -5,7 +5,7 @@ import argparse
 from transformers import AutoConfig
 from usl.server.base import *
 from usl.utils.exp import set_seed
-from usl.utils.load_utils import load_stage_server_model
+from usl.utils.load_utils import load_stage_server_model, load_server_model
 from usl.utils.log_utils import create_logger
 from usl.server.multi_node_server_gpipe import GpipeServer
 
@@ -14,7 +14,8 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 
 SEED = 0
-os.environ['WORLD_SIZE'] = str(torch.cuda.device_count())
+# os.environ['WORLD_SIZE'] = str(torch.cuda.device_count())
+os.environ['WORLD_SIZE'] = '4'
 os.environ['MASTER_ADDR'] = 'localhost'
 os.environ['MASTER_PORT'] = '12355'
 
@@ -30,9 +31,10 @@ def run_server(rank, world_size, server_args: ServerArgs):
     # =====================================================================
     model_dir = os.path.join("data/models", server_args.model)
     split_point = server_args.split_point
-    server_model = load_stage_server_model(
-        model_dir, server_args.model, split_point, rank, world_size, use_lora=server_args.use_lora
-    )  # use_lora=True for LoRA
+    server_model = load_server_model(model_dir, server_args.model, split_point, use_lora=server_args.use_lora)
+    # server_model = load_stage_server_model(
+    #     model_dir, server_args.model, split_point, rank, world_size, use_lora=server_args.use_lora
+    # )  # use_lora=True for LoRA
     # =====================================================================
     torch.cuda.init()
     torch.cuda.set_device(rank)
@@ -45,7 +47,7 @@ def run_server(rank, world_size, server_args: ServerArgs):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
+    parser.add_argument("-P", "--port", type=int, default=9000, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="Model card")
