@@ -8,7 +8,7 @@ import logging
 import time
 from enum import Enum
 from typing import Dict, Any, Optional, List, Tuple, Type, Union
-
+from typing_extensions import deprecated
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -101,15 +101,16 @@ class PipelineServer(ABC):
         # ---- Queues (compute pipeline)
         # FWD activation queues
         # print(self.num_micro_batches)
-        self.activation_from_pre_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
-        self.activation_to_next_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
+        # msg_type, microbatch_idx, Dict[str, torch.Tensor]
+        self.activation_from_pre_rank_queue: Queue[Tuple[int, int, Dict[str, torch.Tensor]]] = Queue(maxsize=self.num_micro_batches)
+        self.activation_to_next_rank_queue: Queue[Tuple[int, int, Dict[str, torch.Tensor]]] = Queue(maxsize=self.num_micro_batches)
         # BWD gradient queues
         self.gradient_from_next_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         self.gradient_to_pre_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         # ----------- FWD appendix queues -----------
         # Attention mask queue (tensors in attention_mask_from_pre_rank_queue is same as attention_mask_to_next_rank_queue)
-        self.attention_mask_from_pre_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
-        self.attention_mask_to_next_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
+        # self.attention_mask_from_pre_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
+        # self.attention_mask_to_next_rank_queue: Queue[Tuple[int, int, torch.Tensor]] = Queue(maxsize=self.num_micro_batches)
         # Position embeddings queue (Model with ROPE)
         # self.position_embeddings_queue: Queue[Tuple[int, int, Tuple[torch.Tensor, torch.Tensor]]] = Queue()
 
@@ -124,11 +125,198 @@ class PipelineServer(ABC):
         self.fwd_mb_count = 0
         self.bwd_mb_count = 0
 
-    def _is_last_mb_of_global_batch(self) -> bool:
-        return self.fwd_mb_count == self.num_micro_batches - 1
+    @torch.no_grad()
+    def _recv_mb_fwd_tensors(self, dtype: torch.dtype, block: bool = False):
+        """
+        接收前向传播的激活张量和attention mask
+        """
+        # print(f"Rank {self.rank} try to recv activation from {self.recv_fwd_acti_rank}")
+        if self.recv_fwd_acti_rank != -1:
+            # recv activation and attention mask by NCCL
+            msg_type, mb_idx, activation = self._recv_nccl_msg(self.recv_fwd_acti_rank, dtype)
+            print(f"Rank {self.rank} Received activation, msg_type {msg_type}, mb_idx {mb_idx},device:{activation.device}")
+            msg_type_1, mb_idx_1, attention_mask = self._recv_nccl_msg(self.recv_fwd_acti_rank, dtype)
+            print(f"Rank {self.rank} Received attention_mask, msg_type {msg_type_1}, mb_idx {mb_idx_1},device:{attention_mask.device}")
+            assert (
+                msg_type == MSG_TYPE_ACTIVATION and msg_type_1 == MSG_TYPE_ATTENTION_MASK
+            ), 'msg_type should be MSG_TYPE_ACTIVATION and MSG_TYPE_ATTENTION_MASK in _recv_mb_fwd_tensors'
+            assert mb_idx == mb_idx_1, 'activation and attention_mask mb_idx should be same in _recv_mb_fwd_tensors'
+            wrapped_data = (MSG_TYPE_ACTIVATION, mb_idx, {'activation': activation, 'attention_mask': attention_mask})
+        else:
+            # recv activation and attention mask from TCP socket
+            payload: Optional[Payload] = self._recv_socket_msg(dtype)
+            assert payload.is_activation, 'payload should be activation in _recv_mb_fwd_tensors'
+            mb_idx = payload.mb_idx
+            print(f"Rank {self.rank} Received tensor, msg_type {MSG_TYPE_ACTIVATION}, mb_idx {mb_idx}, load to gpu {self.device}")
+            payload.tensor = payload.tensor.to(self.device, dtype=dtype)
+            if payload.attention_mask is None:
+                payload.attention_mask = torch.zeros(
+                    payload.tensor.shape[0], payload.tensor.shape[0], payload.tensor.shape[1], payload.tensor.shape[1], device=self.device
+                )
+                print(f'attention_mask is None, set to zeros :{payload.attention_mask.shape}')
+            payload.attention_mask = payload.attention_mask.to(self.device, dtype=dtype) if payload.attention_mask is not None else None
+            wrapped_data = (MSG_TYPE_ACTIVATION, mb_idx, {'activation': payload.tensor, 'attention_mask': payload.attention_mask})
+        # put activation and attention mask to queue
+        self.activation_from_pre_rank_queue.put(wrapped_data, block=block)
 
-    def _init_param_efficient_mode(self):
+    @torch.no_grad()
+    def _recv_mb_bwd_grads(self, dtype: torch.dtype, block: bool = False):
+        """
+        接收反向传播的梯度张量
+        """
+        # recv gradient
+        if self.recv_bwd_grad_rank != -1:
+            # recv gradient by NCCL
+            msg_type, mb_idx, gradient = self._recv_nccl_msg(self.recv_bwd_grad_rank, dtype)
+            print(f"Rank {self.rank} Received tensor, msg_type {msg_type}, mb_idx {mb_idx},device:{gradient.device}")
+            assert msg_type == MSG_TYPE_GRADIENT, 'msg_type should be MSG_TYPE_GRADIENT in _recv_mb_bwd_grads'
+            wrapped_data = (MSG_TYPE_GRADIENT, mb_idx, gradient)
+        else:
+            # recv gradient from socket
+            payload: Optional[Payload] = self._recv_socket_msg(dtype)
+            assert not payload.is_activation, 'payload should be gradient in _recv_mb_bwd_grads'
+            mb_idx = payload.mb_idx
+            print(f"Rank {self.rank} Received tensor, msg_type {MSG_TYPE_GRADIENT}, mb_idx {mb_idx}, load to gpu {self.device}")
+            gradient = payload.tensor.to(self.device, dtype=dtype)
+            wrapped_data = (MSG_TYPE_GRADIENT, mb_idx, gradient)
+        # put gradient to queue
+        self.gradient_from_next_rank_queue.put(wrapped_data, block=block)
+
+    def _send_mb_fwd_tensors(self, block: bool = False):
+        """
+        发送前向传播的激活张量和attention mask
+        """
+        if self.send_fwd_acti_rank != -1:
+            # send activation and attention mask by NCCL
+            self._send_nccl_msg(self.send_fwd_acti_rank, self.activation_to_next_rank_queue, block=block)
+        else:
+            # send activation to client
+            self._send_socket_msg(self.activation_to_next_rank_queue, block=block)
+
+    def _send_mb_bwd_grads(self, block: bool = False):
+        """
+        发送反向传播的梯度张量
+        """
+        # send gradient
+        # self._send_tensor(self.send_bwd_grad_rank, self.gradient_from_next_rank_queue, block=block)
+        if self.send_bwd_grad_rank != -1:
+            # send gradient by NCCL
+            self._send_nccl_msg(self.send_bwd_grad_rank, self.gradient_to_pre_rank_queue, block=block)
+        else:
+            # send gradient to client
+            self._send_socket_msg(self.gradient_to_pre_rank_queue, block=block)
+
+    def _recv_socket_msg(self, dtype) -> Optional[Payload]:
+        #     """
+        #     接收 socket 消息
+        #     """
+        payload = self.communicator.receive()
+
+        if payload is None:
+            print(f"Rank {self.rank} receive None (peer closed?)")
+            return None
+
+        if isinstance(payload, dict) and "stop" in payload:
+            print("Client requested stop")
+            # TODO: 标记 stop，或者放一个特殊消息进队列
+            return None
+        return payload
+
+    @torch.no_grad()
+    def _recv_nccl_msg(self, src_rank: int, dtype: torch.dtype) -> Tuple[int, int, torch.Tensor]:
+        """
+        接收一个张量并放到指定队列,由接收线程做
+        接收到的会以 (msg_type, tensor) 的形式放入 placement_queue
+        """
+        header_len = MAX_DIM + 3
+
+        # ----- 1) 接收 header -----
+        header_tensor: torch.Tensor = torch.empty(header_len, dtype=torch.int64, device=self.device)
+        dist.recv(header_tensor, src=src_rank, tag=0)
+
+        header_list = header_tensor.tolist()
+        msg_type = int(header_list[0])
+        microbatch_idx = int(header_list[1])
+        ndim = int(header_list[2])
+        dims = header_list[3 : 3 + ndim]
+        real_shape = [int(d) for d in dims]
+
+        # ----- 2) 接收 flat tensor -----
+        numel = int(torch.prod(torch.tensor(real_shape)))
+        flat_tensor: torch.Tensor = torch.empty(numel, dtype=dtype, device=self.device)
+        dist.recv(flat_tensor, src=src_rank, tag=1)
+
+        tensor = flat_tensor.view(*real_shape)
+        return msg_type, microbatch_idx, tensor
+
+    @torch.no_grad()
+    def _send_socket_msg(self, retrive_queue: Queue, block: bool = False):
+        """
+        发送 socket 消息
+        """
+        if retrive_queue == self.activation_to_next_rank_queue:
+            # 不用发送attention mask到 client 端
+            msg_type, mb_idx, tensor_dict = retrive_queue.get(block)
+            tensor = tensor_dict['activation']
+        else:
+            msg_type, mb_idx, tensor = retrive_queue.get(block)
+        tensor: torch.Tensor
+        if tensor.is_cuda:
+            cpu_tensor = tensor.cpu().pin_memory()
+        # send CPU payload to client
+        payload = Payload(
+            tensor=cpu_tensor,
+            is_activation=msg_type == MSG_TYPE_ACTIVATION,
+            phase='FWD' if msg_type == MSG_TYPE_ACTIVATION else 'BWD',
+            mb_idx=mb_idx,
+            mb_total=self.num_micro_batches,
+            attention_mask=None,
+            position_embeddings=None,
+            # TODO solve token and group_id in Payload
+        )
+        self.communicator.send(payload)
         pass
+
+    @torch.no_grad()
+    def _send_nccl_msg(self, dst_rank: int, retrive_queue: Queue, block: bool = False):
+        """
+        发送 NCCL 消息
+        """
+        if retrive_queue == self.activation_to_next_rank_queue:
+            msg_type, mb_idx, tensor_dict = retrive_queue.get(block)
+            # send activation and attention mask
+            activation = tensor_dict['activation']
+            attention_mask = tensor_dict['attention_mask']
+            self._send_nccl_tensor(dst_rank, MSG_TYPE_ACTIVATION, mb_idx, activation)
+            self._send_nccl_tensor(dst_rank, MSG_TYPE_ATTENTION_MASK, mb_idx, attention_mask)
+        else:
+            msg_type, mb_idx, tensor = retrive_queue.get(block)
+            self._send_nccl_tensor(dst_rank, MSG_TYPE_GRADIENT, mb_idx, tensor)
+
+    def _send_nccl_tensor(self, dst_rank: int, msg_type: int, mb_idx: int, tensor: torch.Tensor):
+        assert tensor.is_cuda, "NCCL 要求 tensor 在 GPU 上"
+        shape = list(tensor.shape)
+        ndim = len(shape)
+        assert ndim <= MAX_DIM, f"tensor 维度 {ndim} > MAX_DIM={MAX_DIM}"
+
+        # --- 1. 发送 header: [msg_type, ndim, dim0, dim1, ..., 0, 0] ---
+        header_len = MAX_DIM + 3
+        header = [msg_type, mb_idx, ndim] + shape
+        header += [0] * (header_len - len(header))
+
+        header_tensor = torch.tensor(header, dtype=torch.int64, device=tensor.device)
+        wk1 = dist.isend(header_tensor, dst=dst_rank, tag=0)  # 异步发送header
+
+        # --- 2. 发送数据本体（flatten） ---
+        flat_tensor = tensor.contiguous().view(-1)
+        wk2 = dist.isend(flat_tensor, dst=dst_rank, tag=1)
+        wk1.wait()
+        wk2.wait()
+
+    def _update_stage(self):
+        # update model
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
 
     # --------------- Public lifecycle ---------------
     def run(self):
@@ -202,211 +390,3 @@ class PipelineServer(ABC):
     @property
     def send_bwd_grad_rank(self) -> int:
         return self.recv_fwd_acti_rank  # same as recv_fwd_acti_rank
-
-    def _send_tensor(
-        self,
-        dst_rank: int,
-        retrive_queue: Queue[Tuple[int, int, torch.Tensor]],
-        block: bool = False,
-    ):
-        """
-        从对应队列里取出一个 (msg_type, tensor) 并发送, 由发送线程做
-        retrive_queue 里的元素形如: (msg_type, tensor)
-        Header 格式:
-        [
-            msg_type,         # 消息类型(1/2/3/N)
-            microbatch_idx,   # 当前流水线中 microbatch ID
-            ndim,             # 真实维度（几维）
-            dim0, dim1, ...   # 各维度大小
-            0, 0, ...         # padding
-        ]
-        """
-        if dst_rank == -1:
-            self._send_socket_msg(retrive_queue, block=block)
-        else:
-            self._send_nccl_msg(dst_rank, retrive_queue, block=block)
-        pass
-
-    def _put_recv_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
-        # print(f'Rank {self.rank} put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
-        if msg_type == MSG_TYPE_ACTIVATION:
-            self.activation_from_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
-        elif msg_type == MSG_TYPE_GRADIENT:
-            self.gradient_from_next_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
-        elif msg_type == MSG_TYPE_ATTENTION_MASK:
-            self.attention_mask_from_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
-        else:
-            raise ValueError(f"Unknown msg_type: {msg_type}")
-        print(f'Rank {self.rank} put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
-
-    # def _put_tensor_to_queue(self, msg_type, microbatch_idx, tensor, block=False):
-    #     print(f'put tensor to queue, msg_type {msg_type}, mb_idx {microbatch_idx}')
-    #     if msg_type == MSG_TYPE_ACTIVATION:
-    #         self.activation_from_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
-    #     elif msg_type == MSG_TYPE_GRADIENT:
-    #         self.gradient_to_pre_rank_queue.put((msg_type, microbatch_idx, tensor), block=block)
-    #     elif msg_type == MSG_TYPE_ATTENTION_MASK:
-    #         self.attention_mask_queue.put((msg_type, microbatch_idx, tensor), block=block)
-    #     else:
-    #         raise ValueError(f"Unknown msg_type: {msg_type}")
-
-    def _recv_mb_fwd_tensors(self, dtype: torch.dtype, block: bool = False):
-        """
-        接收前向传播的激活张量和attention mask
-        """
-        # recv activation
-        # print(f"Rank {self.rank} try to recv activation from {self.recv_fwd_acti_rank}")
-        self._recv_tensor(self.recv_fwd_acti_rank, dtype, block=block)
-        if self.recv_fwd_acti_rank != -1:
-            # recv attention mask
-            self._recv_tensor(self.recv_fwd_acti_rank, dtype, block=block)
-
-    def _recv_mb_bwd_grads(self, dtype: torch.dtype, block: bool = False):
-        """
-        接收反向传播的梯度张量
-        """
-        # recv gradient
-        self._recv_tensor(self.recv_bwd_grad_rank, dtype, block=block)
-
-    def _send_mb_fwd_tensors(self, block: bool = False):
-        """
-        发送前向传播的激活张量和attention mask
-        """
-        # send activation
-        self._send_tensor(self.send_fwd_acti_rank, self.activation_from_pre_rank_queue, block=block)
-        if self.send_fwd_acti_rank != -1:
-            # send attention mask
-            self._send_tensor(self.send_fwd_acti_rank, self.attention_mask_to_next_rank_queue, block=block)
-
-    def _send_mb_bwd_grads(self, block: bool = False):
-        """
-        发送反向传播的梯度张量
-        """
-        # send gradient
-        self._send_tensor(self.send_bwd_grad_rank, self.gradient_from_next_rank_queue, block=block)
-
-    @torch.no_grad()
-    def _recv_tensor(self, src_rank: int, dtype: torch.dtype, block: bool = False):
-
-        if src_rank == -1:  # 从 socket 接收
-            # print(f'Rank {self.rank} try to recv tensor from socket, sock={self.communicator.conn}')
-            payload = self.communicator.receive()
-
-            if payload is None:
-                print(f"Rank {self.rank} receive None (peer closed?)")
-                return
-
-            if isinstance(payload, dict) and "stop" in payload:
-                print("Client requested stop")
-                # TODO: 标记 stop，或者放一个特殊消息进队列
-                return
-
-            payload: Payload
-            msg_type = MSG_TYPE_ACTIVATION if payload.is_activation else MSG_TYPE_GRADIENT
-            mb_idx = payload.mb_idx
-            print(f"Rank {self.rank} Received tensor, msg_type {msg_type}, mb_idx {mb_idx}, load to gpu {self.device}")
-
-            tensor = payload.tensor.to(self.device, dtype=dtype)
-            self._put_recv_tensor_to_queue(msg_type, mb_idx, tensor, block)
-
-            if msg_type == MSG_TYPE_ACTIVATION:
-                attn = payload.attention_mask.to(self.device, dtype=dtype) if payload.attention_mask is not None else None
-                self._put_recv_tensor_to_queue(MSG_TYPE_ATTENTION_MASK, mb_idx, attn, block=block)
-
-        else:
-            msg = self._recv_nccl_msg(src_rank, dtype)
-            # 放到对应队列中
-            self._put_recv_tensor_to_queue(*msg, block=block)
-
-    # def _recv_socket_msg(self) -> Union[Payload, Dict]:
-    #     """
-    #     接收 socket 消息
-    #     """
-    #     self.communicator.sock.settimeout(60.0)
-
-    #     return data
-
-    @torch.no_grad()
-    def _recv_nccl_msg(self, src_rank: int, dtype: torch.dtype) -> torch.Tensor:
-        """
-        接收一个张量并放到指定队列,由接收线程做
-        接收到的会以 (msg_type, tensor) 的形式放入 placement_queue
-        """
-        header_len = MAX_DIM + 3
-
-        # ----- 1) 接收 header -----
-        header_tensor: torch.Tensor = torch.empty(header_len, dtype=torch.int64, device=self.device)
-        dist.recv(header_tensor, src=src_rank, tag=0)
-
-        header_list = header_tensor.tolist()
-        msg_type = int(header_list[0])
-        microbatch_idx = int(header_list[1])
-        ndim = int(header_list[2])
-        dims = header_list[3 : 3 + ndim]
-        real_shape = [int(d) for d in dims]
-
-        # ----- 2) 接收 flat tensor -----
-        numel = int(torch.prod(torch.tensor(real_shape)))
-        flat_tensor: torch.Tensor = torch.empty(numel, dtype=dtype, device=self.device)
-        dist.recv(flat_tensor, src=src_rank, tag=1)
-
-        tensor = flat_tensor.view(*real_shape)
-        print(f"Rank {self.rank} Received tensor, msg_type {msg_type}, mb_idx {microbatch_idx}")
-        return (msg_type, microbatch_idx, tensor)
-
-    @torch.no_grad()
-    def _send_socket_msg(self, retrive_queue: Queue[Tuple[int, int, torch.Tensor]], block: bool = False):
-        """
-        发送 socket 消息
-        """
-        if retrive_queue == self.attention_mask_to_next_rank_queue:
-            # 不用发送attention mask到 client 端
-            return
-        msg_type, microbatch_idx, tensor = retrive_queue.get_nowait()
-        if tensor.is_cuda:
-            cpu_tensor = tensor.cpu().pin_memory()
-        # send CPU payload to client
-        payload = Payload(
-            tensor=cpu_tensor,
-            is_activation=msg_type == MSG_TYPE_ACTIVATION,
-            phase='FWD' if msg_type == MSG_TYPE_ACTIVATION else 'BWD',
-            mb_idx=microbatch_idx,
-            mb_total=self.num_micro_batches,
-            attention_mask=None,
-            position_embeddings=None,
-            # TODO solve token and group_id in Payload
-        )
-        self.communicator.send(payload)
-        pass
-
-    @torch.no_grad()
-    def _send_nccl_msg(self, dst_rank: int, retrive_queue: Queue[Tuple[int, int, torch.Tensor]], block: bool = False):
-        """
-        发送 NCCL 消息
-        """
-        msg_type, microbatch_idx, tensor = retrive_queue.get_nowait()
-
-        assert tensor.is_cuda, "NCCL 要求 tensor 在 GPU 上"
-        shape = list(tensor.shape)
-        ndim = len(shape)
-        assert ndim <= MAX_DIM, f"tensor 维度 {ndim} > MAX_DIM={MAX_DIM}"
-
-        # --- 1. 发送 header: [msg_type, ndim, dim0, dim1, ..., 0, 0] ---
-        header_len = MAX_DIM + 3
-        header = [msg_type, microbatch_idx, ndim] + shape
-        header += [0] * (header_len - len(header))
-
-        header_tensor = torch.tensor(header, dtype=torch.int64, device=tensor.device)
-        wk1 = dist.isend(header_tensor, dst=dst_rank, tag=0)  # 异步发送header
-
-        # --- 2. 发送数据本体（flatten） ---
-        flat_tensor = tensor.contiguous().view(-1)
-        wk2 = dist.isend(flat_tensor, dst=dst_rank, tag=1)
-        wk1.wait()
-        wk2.wait()
-        pass
-
-    def _update_stage(self):
-        # update model
-        self.optimizer.step()
-        self.optimizer.zero_grad(set_to_none=True)

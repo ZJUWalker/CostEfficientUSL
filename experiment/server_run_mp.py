@@ -15,7 +15,7 @@ import torch.distributed as dist
 
 SEED = 0
 # os.environ['WORLD_SIZE'] = str(torch.cuda.device_count())
-os.environ['WORLD_SIZE'] = '4'
+os.environ['WORLD_SIZE'] = '3'
 os.environ['MASTER_ADDR'] = 'localhost'
 os.environ['MASTER_PORT'] = '12355'
 
