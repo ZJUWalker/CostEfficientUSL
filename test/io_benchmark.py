@@ -85,12 +85,12 @@ def time_gpu_to_ssd(t_gpu: torch.Tensor, filepath: Path):
     计时范围：GPU->CPU (DtoH) + 序列化 + 写盘
     返回：wall_time_sec
     """
-    start = time.perf_counter()
+    start = time.time()
     # DtoH：non_blocking 需配合 pinned memory 才能真正异步。但这边我们只计总时间。
     t_cpu = t_gpu.detach().to("cpu", non_blocking=True)
     torch.cuda.synchronize()
     torch_save_to_file(t_cpu, filepath)
-    end = time.perf_counter()
+    end = time.time()
     return end - start
 
 
@@ -99,11 +99,11 @@ def time_ssd_to_gpu(filepath: Path, device: torch.device):
     计时范围：读盘 + 反序列化到CPU + HtoD
     返回：(wall_time_sec, t_gpu)
     """
-    start = time.perf_counter()
+    start = time.time()
     t_cpu = torch_load_from_file(filepath)
     t_gpu = t_cpu.to(device, non_blocking=True)
     torch.cuda.synchronize()
-    end = time.perf_counter()
+    end = time.time()
     return end - start, t_gpu
 
 
@@ -129,7 +129,7 @@ def time_gpu_to_cpu_only(t_gpu: torch.Tensor, make_pinned: bool):
     end_evt = torch.cuda.Event(enable_timing=True)
 
     # wall-clock
-    wall_start = time.perf_counter()
+    wall_start = time.time()
 
     # 将拷贝提交到当前 stream
     start_evt.record()
@@ -138,7 +138,7 @@ def time_gpu_to_cpu_only(t_gpu: torch.Tensor, make_pinned: bool):
 
     # 等待完成
     end_evt.synchronize()
-    wall_end = time.perf_counter()
+    wall_end = time.time()
 
     cuda_ms = start_evt.elapsed_time(end_evt)  # 毫秒
     return (wall_end - wall_start), (cuda_ms / 1000.0)  # 返回秒
@@ -160,12 +160,12 @@ def time_cpu_to_gpu_only(numel: int, dtype: torch.dtype, device: torch.device, m
     start_evt = torch.cuda.Event(enable_timing=True)
     end_evt = torch.cuda.Event(enable_timing=True)
 
-    wall_start = time.perf_counter()
+    wall_start = time.time()
     start_evt.record()
     dst.copy_(src, non_blocking=True)  # HtoD
     end_evt.record()
     end_evt.synchronize()
-    wall_end = time.perf_counter()
+    wall_end = time.time()
 
     cuda_ms = start_evt.elapsed_time(end_evt)
     return (wall_end - wall_start), (cuda_ms / 1000.0)
@@ -205,14 +205,14 @@ def _sendall_with_rate(sock: socket.socket, data: bytes, chunk_bytes: int, rate_
         return
     # 简单令牌桶：按 chunk 发送并 sleep 控速
     bytes_per_sec = rate_mbps * 1024 * 1024 / 8.0  # Mbps -> MBps (Bytes/s)
-    start = time.perf_counter()
+    start = time.time()
     sent = 0
     for i in range(0, len(data), chunk_bytes):
         part = data[i : i + chunk_bytes]
         sock.sendall(part)
         sent += len(part)
         expected_elapsed = sent / bytes_per_sec
-        now = time.perf_counter()
+        now = time.time()
         if expected_elapsed > (now - start):
             time.sleep(expected_elapsed - (now - start))
 
@@ -272,7 +272,7 @@ def time_network_roundtrip(
     total_bytes = len(payload)
 
     # client connect
-    start = time.perf_counter()
+    start = time.time()
     with socket.create_connection((host, port), timeout=30) as sock:
         # 先发长度，再发数据（可限速）
         sock.sendall(HEADER_STRUCT.pack(total_bytes))
@@ -288,7 +288,7 @@ def time_network_roundtrip(
     if include_gpu_dtoh_htod:
         _ = dst_cpu.to(device, non_blocking=True)
         torch.cuda.synchronize()
-    end = time.perf_counter()
+    end = time.time()
 
     return end - start, total_bytes
 

@@ -90,7 +90,7 @@ def main():
     parser.add_argument("--offload_activation", "-OA", action="store_true", default=False)
     parser.add_argument("--offload_model_state", "-OS", action="store_true", default=False)
     parser.add_argument("--sort", type=str, default="no", help='sort batch before pipeline, "no" or "desc" or "asc"')
-    parser.add_argument("--pmode", type=str, default="pdwc", help='pipeline mode, "strict" or "wc" or "eager"')
+    parser.add_argument("--pmode", type=str, default="gpipe", help='pipeline mode, "strict" or "wc" or "eager"')
     parser.add_argument("--profile", "-PROF", action="store_true", default=False)
     parser.add_argument("--save_dir", type=str, default="log/profile")
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')

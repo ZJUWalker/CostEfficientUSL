@@ -4,10 +4,10 @@ import torch
 import argparse
 from transformers import AutoConfig
 from usl.server.base import *
+from usl.utils.dataset.exp import AverageMeter
 from usl.utils.exp import set_seed
-from usl.utils.load_utils import load_stage_server_model, load_server_model
 from usl.utils.log_utils import create_logger
-from usl.server.multi_node_server_gpipe import GpipeServer
+from usl.server.pipeline import ScheduleSplitServerGPipe, split_server_pipeline
 
 # from usl.server import *
 import torch.multiprocessing as mp
@@ -21,28 +21,79 @@ os.environ['MASTER_PORT'] = '12355'
 
 
 def run_server(rank, world_size, server_args: ServerArgs):
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    # rank = dist.get_rank()
-    # world_size = dist.get_world_size()
-    # =====================================================================
-    log_dir = f"log/{server_args.model}/server"
-    logger = create_logger(log_file_name=f"training_steps_r_{rank}_w_{world_size}.log", log_dir=log_dir, console_output=False)
-    # print(f"Server args: {server_args}")
-    # =====================================================================
-    model_dir = os.path.join("data/models", server_args.model)
-    split_point = server_args.split_point
-    server_model = load_server_model(model_dir, server_args.model, split_point, use_lora=server_args.use_lora)
-    # server_model = load_stage_server_model(
-    #     model_dir, server_args.model, split_point, rank, world_size, use_lora=server_args.use_lora
-    # )  # use_lora=True for LoRA
-    # =====================================================================
-    torch.cuda.init()
-    torch.cuda.set_device(rank)
-    server_args.server_device = f'cuda:{rank}'
-    torch.cuda.reset_peak_memory_stats()
-    server = GpipeServer(server_args, server_model, logger=logger)
-    print(f"[rank {rank}] Server started")
-    server.run()
+
+    pass
+
+
+def run_split_server_gpipe(
+    rank: int,
+    world_size: int,
+    stage,
+    optimizer,
+    mb_num,
+    dataloader,
+    batch_size,
+    log_step,
+    device,
+    print_grad=False,
+):
+    avg_loss = AverageMeter()
+    schedule = ScheduleSplitServerGPipe(stage, mb_num)
+    for idx, batch in enumerate(dataloader, 1):
+        if rank == 0 or rank == world_size - 1:
+            x, target = batch[0].to(device), batch[1].to(device)
+        if rank == 0:
+            # Input data
+            schedule.step(x)
+        elif rank == world_size - 1:
+            # output = schedule.step(target=target, losses=losses)
+            micro_outputs = schedule.step()  # output 是每个microbatch的输出list
+            # generate dummy grads of the same size as the microbatch output,simulate the tail model backward process
+            micro_grads = [torch.randn_like(o, requires_grad=False) for o in micro_outputs]
+            loss = torch.stack([m_grad.sum() for m_grad in micro_grads]).mean().item()
+            avg_loss.update(loss)
+            # split the target into microbatches
+            # Compute loss for each microbatch
+            schedule.compute_batch_loss(micro_grads)
+            if idx % log_step == 0 or idx == len(dataloader):
+                print(f"Step ({idx-log_step},{idx}): Average loss: {avg_loss.avg}")
+                avg_loss.reset()
+        else:
+            schedule.step()
+        # backward and update the model
+        schedule.backward()  # 调用 backward() 之前一定要先在last stage 上计算loss，否则会报错
+        if print_grad and rank == 0 and idx == 1:
+            for n, p in stage.submod.named_parameters():
+                if p.requires_grad:
+                    print(f"Rank:{rank}, module:{n}, grad:{p.grad[...,:10]}")
+                    break
+        optimizer.step()
+        optimizer.zero_grad()
+    dist.barrier()
+
+
+#     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+#     # rank = dist.get_rank()
+#     # world_size = dist.get_world_size()
+#     # =====================================================================
+#     log_dir = f"log/{server_args.model}/server"
+#     logger = create_logger(log_file_name=f"training_steps_r_{rank}_w_{world_size}.log", log_dir=log_dir, console_output=False)
+#     # print(f"Server args: {server_args}")
+#     # =====================================================================
+#     model_dir = os.path.join("data/models", server_args.model)
+#     split_point = server_args.split_point
+#     server_model = load_server_model(model_dir, server_args.model, split_point, use_lora=server_args.use_lora)
+#     # server_model = load_stage_server_model(
+#     #     model_dir, server_args.model, split_point, rank, world_size, use_lora=server_args.use_lora
+#     # )  # use_lora=True for LoRA
+#     # =====================================================================
+#     torch.cuda.init()
+#     torch.cuda.set_device(rank)
+#     server_args.server_device = f'cuda:{rank}'
+#     torch.cuda.reset_peak_memory_stats()
+#     server = GpipeServer(server_args, server_model, logger=logger)
+#     print(f"[rank {rank}] Server started")
+#     server.run()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, AutoConfig
 from usl.llm import (
@@ -162,6 +162,65 @@ def load_server_model(
     return server
 
 
+def manual_model_split(model: nn.Module, stage_index: int, num_stages: int, device: torch.device) -> Tuple[nn.Module, int, int, torch.device]:
+    """
+    手动将 Qwen3Server 拆成多个 stage：
+    - 每个 stage 只保留自己负责的那一段 decoder layers
+    - 其他层从 model.layers 中删掉
+    - 返回一个 PipelineStage 封装后的模型
+
+    注意：这个函数是原地修改 model 的，所以每个 rank 应该有自己的一份 model。
+    """
+    # 先确保模型在对应 device 上（避免后面参数在 CPU / CUDA 混合）
+    model.to(device)
+
+    total_layers = len(model.layers)
+    if total_layers % num_stages != 0:
+        # 如果不能整除，可以做个简单的 load balance：前几段多一层
+        base = total_layers // num_stages
+        extra = total_layers % num_stages
+
+        # 计算当前 stage 的 [start, end)
+        if stage_index < extra:
+            # 前 extra 个 stage 每个多一层
+            start = stage_index * (base + 1)
+            end = start + (base + 1)
+        else:
+            start = extra * (base + 1) + (stage_index - extra) * base
+            end = start + base
+    else:
+        # 能整除就均分
+        per_stage = total_layers // num_stages
+        start = stage_index * per_stage
+        end = (stage_index + 1) * per_stage
+
+    # ---- 删除不属于本 stage 的 layers ----
+    # 注意：删除时一定要倒序删，否则下标会变化
+    # 1) 删掉 [end, total_layers) 之后的层
+    for i in reversed(range(end, total_layers)):
+        del model.layers[i]
+
+    # 2) 再删掉 [0, start) 之前的层
+    for i in reversed(range(0, start)):
+        del model.layers[i]
+
+    # 此时 model.layers 的长度应该是 end - start
+    assert len(model.layers) == end - start, f"Stage {stage_index}: layers count mismatch, expect {end - start}, got {len(model.layers)}"
+
+    # Qwen3Server 里没有 tok_embeddings / norm / output 这种 head/tail，
+    # 所以不需要像你示例里那样额外 del 这些模块。
+    # rotary_emb 是所有层共用的，只保留一个没问题。
+
+    # # 包装成 PipelineStage（按你示例里的方式）
+    # stage = PipelineStage(
+    #     model,
+    #     stage_index,
+    #     num_stages,
+    #     device,
+    # )
+    return model
+
+
 def load_stage_server_model(
     model_dir: str,
     model_name: str,
@@ -210,16 +269,13 @@ def load_stage_server_model(
 
 
 def _split_server_into_stages(server: nn.Module, rank: int, world_size: int) -> nn.Module:
-
-    layers = server.layers
-
+    # 假设 server.layers 是 ModuleList
+    layers = list(server.layers)
     total_layers = len(layers)
 
-    # 计算每张卡分配的层数
     layers_per_stage = total_layers // world_size
     remainder = total_layers % world_size
 
-    # 计算当前rank的层范围
     if rank < remainder:
         start_layer = rank * (layers_per_stage + 1)
         end_layer = start_layer + layers_per_stage + 1
@@ -227,15 +283,15 @@ def _split_server_into_stages(server: nn.Module, rank: int, world_size: int) -> 
         start_layer = remainder * (layers_per_stage + 1) + (rank - remainder) * layers_per_stage
         end_layer = start_layer + layers_per_stage
 
-    stage_model = nn.Module()
+    stage_layers = layers[start_layer:end_layer]
 
-    # 分配当前stage
-    stage_model.layers = nn.ModuleList(layers[start_layer:end_layer])
-    stage_model.start_layer = start_layer
-    stage_model.end_layer = end_layer
+    # 不要再用裸 nn.Module，而是用我们定义好的 StageModel
+    # stage_model = StageModel(stage_layers, start_layer=start_layer, end_layer=end_layer)
+    stage_model = nn.ModuleList(stage_layers)
 
-    # 删除其他stage的层
-    del layers[:start_layer]
-    del layers[end_layer:]
+    # ❗通常不建议在这里 `del layers`，因为会直接改掉原始 server.layers
+    # 如果你确实需要修改原模型，可以按需保留
+    # del server.layers[:start_layer]
+    # del server.layers[end_layer:]
 
     return stage_model
