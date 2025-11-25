@@ -5,12 +5,14 @@ from typing import (
     TYPE_CHECKING,
 )
 
+import torch
 import torch.distributed as dist
 from torch.profiler import record_function
 
 from torch.distributed.pipelining.schedules import _sorted_batch_p2p
+from usl.server.base import ServerArgs
 from usl.server.pipeline.base_schedule import ServerPipelineScheduleSingle
-
+from usl.offload import AsyncDoubleBufferGroupOffloadHandler, CpuOffloadHookWithOffloadHandler
 
 if TYPE_CHECKING:
     from torch.distributed import Work
@@ -23,6 +25,30 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
     The GPipe schedule for USL Server training.
     Will go through all the microbatches in a fill-drain manner.
     """
+
+    def __init__(
+        self, stage, n_microbatches, args_chunk_spec=None, kwargs_chunk_spec=None, output_merge_spec=None, offload_activation_mb_num: int = 0
+    ):
+        super().__init__(stage, n_microbatches, args_chunk_spec, kwargs_chunk_spec, output_merge_spec)
+        # self.server_args = server_args
+        # self.server_device = server_args.server_device
+        # ---- CUDA streams
+        torch.cuda.set_stream(torch.cuda.Stream(self._stage.device))  # set cuda compute stream
+        self.load_stream = torch.cuda.Stream(self._stage.device)  # set cuda load stream
+        self.offload_stream = torch.cuda.Stream(self._stage.device)  # set cuda offload stream
+
+        self.offload_activation_mb_num = offload_activation_mb_num
+        if self.offload_activation_mb_num > 0:
+            self.activation_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
+                num_minibatch=self.offload_activation_mb_num,
+                load_stream=self.load_stream,
+                offload_stream=self.offload_stream,
+            )
+            self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(self.activation_offload_handler)
+
+    @property
+    def offload_activation(self):
+        return self.offload_activation_mb_num > 0
 
     def _step_microbatches(
         self,
@@ -48,6 +74,8 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         fwd_sends_to_wait: List[dist.Work] = []
 
         # Run microbatches
+        if self.offload_activation:
+            self.activation_offload_handler.start_fwd()  # mark the start of bwd
         for i in range(self._n_microbatches):
             with record_function(f"Forward {i}"):
                 ops = self._stage.get_fwd_recv_ops(i)
@@ -55,8 +83,14 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
                 for work in works.values():
                     work.wait()
 
-                _ = self._stage.forward_one_chunk(i, arg_mbs[i], kwarg_mbs[i])  # type: ignore[index]
-
+                # _ = self._stage.forward_one_chunk(i, arg_mbs[i], kwarg_mbs[i])  # type: ignore[index]
+                if i < self.offload_activation_mb_num:
+                    with self.activation_offload_ctx:
+                        _ = self._stage.forward_one_chunk(i, arg_mbs[i], kwarg_mbs[i])
+                        # after ctx, the activation will be offloaded to CPU
+                        self.activation_offload_handler.on_minibatch_commit_forward()
+                else:
+                    _ = self._stage.forward_one_chunk(i, arg_mbs[i], kwarg_mbs[i])
                 ops = self._stage.get_fwd_send_ops(i)
                 works = _sorted_batch_p2p(ops, desc="fwd_send")
                 fwd_sends_to_wait.extend(works.values())
@@ -77,6 +111,8 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
 
         # Run backward
         # Delay send waits
+        if self.offload_activation:
+            self.activation_offload_handler.start_bwd()  # mark the start of bwd
         bwd_sends_to_wait: List[dist.Work] = []
         for i in range(self._n_microbatches):
             with record_function(f"Backward {i}"):
@@ -84,7 +120,8 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
                 works = _sorted_batch_p2p(ops, desc="bwd_recv")
                 for work in works.values():
                     work.wait()
-
+                if i < self.offload_activation_mb_num:
+                    self.activation_offload_handler.on_minibatch_commit_backward()
                 # loss = self._maybe_get_loss(self._stage, i)
                 self._stage.backward_one_chunk(i, loss=None, last_backward=i == self._n_microbatches - 1)
                 ops = self._stage.get_bwd_send_ops(i)

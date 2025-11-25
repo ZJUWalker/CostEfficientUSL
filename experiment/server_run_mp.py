@@ -81,7 +81,8 @@ def run(rank, world_size, server_args: ServerArgs):
     # Create an optimizer
     optimizer = torch.optim.Adam(stage.submod.parameters(), lr=1e-3)
     if server_args.pipeline_mode in [PipelineMode.GPIPE, PipelineMode.PIPE_DREAM_WC, PipelineMode.NAIVE]:
-        scheduler = ServerScheduleGPipe(stage, mb_num)  # don't need loss_fn
+        print('offload_activation_mb_num:', server_args.offload_activation_mb_num)
+        scheduler = ServerScheduleGPipe(stage, mb_num, offload_activation_mb_num=server_args.offload_activation_mb_num)  # don't need loss_fn
     elif server_args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
         scheduler = ServerSchedule1F1B(stage, mb_num)  # don't need loss_fn
     else:
@@ -137,6 +138,18 @@ if __name__ == "__main__":
     )
     os.environ['WORLD_SIZE'] = str(args.world_size)
     world_size = int(os.environ['WORLD_SIZE'])
+    # post process offload args
+    if server_args.offload_activation:
+        server_args.offload_activation_mb_num = server_args.batch_size // server_args.micro_batch_size
+    elif server_args.offload_activation_mb_num > 0:
+        server_args.offload_activation = True
+        server_args.offload_activation_mb_num = min(server_args.offload_activation_mb_num, server_args.batch_size // server_args.micro_batch_size)
+    else:
+        server_args.offload_activation_mb_num = 0
+        server_args.offload_activation = False
+    # print(args)
+    if server_args.offload_activation and server_args.pipeline_mode != PipelineMode.PIPE_DREAM_WC:
+        print("Warning!Offload activation is only supported in pipedream_wc mode, or else it will not be effective.")
     mp.spawn(
         run,
         args=(
