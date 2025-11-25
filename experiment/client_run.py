@@ -56,7 +56,7 @@ def run_client(args: ClientArgs, profile=False):
     elif args.pipeline_mode == PipelineMode.PIPE_DREAM_WC_EAGER:
         Trainer = PipeDreamWCEagerClientTrainer
     else:
-        Trainer = SequentialClientTrainer  # default sequential trainer
+        Trainer = GPipeClientTrainer  # default sequential trainer , same as Gpipe
     client = Trainer(
         client_args=args,
         head_model=head,
@@ -94,6 +94,7 @@ def main():
     parser.add_argument("--profile", "-PROF", action="store_true", default=False)
     parser.add_argument("--save_dir", type=str, default="log/profile")
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
+    parser.add_argument('--server_world_size', '-WS', type=int, default=4)
     args = parser.parse_args()
     profile = args.profile
     args = ClientArgs(
@@ -117,6 +118,7 @@ def main():
         save_dir=args.save_dir,
         pipeline_mode=convert_pipeline_mode(args.pmode),
         max_client_mem_mb=args.max_client_mem_gb * 1024,
+        server_world_size=args.server_world_size,
     )
     # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size

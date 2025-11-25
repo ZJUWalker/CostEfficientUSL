@@ -3,7 +3,7 @@ import os
 import sys
 import torch
 import torch.distributed as dist
-from torch.distributed.pipelining import ScheduleGPipe, PipelineStage
+from torch.distributed.pipelining import ScheduleGPipe, PipelineStage, Schedule1F1B
 from usl.server.base import ServerArgs
 from usl.utils.dataset.exp import AverageMeter
 from usl.utils.load_utils import *
@@ -11,50 +11,29 @@ import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 
 
-def init_logging(rank):
-    import logging
-    import os
-
-    # 最详细分布式 log
-    os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
-
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format=f"[%(asctime)s][Rank {rank}][%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(f"pipeline_rank{rank}.log", mode="a"), logging.StreamHandler()],
-    )
-
-
-def run_gpipe(rank, world_size, stage, optimizer, mb_num, dataloader, loss_fn, log_step, device, print_grad=False):
-    init_logging(rank)
+def run_pipeline(rank, world_size, stage, optimizer, mb_num, loss_fn, device, type=0):
     avg_loss = AverageMeter()
     losses = []
-    schedule = ScheduleGPipe(stage, mb_num, loss_fn=loss_fn)
-    print(f"Rank {rank} start training...")
+    schedule = ScheduleGPipe(stage, mb_num, loss_fn=loss_fn) if type == 0 else Schedule1F1B(stage, mb_num, loss_fn=loss_fn)
+    print(f"Rank {rank} start training...,num_microbatches={mb_num},is first={schedule._stage.is_first},is last={schedule._stage.is_last}")
     # Train the model
-    for idx, batch in enumerate(dataloader, 1):
-        if rank == 0 or rank == world_size - 1:
-            # input_ids = batch["input_ids"].to(device)
-            input_hidden_state = torch.randn(8, 100, 2048).to(device)
-            # attention_mask = torch.zeros(8, 1, 100, 100).to(device)
-            # x, target = batch[0].to(device), batch[1].to(device)
-        if rank == 0:
-            # Input data
-            schedule.step(input_hidden_state)
-        elif rank == world_size - 1:
-            target = torch.randn(8, 100, 2048).to(device)
-            output = schedule.step(target=target, losses=losses)
-            avg_loss.update(torch.stack(losses).mean().item())
-            # Update the model
-            if idx % log_step == 0 or idx == len(dataloader):
-                print(f"Step ({idx-log_step},{idx}): Average loss: {avg_loss.avg}")
-                avg_loss.reset()
-                losses.clear()
-        else:
-            schedule.step()
-        optimizer.step()
-        optimizer.zero_grad()
-        # global_step += 1
+    if rank == 0 or rank == world_size - 1:
+        # input_ids = batch["input_ids"].to(device)
+        input_hidden_state = torch.randn(8, 100, 2048).to(device)
+        # attention_mask = torch.zeros(8, 1, 100, 100).to(device)
+        # x, target = batch[0].to(device), batch[1].to(device)
+    if rank == 0:
+        # Input data
+        schedule.step(input_hidden_state)
+    elif rank == world_size - 1:
+        target = torch.randn(8, 100, 2048).to(device)
+        output = schedule.step(target=target, losses=losses)
+        avg_loss.update(torch.stack(losses).mean().item())
+    else:
+        schedule.step()
+    optimizer.step()
+    optimizer.zero_grad()
+    print(f'loss: {avg_loss.avg}')
 
     pass
 
@@ -96,18 +75,8 @@ def run(rank, world_size, server_args: ServerArgs, type=0):
     # Define a loss function
     # loss_fn = torch.nn.CrossEntropyLoss(reduction="mean")
     loss_fn = lambda x, y: torch.sub(x, y).abs().mean()
-    # Create a dataloader
-    client_dataloaders = load_dataset(dataset_name, tokenizer, [0], batch_size, max_seq_len)
-    dataloader = client_dataloaders[0]['train']  # 默认只取第一个客户端数据
-    # run gpipe
-    # if type == 0:
-    # print(stage.__class__.__name__)
-    run_gpipe(rank, world_size, stage, optimizer, mb_num, dataloader, loss_fn, log_step, device)
-    # # run manual gpipe
-    # elif type == 1:
-    #     run_manual_gpipe(rank, world_size, stage, optimizer, mb_num, dataloader, loss_fn, batch_size, log_step, device)
-    # elif type == 2:
-    #     run_split_server_gpipe(rank, world_size, stage, optimizer, mb_num, dataloader, batch_size, log_step, device)
+    # Train the model
+    run_pipeline(rank, world_size, stage, optimizer, mb_num, loss_fn, device, type)
     dist.destroy_process_group()
 
 
@@ -120,7 +89,7 @@ if __name__ == "__main__":
 
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    os.environ['WORLD_SIZE'] = '4'
+    os.environ['WORLD_SIZE'] = '4'  # must >= 2
     parser = argparse.ArgumentParser()
     parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")

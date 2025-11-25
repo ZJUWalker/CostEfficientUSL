@@ -39,7 +39,7 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
             microbatches: list of microbatch args.
         """
         arg_mbs, kwarg_mbs = self._check_inputs(arg_mbs, kwarg_mbs, target_mbs, losses)
-        print(f"Rank {dist.get_rank()}: arg_mbs: {arg_mbs}, kwarg_mbs: {kwarg_mbs}")
+        # print(f"Rank {dist.get_rank()}: arg_mbs: {arg_mbs}, kwarg_mbs: {kwarg_mbs}")
 
         if not self._stage_initialized:
             self._initialize_stage(arg_mbs[0], kwarg_mbs[0])

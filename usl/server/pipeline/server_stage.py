@@ -42,6 +42,7 @@ class _ServerPipelineStageBase(ABC):
         group: Optional[dist.ProcessGroup] = None,
         dw_builder: Optional[Callable[[], Callable[..., None]]] = None,
         base_port: Optional[int] = 9000,
+        mbps_limit: Optional[int] = 0,
     ):
         """
         Args:
@@ -113,20 +114,26 @@ class _ServerPipelineStageBase(ABC):
         self.stage_index_to_group_rank: Dict[int, int] = {i: i % self.group_size for i in range(self.num_stages)}
 
         # socket communication with client
-        if self.is_first or self.is_last:
+        if self.is_first:
             self.base_port = base_port
-            self.communicator: Optional[SocketCommunicator] = SocketCommunicator(
+            self.communicator_rank_0: Optional[SocketCommunicator] = SocketCommunicator(
                 is_server=True,
                 port=self.base_port if self.is_first else self.base_port + 1,  # different port for each node
                 buffer_size=1024 * 4,  # 4KB
-                rate_limit_mbps=230,
+                rate_limit_mbps=mbps_limit,
             )
-            if self.is_first:
-                self.act_from_client: Queue[Payload] = Queue()
-                self.grad_to_client: Queue[Payload] = Queue()
-            else:
-                self.act_to_client: Queue[Payload] = Queue()
-                self.grad_from_client: Queue[Payload] = Queue()
+            self.act_from_client: Queue[Payload] = Queue()
+            self.grad_to_client: Queue[Payload] = Queue()
+        if self.is_last:
+            self.base_port = base_port + 1
+            self.communicator_rank_n: Optional[SocketCommunicator] = SocketCommunicator(
+                is_server=True,
+                port=self.base_port,  # different port for each node
+                buffer_size=1024 * 4,  # 4KB
+                rate_limit_mbps=mbps_limit,
+            )
+            self.act_to_client: Queue[Payload] = Queue()
+            self.grad_from_client: Queue[Payload] = Queue()
 
     @property
     def has_backward(self) -> bool:
@@ -310,7 +317,7 @@ class _ServerPipelineStageBase(ABC):
         for this stage.
         """
         if self.is_first:
-            payload = self._recv_socket_msg()  # receive input activations from client
+            payload = self._recv_socket_msg(is_activation=True)  # receive input activations from client
             self.act_from_client.put(payload)
             return []
         recv_infos: Tuple[InputInfo, ...] = self.args_recv_info[fwd_chunk_id]
@@ -325,7 +332,7 @@ class _ServerPipelineStageBase(ABC):
         if not self.has_backward:
             return []
         if self.is_last:
-            payload = self._recv_socket_msg()  # receive grads from client
+            payload = self._recv_socket_msg(is_activation=False)  # receive grads from client
             self.grad_from_client.put(payload)
             return []
 
@@ -486,12 +493,14 @@ class _ServerPipelineStageBase(ABC):
             position_embeddings=None,
             # TODO solve token and group_id in Payload
         )
-        self.communicator.send(payload)
+        if payload.is_activation:
+            self.communicator_rank_n.send(payload)
+        else:
+            self.communicator_rank_0.send(payload)
         pass
 
     # TODO define detailed data
     def send_profile_res(self, profile_data: Union[Dict | Any] = {'profile': 1}):
-        print("world_rank:", dist.get_rank(), "group_rank:", dist.get_rank(self.group))
         if profile_data is None:
             profile_data = {"profile": 1}
 
@@ -500,7 +509,7 @@ class _ServerPipelineStageBase(ABC):
         group_size = dist.get_world_size(group)
         is_first = group_rank == 0
 
-        print(f"Rank {group_rank} try to send profile data: {profile_data}")
+        print(f"Rank {group_rank} try to send profile data")
 
         # 只有 dst rank(这里就是 group_rank == 0) 需要提供 list，其他都必须是 None
         obj_list = [None] * group_size if is_first else None
@@ -522,9 +531,9 @@ class _ServerPipelineStageBase(ABC):
                     print(f"Warning: gathered None from rank {i}")
 
             final_profile = {"profile": total_profile}
-            print(f"rank {group_rank} profile data: {final_profile}")
+            print(f"rank {group_rank} get final profile data: {final_profile}")
 
-            self.communicator.send(final_profile)
+            self.communicator_rank_0.send(final_profile)
 
     def _post_process_payload(self, payload: Payload):
         """
@@ -535,11 +544,14 @@ class _ServerPipelineStageBase(ABC):
         # TODO: 处理 payload
 
     @torch.no_grad()
-    def _recv_socket_msg(self, async_op=False) -> Optional[Payload]:
+    def _recv_socket_msg(self, is_activation=True, async_op=False) -> Optional[Payload]:
         #     """
         #     接收 socket 消息
         #     """
-        payload = self.communicator.receive()
+        if is_activation:
+            payload = self.communicator_rank_0.receive()
+        else:
+            payload = self.communicator_rank_n.receive()
 
         if payload is None:
             print(f"Rank {self.group_rank} receive None (peer closed?)")
@@ -550,9 +562,9 @@ class _ServerPipelineStageBase(ABC):
             # TODO: 标记 stop，或者放一个特殊消息进队列
             return None
         assert isinstance(payload, Payload), 'received payload is not a Payload object'
-        print(
-            f"Rank {self.group_rank} receive payload,is activation: {payload.is_activation}, mb_idx: {payload.mb_idx},tensor: {payload.tensor.shape}"
-        )
+        # print(
+        #     f"Rank {self.group_rank} receive payload,is activation: {payload.is_activation}, mb_idx: {payload.mb_idx},tensor: {payload.tensor.shape}"
+        # )
         # mb_idx = payload.mb_idx
         # self._check_chunk_id(mb_idx)
         payload.tensor = payload.tensor.to(self.device).requires_grad_(True)
@@ -669,7 +681,7 @@ class _ServerPipelineStageBase(ABC):
         if self.is_first:
             # First stage need to receive activations from activation queue
             act_payload = self.act_from_client.get(True, timeout=30)
-            print(f"Rank {self.group_rank} receive activation for chunk {fwd_chunk_id}")
+            # print(f"Rank {self.group_rank} receive activation for chunk {fwd_chunk_id}")
             assert act_payload.mb_idx == fwd_chunk_id, 'Received activation for wrong chunk'
             assert act_payload.tensor.is_cuda, 'Received activation is not on GPU'
             if act_payload.attention_mask is not None:
@@ -685,7 +697,7 @@ class _ServerPipelineStageBase(ABC):
         # self._validate_fwd_input(args, kwargs) do not need to validate input for USL
 
         # Compute forward
-        print(f"Rank {self.group_rank} try to fwd for chunk {fwd_chunk_id}")
+        # print(f"Rank {self.group_rank} try to fwd for chunk {fwd_chunk_id}")
         try:
             output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
 
@@ -759,7 +771,7 @@ class _ServerPipelineStageBase(ABC):
             if grad_payload.tensor.is_cpu:
                 grad_payload.tensor = grad_payload.tensor.to(self.device)
             # next stage
-            print(f"Rank {self.group_rank} try to backward for chunk {bwd_chunk_id}")
+            # print(f"Rank {self.group_rank} try to backward for chunk {bwd_chunk_id}")
             bwd_kwargs = {
                 "stage_output": stage_output,
                 "output_grads": (grad_payload.tensor,),
@@ -768,7 +780,7 @@ class _ServerPipelineStageBase(ABC):
         else:
             # Otherwise, receive gradients from next stage
             grads_output = self._retrieve_recv_grads(bwd_chunk_id)
-            print(f"Rank {self.group_rank} try to backward for chunk {bwd_chunk_id}")
+            # print(f"Rank {self.group_rank} try to backward for chunk {bwd_chunk_id}")
             # If an input to the pipeline requires gradient,
             # `torch.autograd.backward` will accumulate the gradient into the
             # `.grad` field of such input
@@ -931,8 +943,10 @@ class ServerPipelineStage(_ServerPipelineStageBase):
         output_args: Optional[Union[torch.Tensor, Tuple[torch.Tensor, ...]]] = None,
         group: Optional[dist.ProcessGroup] = None,
         dw_builder: Optional[Callable[[], Callable[..., None]]] = None,
+        port: Optional[int] = 9000,
+        mbps_limit: Optional[int] = 0,
     ):
-        super().__init__(submodule, stage_index, num_stages, device, group, dw_builder)
+        super().__init__(submodule, stage_index, num_stages, device, group, dw_builder, port, mbps_limit)
         self.inputs: Optional[List[torch.Tensor]] = None
         self.inputs_meta: Optional[Tuple[torch.Tensor, ...]] = None
         # Note: inputs and submod should ideally be on meta device. We decided not to assert this (yet) becuase it
@@ -1136,8 +1150,10 @@ class ServerPipelineStage(_ServerPipelineStageBase):
         If this is used, must be called for all pipeline stages.
         """
         # accept client
-        if self.is_first or self.is_last:
-            self.communicator.accept_client()
+        if self.is_first:
+            self.communicator_rank_0.accept_client()
+        if self.is_last:
+            self.communicator_rank_n.accept_client()
         ops = []
         recv_tensor = torch.zeros(1, device="cuda")
         send_tensor = torch.ones(1, device="cuda")

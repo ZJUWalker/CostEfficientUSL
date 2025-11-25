@@ -32,6 +32,7 @@ class ClientArgs:
     port: int = 8000
     model: str = "meta-llama/llama3.2-1b"
     batch_size: int = 4
+    server_world_size: int = 1  # pipedream need this arg
     max_seq_len: int = 256
     step: int = 5
     dataset: str = "gsm8k"
@@ -62,6 +63,7 @@ class ClientArgs:
             f"b_{self.batch_size}",
             f"mb_{self.micro_batch_size}",
             f"s_{self.max_seq_len}",
+            f"ws_{self.server_world_size}",
             f"mbps_{self.rate_mbps}",
             f"{self.pipeline_mode.value}",
         ]
@@ -486,7 +488,7 @@ class Client:
                         print("send stop flag")
                         continue
                     else:
-                        print(f'rank 0 ,communicator:{self.communicator_rank_0.conn},send payload: {payload.mb_idx}, {payload.is_activation}')
+                        # print(f'rank 0 ,communicator:{self.communicator_rank_0.conn},send payload: {payload.mb_idx}, {payload.is_activation}')
                         mb_idx = payload.mb_idx
                         self.profile_data[mb_idx].head_fwd_send_timestamp[0] = start_send
                         self.profile_data[mb_idx].head_fwd_send_timestamp[1] = end_time
@@ -510,7 +512,7 @@ class Client:
                         time.sleep(0.001)  # 发送给服务器的等待队列中有数据，避免频繁发送
                         continue
                 payload = self.gradient_to_server_queue.get(timeout=0.001)
-                print(f'rank n send payload: {payload.mb_idx}, {payload.is_activation}')
+                # print(f'rank n send payload: {payload.mb_idx}, {payload.is_activation}')
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')
                     self.sent_payload_bytes += payload.payload_nbytes()
@@ -554,7 +556,7 @@ class Client:
                 finally:
                     self.stop_event.set()
                     break
-            print(f'rank 0 recv payload: {data.mb_idx}, {data.is_activation}')
+            # print(f'rank 0 recv payload: {data.mb_idx}, {data.is_activation}')
             assert not data.is_activation, "rank n recv data should be gradient"
             data.tensor = data.tensor.pin_memory()
             self.gradient_from_server_queue.put(data)
@@ -574,7 +576,7 @@ class Client:
             if data is None:
                 print(f"server rank n recv None")
                 break
-            print(f'rank n recv payload: {data.mb_idx}, {data.is_activation}')
+            # print(f'rank n recv payload: {data.mb_idx}, {data.is_activation}')
             assert data.is_activation, "rank 0 recv data should be activation"
             data.tensor = data.tensor.pin_memory()
             self.activation_from_server_queue.put(data)

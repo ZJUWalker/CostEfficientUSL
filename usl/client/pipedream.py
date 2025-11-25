@@ -23,13 +23,12 @@ class PipeDreamStrictClientTrainer(Client):
         dataset_train: Dataset,
         dataset_test: Dataset,
         num_workers: int = 4,
-        server_stage_num: int = 4,  # NEW: 增加 server_stage_num 参数
         normalize_loss: bool = True,  # NEW: 按 accum_steps 归一化 loss
     ):
         super().__init__(
             client_args, head_model, tail_model, tokenizer, client_device, train_logger, dataset_train, dataset_test, num_workers, normalize_loss
         )
-        self.server_stage_num = server_stage_num
+        self.server_stage_num = client_args.server_world_size
 
     def _train_minibatches(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         warmup_steps = min(grad_accum_steps, 2 + self.server_stage_num)
@@ -37,7 +36,7 @@ class PipeDreamStrictClientTrainer(Client):
 
         # 1. Warmup phase for head model forward
         for mb_idx in range(warmup_steps):
-            print(f'client do head forward for mb_idx {mb_idx}')
+            # print(f'client do head forward for mb_idx {mb_idx}')
             payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
@@ -56,7 +55,7 @@ class PipeDreamStrictClientTrainer(Client):
                     if server_activation_payload is not None:
                         mb_idx = server_activation_payload.mb_idx
                         no_tail_fwd_bwd_mb_list[mb_idx] = True
-                        print(f'client do tail forward&backward for mb_idx {mb_idx}')
+                        # print(f'client do tail forward&backward for mb_idx {mb_idx}')
                         activation_to_tail, loss = self._tail_fwd_micro(server_activation_payload)
                         batch_loss += loss.item()
                         grad_payload = self._tail_bwd_micro(

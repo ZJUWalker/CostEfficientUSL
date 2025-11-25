@@ -132,7 +132,7 @@ class _ServerPipelineSchedule(ABC):
 
         # Derived
         self._has_backward = self._loss_fn is not None
-        print(f"Rank {dist.get_rank()}: _has_backward: {self._has_backward}")
+        # print(f"Rank {dist.get_rank()}: _has_backward: {self._has_backward}")
 
         # Holds the losses for each microbatch.
         self._internal_losses: List[torch.Tensor] = []  # TODO delete this

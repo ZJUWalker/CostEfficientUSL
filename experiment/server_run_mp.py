@@ -1,108 +1,111 @@
 import os
-import time
 import torch
-import argparse
-from transformers import AutoConfig
-from usl.server.base import *
-from usl.utils.dataset.exp import AverageMeter
-from usl.utils.exp import set_seed
-from usl.utils.log_utils import create_logger
-from usl.server.pipeline import ScheduleSplitServerGPipe, split_server_pipeline
-
-# from usl.server import *
-import torch.multiprocessing as mp
 import torch.distributed as dist
 
-SEED = 0
-# os.environ['WORLD_SIZE'] = str(torch.cuda.device_count())
-os.environ['WORLD_SIZE'] = '3'
-os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '12355'
+from usl.server.pipeline import ServerScheduleGPipe, ServerSchedule1F1B, ServerPipelineStage
+from usl.server.base import ServerArgs, PipelineMode, convert_pipeline_mode
+from usl.utils.dataset.exp import AverageMeter
+from usl.utils.exp import set_seed
+from usl.utils.load_utils import *
+import torch.multiprocessing as mp
+from transformers import AutoTokenizer
 
 
-def run_server(rank, world_size, server_args: ServerArgs):
+def run_usl_gpipe(rank: int, stage: ServerPipelineStage, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5):
+    schedule = ServerScheduleGPipe(stage, mb_num)  # don't need loss_fn
+    print(f"Rank {rank} start gpipe training...,num_microbatches={mb_num},is first={stage.is_first},is last={stage.is_last}")
+    # Train the model
+    curr_step = 0
+    while curr_step < step:
+        if rank == 0:
+            print(f"Server globle step {curr_step} start...")
+        schedule.step()
+        optimizer.step()
+        optimizer.zero_grad()
+        curr_step += 1
+    dist.barrier()
+    schedule.send_profile_res()
+    pass
+
+
+def run_usl_pipedream(rank: int, stage: ServerPipelineStage, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5):
+    schedule = ServerSchedule1F1B(stage, mb_num)  # don't need loss_fn
+    print(f"Rank {rank} start 1f1b training...,num_microbatches={mb_num},is first={stage.is_first},is last={stage.is_last}")
+    # Train the model
+    curr_step = 0
+    while curr_step < step:
+        if rank == 0:
+            print(f"Server globle step {curr_step} start...")
+        schedule.step()
+        optimizer.step()
+        optimizer.zero_grad()
+        curr_step += 1
+    dist.barrier()
+    schedule.send_profile_res()
 
     pass
 
 
-def run_split_server_gpipe(
-    rank: int,
-    world_size: int,
-    stage,
-    optimizer,
-    mb_num,
-    dataloader,
-    batch_size,
-    log_step,
-    device,
-    print_grad=False,
-):
-    avg_loss = AverageMeter()
-    schedule = ScheduleSplitServerGPipe(stage, mb_num)
-    for idx, batch in enumerate(dataloader, 1):
-        if rank == 0 or rank == world_size - 1:
-            x, target = batch[0].to(device), batch[1].to(device)
-        if rank == 0:
-            # Input data
-            schedule.step(x)
-        elif rank == world_size - 1:
-            # output = schedule.step(target=target, losses=losses)
-            micro_outputs = schedule.step()  # output 是每个microbatch的输出list
-            # generate dummy grads of the same size as the microbatch output,simulate the tail model backward process
-            micro_grads = [torch.randn_like(o, requires_grad=False) for o in micro_outputs]
-            loss = torch.stack([m_grad.sum() for m_grad in micro_grads]).mean().item()
-            avg_loss.update(loss)
-            # split the target into microbatches
-            # Compute loss for each microbatch
-            schedule.compute_batch_loss(micro_grads)
-            if idx % log_step == 0 or idx == len(dataloader):
-                print(f"Step ({idx-log_step},{idx}): Average loss: {avg_loss.avg}")
-                avg_loss.reset()
-        else:
-            schedule.step()
-        # backward and update the model
-        schedule.backward()  # 调用 backward() 之前一定要先在last stage 上计算loss，否则会报错
-        if print_grad and rank == 0 and idx == 1:
-            for n, p in stage.submod.named_parameters():
-                if p.requires_grad:
-                    print(f"Rank:{rank}, module:{n}, grad:{p.grad[...,:10]}")
-                    break
-        optimizer.step()
-        optimizer.zero_grad()
-    dist.barrier()
+def run(rank, world_size, server_args: ServerArgs):
+    set_seed(0)
+    dist.init_process_group(rank=rank, world_size=world_size)
+    model_dir = os.path.join("data/models", server_args.model)
+    split_point = server_args.split_point
+    server_args.server_device = f'cuda:{rank}'
+    device = f'cuda:{rank}'
+    torch.cuda.set_device(device)
+    model_name = server_args.model
+    max_seq_len = 512
+    mb_num = server_args.batch_size // server_args.micro_batch_size
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    tokenizer.pad_token = tokenizer.eos_token
+    server_model = load_server_model(
+        model_dir,
+        model_name,
+        split_point,
+        use_lora=server_args.use_lora,
+    )
+    model = manual_model_split(server_model, rank, world_size, device)
+    stage = ServerPipelineStage(
+        model,
+        rank,
+        world_size,
+        device,
+        input_args=(
+            torch.randn(server_args.micro_batch_size, max_seq_len, model.config.hidden_size, device='meta'),
+            torch.zeros(server_args.micro_batch_size, 1, max_seq_len, max_seq_len, device='meta'),
+        ),
+        mbps_limit=server_args.rate_limit_mbps,
+        port=server_args.port,
+    )
+    stage._init_p2p_neighbors()  # check connection
+    # print(f"Rank {rank} model: {stage.submod}")
+    # Create an optimizer
+    optimizer = torch.optim.Adam(stage.submod.parameters(), lr=1e-3)
+    if server_args.pipeline_mode in [PipelineMode.GPIPE, PipelineMode.PIPE_DREAM_WC, PipelineMode.NAIVE]:
+        run_usl_gpipe(rank, stage, optimizer, mb_num, step=server_args.step)
+    elif server_args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
+        run_usl_pipedream(rank, stage, optimizer, mb_num, step=server_args.step)
+    else:
+        raise NotImplementedError('other pipeline methods are not implemeneted yet')
+    dist.destroy_process_group()
 
 
-#     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-#     # rank = dist.get_rank()
-#     # world_size = dist.get_world_size()
-#     # =====================================================================
-#     log_dir = f"log/{server_args.model}/server"
-#     logger = create_logger(log_file_name=f"training_steps_r_{rank}_w_{world_size}.log", log_dir=log_dir, console_output=False)
-#     # print(f"Server args: {server_args}")
-#     # =====================================================================
-#     model_dir = os.path.join("data/models", server_args.model)
-#     split_point = server_args.split_point
-#     server_model = load_server_model(model_dir, server_args.model, split_point, use_lora=server_args.use_lora)
-#     # server_model = load_stage_server_model(
-#     #     model_dir, server_args.model, split_point, rank, world_size, use_lora=server_args.use_lora
-#     # )  # use_lora=True for LoRA
-#     # =====================================================================
-#     torch.cuda.init()
-#     torch.cuda.set_device(rank)
-#     server_args.server_device = f'cuda:{rank}'
-#     torch.cuda.reset_peak_memory_stats()
-#     server = GpipeServer(server_args, server_model, logger=logger)
-#     print(f"[rank {rank}] Server started")
-#     server.run()
-
-
+'''
+Args:
+    --type: 0 for gpipe, 1 for manual gpipe,2 for u-shape split server gpipe
+'''
 if __name__ == "__main__":
+    import argparse
+
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("-P", "--port", type=int, default=9000, help="Port to listen")
+    parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
     parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="Model card")
-    # parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-DS", "--dataset", type=str, default="dialogsum")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
@@ -113,6 +116,8 @@ if __name__ == "__main__":
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--prof", action="store_true")
+    # parser.add_argument('--type', type=int, default=0)?
+    parser.add_argument('--world_size', '-WS', type=int, default=4)
     args = parser.parse_args()
     server_args = ServerArgs(
         port=args.port,
@@ -127,26 +132,14 @@ if __name__ == "__main__":
         offload_activation=args.offload_activation,
         offload_activation_mb_num=args.offload_activation_mb_num,
         batch_size=args.batch_size,
+        world_size=args.world_size,
         micro_batch_size=args.micro_batch_size,
         prof=args.prof,
     )
-    # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
-    # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size
-    if server_args.offload_activation or server_args.offload_activation_mb_num > 0:
-        server_args.offload_activation_mb_num = max(0, server_args.offload_activation_mb_num)
-        server_args.offload_activation = True
-    else:
-        server_args.offload_activation_mb_num = 0
-        server_args.offload_activation = False
-    # print(args)
-    if server_args.offload_activation and server_args.pipeline_mode != PipelineMode.PIPE_DREAM_WC:
-        print("Warning!Offload activation is only supported in pipedream_wc mode, or else it will not be effective.")
-    set_seed(SEED)
-    # run_server(server_args)
-
+    os.environ['WORLD_SIZE'] = str(args.world_size)
     world_size = int(os.environ['WORLD_SIZE'])
     mp.spawn(
-        run_server,
+        run,
         args=(
             world_size,
             server_args,
