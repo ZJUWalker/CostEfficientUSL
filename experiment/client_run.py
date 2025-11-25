@@ -32,7 +32,7 @@ def run_client(args: ClientArgs, profile=False):
     model_dir = os.path.join("data/models", model_name)
     split_point = args.split_point
     lora = args.use_lora
-    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    device = "cuda:6" if torch.cuda.is_available() else "cpu"
 
     log_dir = f"log/{args.model}/client"
     logger = create_logger(log_file_name=args.build_filename(ext="log").format(''), console_output=False, log_dir=log_dir)

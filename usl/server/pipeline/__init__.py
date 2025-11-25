@@ -1,10 +1,11 @@
-from .server_stage import ServerPipelineStage
+from .server_stage import ServerPipelineStage, _ServerPipelineStageBase
 from .usl_gpipe import ServerScheduleGPipe
 from .usl_1f1b import ServerSchedule1F1B
 from .base_schedule import ServerPipelineScheduleSingle
 
 __all__ = [
     "ServerPipelineStage",
+    "_ServerPipelineStageBase",
     "ServerScheduleGPipe",
     "ServerSchedule1F1B",
     "ServerPipelineScheduleSingle",

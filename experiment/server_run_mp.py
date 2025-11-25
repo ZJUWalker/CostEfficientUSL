@@ -2,7 +2,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from usl.server.pipeline import ServerScheduleGPipe, ServerSchedule1F1B, ServerPipelineStage
+from usl.server.pipeline import ServerScheduleGPipe, ServerSchedule1F1B, ServerPipelineStage, ServerPipelineScheduleSingle
 from usl.server.base import ServerArgs, PipelineMode, convert_pipeline_mode
 from usl.utils.dataset.exp import AverageMeter
 from usl.utils.exp import set_seed
@@ -11,38 +11,36 @@ import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 
 
-def run_usl_gpipe(rank: int, stage: ServerPipelineStage, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5):
-    schedule = ServerScheduleGPipe(stage, mb_num)  # don't need loss_fn
-    print(f"Rank {rank} start gpipe training...,num_microbatches={mb_num},is first={stage.is_first},is last={stage.is_last}")
+def run_pipeline(rank: int, scheduler: ServerPipelineScheduleSingle, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5, profile=False):
+    stage = scheduler._stage
+    # schedule = ServerScheduleGPipe(stage, mb_num)  # don't need loss_fn
+    print(f"Rank {rank} start {scheduler.__class__.__name__} training...,num_microbatches={mb_num},is first={stage.is_first},is last={stage.is_last}")
     # Train the model
     curr_step = 0
-    while curr_step < step:
-        if rank == 0:
-            print(f"Server globle step {curr_step} start...")
-        schedule.step()
-        optimizer.step()
-        optimizer.zero_grad()
-        curr_step += 1
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
+        on_trace_ready=(
+            torch.profiler.tensorboard_trace_handler("./log/trace", worker_name=f"gpipe_ws_{stage.group_size}") if rank == 0 and profile else None
+        ),  # 保存到 TensorBoard
+        # on_trace_ready=None,
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=True,
+    ) as prof:
+        while curr_step < step:
+            if rank == 0:
+                print(f"Server globle step {curr_step} start...")
+            scheduler.step()
+            optimizer.step()
+            optimizer.zero_grad()
+            curr_step += 1
+            if profile and rank == 0:
+                print(f"prof step")
+                prof.step()
     dist.barrier()
-    schedule.send_profile_res()
-    pass
-
-
-def run_usl_pipedream(rank: int, stage: ServerPipelineStage, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5):
-    schedule = ServerSchedule1F1B(stage, mb_num)  # don't need loss_fn
-    print(f"Rank {rank} start 1f1b training...,num_microbatches={mb_num},is first={stage.is_first},is last={stage.is_last}")
-    # Train the model
-    curr_step = 0
-    while curr_step < step:
-        if rank == 0:
-            print(f"Server globle step {curr_step} start...")
-        schedule.step()
-        optimizer.step()
-        optimizer.zero_grad()
-        curr_step += 1
-    dist.barrier()
-    schedule.send_profile_res()
-
+    scheduler.send_profile_res()
     pass
 
 
@@ -51,8 +49,8 @@ def run(rank, world_size, server_args: ServerArgs):
     dist.init_process_group(rank=rank, world_size=world_size)
     model_dir = os.path.join("data/models", server_args.model)
     split_point = server_args.split_point
-    server_args.server_device = f'cuda:{rank}'
-    device = f'cuda:{rank}'
+    server_args.server_device = f'cuda:{rank+4}'
+    device = f'cuda:{rank+4}'
     torch.cuda.set_device(device)
     model_name = server_args.model
     max_seq_len = 512
@@ -83,11 +81,12 @@ def run(rank, world_size, server_args: ServerArgs):
     # Create an optimizer
     optimizer = torch.optim.Adam(stage.submod.parameters(), lr=1e-3)
     if server_args.pipeline_mode in [PipelineMode.GPIPE, PipelineMode.PIPE_DREAM_WC, PipelineMode.NAIVE]:
-        run_usl_gpipe(rank, stage, optimizer, mb_num, step=server_args.step)
+        scheduler = ServerScheduleGPipe(stage, mb_num)  # don't need loss_fn
     elif server_args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
-        run_usl_pipedream(rank, stage, optimizer, mb_num, step=server_args.step)
+        scheduler = ServerSchedule1F1B(stage, mb_num)  # don't need loss_fn
     else:
         raise NotImplementedError('other pipeline methods are not implemeneted yet')
+    run_pipeline(rank, scheduler, optimizer, mb_num, step=server_args.step, profile=server_args.prof)
     dist.destroy_process_group()
 
 
