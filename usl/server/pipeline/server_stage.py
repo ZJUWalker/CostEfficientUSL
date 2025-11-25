@@ -489,6 +489,43 @@ class _ServerPipelineStageBase(ABC):
         self.communicator.send(payload)
         pass
 
+    # TODO define detailed data
+    def send_profile_res(self, profile_data: Union[Dict | Any] = {'profile': 1}):
+        print("world_rank:", dist.get_rank(), "group_rank:", dist.get_rank(self.group))
+        if profile_data is None:
+            profile_data = {"profile": 1}
+
+        group = self.group
+        group_rank = dist.get_rank(group)
+        group_size = dist.get_world_size(group)
+        is_first = group_rank == 0
+
+        print(f"Rank {group_rank} try to send profile data: {profile_data}")
+
+        # 只有 dst rank(这里就是 group_rank == 0) 需要提供 list，其他都必须是 None
+        obj_list = [None] * group_size if is_first else None
+
+        dist.gather_object(
+            obj=profile_data,
+            object_gather_list=obj_list,
+            dst=0,
+            group=group,
+        )
+
+        if is_first:
+            # 这里 obj_list 的长度应该 == group_size，并且每个元素是一个 dict
+            total_profile = 0
+            for i, d in enumerate(obj_list):
+                if d is not None:
+                    total_profile += d.get("profile", 0)
+                else:
+                    print(f"Warning: gathered None from rank {i}")
+
+            final_profile = {"profile": total_profile}
+            print(f"rank {group_rank} profile data: {final_profile}")
+
+            self.communicator.send(final_profile)
+
     def _post_process_payload(self, payload: Payload):
         """
         处理 socket 消息
@@ -731,6 +768,7 @@ class _ServerPipelineStageBase(ABC):
         else:
             # Otherwise, receive gradients from next stage
             grads_output = self._retrieve_recv_grads(bwd_chunk_id)
+            print(f"Rank {self.group_rank} try to backward for chunk {bwd_chunk_id}")
             # If an input to the pipeline requires gradient,
             # `torch.autograd.backward` will accumulate the gradient into the
             # `.grad` field of such input

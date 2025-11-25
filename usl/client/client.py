@@ -547,7 +547,8 @@ class Client:
                     if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
                         print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
                     else:
-                        self._save_profile_res(data)
+                        print(f'get profile data: {data},stop training')
+                        # self._save_profile_res(data)
                 except Exception as e:
                     print(f"error when save profile data: {e}")
                 finally:
@@ -568,8 +569,10 @@ class Client:
             try:
                 data: Optional[Dict | Payload] = self.communicator_rank_n.receive()
             except Exception as e:
+                print(f"server rank n recv error: {e}")
                 break
             if data is None:
+                print(f"server rank n recv None")
                 break
             print(f'rank n recv payload: {data.mb_idx}, {data.is_activation}')
             assert data.is_activation, "rank 0 recv data should be activation"
@@ -796,11 +799,6 @@ class Client:
         )
         print(f"[Client] big batch {global_batch_idx}: micro_bs={micro_bs}, accum_steps={grad_accum_steps},loss = {batch_loss:.4f}")
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
-        # print(self.profile_data)
-        if global_batch_idx == self.client_args.step:
-            print(f"client finished training and need reduce profile data")
-            self.activation_to_server_queue.put({"stop": True})
-        # print(f'global batch id -> {global_batch_idx} finished training')
         pass
 
     def train_epoch(self, profile: bool = False):

@@ -600,6 +600,7 @@ class SingleServer:
 
         self._init_cuda()
         # curr_phase = 'WARMUP'
+        warmup_steps = 2
         while not self.stop_event.is_set():
             while not self.stop_event.is_set():
                 # --- Forward one minibatch ---
@@ -608,13 +609,13 @@ class SingleServer:
                 except Empty:
                     time.sleep(0.001)
                     continue
-                if data.mb_idx == data.mb_total // 2 - 1:
+                if data.mb_idx == warmup_steps - 1:
                     break
             # ---- Fully 1F1B phase ----f
             num_1f1b = 0
             while not self.stop_event.is_set():
                 # --- backward one minibatch ---
-                if num_1f1b == data.mb_total // 2:
+                if num_1f1b == warmup_steps:
                     break
                 data = self._do_one_bwd_task(block=True)
                 if data.mb_idx == 0:
