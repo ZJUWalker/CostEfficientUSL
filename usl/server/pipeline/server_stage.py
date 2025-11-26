@@ -210,8 +210,6 @@ class _ServerPipelineStageBase(ABC):
     def _prepare_forward_infra(
         self,
         num_microbatches: int,
-        args: Tuple[Any, ...],
-        kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Any, ...]:
         raise NotImplementedError
 
@@ -248,21 +246,6 @@ class _ServerPipelineStageBase(ABC):
             ops.append(dist.P2POp(dist.irecv, info.buffer, peer_global_rank, self.group))
 
         return ops
-
-    """[Note: V-schedule special case]
-
-    V-Schedules have a special case where 2 stages with adjacent stage_id are on the same rank.
-
-    ex: 2 ranks, 4 stages forms a simple V:
-    rank0:  stage 0                   stage 3
-    rank1:          stage 1  stage 2
-
-    stage 0,1 and 2,3 communicate activations using send/recv as usual, but stage 1,2 do not need to
-    use communication ops.  Instead, they should pass tensor data directly via function call.
-
-    set_local_fwd_input and (get_local_bwd_output + set_local_bwd_input) facilitate this optimization, and
-    should be called at the appropriate time during the pipeline schedule (after forward or backward execution).
-    """
 
     def set_local_fwd_input(self, prev_stage_outputs: Any, mb_index: int) -> None:
         """
@@ -565,8 +548,6 @@ class _ServerPipelineStageBase(ABC):
         # print(
         #     f"Rank {self.group_rank} receive payload,is activation: {payload.is_activation}, mb_idx: {payload.mb_idx},tensor: {payload.tensor.shape}"
         # )
-        # mb_idx = payload.mb_idx
-        # self._check_chunk_id(mb_idx)
         payload.tensor = payload.tensor.to(self.device).requires_grad_(True)
         if payload.attention_mask is not None:
             payload.attention_mask = payload.attention_mask.to(self.device)
@@ -666,8 +647,6 @@ class _ServerPipelineStageBase(ABC):
     def forward_one_chunk(
         self,
         fwd_chunk_id: int,
-        args: Tuple[Any, ...],
-        kwargs: Optional[Dict[str, Any]] = None,
     ):
         """
         Perform forward pass on the stage with one microbatch.
@@ -692,9 +671,7 @@ class _ServerPipelineStageBase(ABC):
             # Activations only come in args form
             composite_args = self._retrieve_recv_activations(fwd_chunk_id)
 
-        composite_kwargs = kwargs or {}
-
-        # self._validate_fwd_input(args, kwargs) do not need to validate input for USL
+        composite_kwargs = {}
 
         # Compute forward
         # print(f"Rank {self.group_rank} try to fwd for chunk {fwd_chunk_id}")
@@ -739,7 +716,6 @@ class _ServerPipelineStageBase(ABC):
     def backward_one_chunk(
         self,
         bwd_chunk_id: int,
-        loss=None,
         full_backward: bool = True,
         last_backward=False,
     ):
@@ -1074,8 +1050,8 @@ class ServerPipelineStage(_ServerPipelineStageBase):
     def _prepare_forward_infra(
         self,
         num_microbatches: int,
-        args: Tuple[Any, ...],
-        kwargs: Optional[Dict[str, Any]] = None,
+        # args: Tuple[Any, ...],
+        # kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Any, ...]:
         # TODO move self.device to an argument from step API (from its input tensors)?
         assert num_microbatches is not None, "TODO fix num_microbatches"

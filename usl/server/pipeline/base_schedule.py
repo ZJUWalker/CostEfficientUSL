@@ -21,7 +21,7 @@ from torch.profiler import record_function
 from torch.distributed.pipelining.microbatch import merge_chunks, split_args_kwargs_into_chunks, TensorChunkSpec
 from torch.distributed.pipelining.schedules import _sorted_batch_p2p, _batch_p2p
 from usl.server.pipeline.server_stage import _ServerPipelineStageBase
-
+from typing_extensions import deprecated
 
 if TYPE_CHECKING:
     from torch.distributed import Work
@@ -112,18 +112,10 @@ class _ServerPipelineSchedule(ABC):
     def __init__(
         self,
         n_microbatches: int,
-        args_chunk_spec: Optional[Tuple[TensorChunkSpec, ...]] = None,
-        kwargs_chunk_spec: Optional[Dict[str, TensorChunkSpec]] = None,
-        output_merge_spec: Optional[Union[Dict[str, Any], Tuple[Any]]] = None,
     ):
         # From arguments
         self._n_microbatches = n_microbatches
         self._loss_fn = lambda: torch.tensor(0.0)  # dummy loss function TODO delete anything about loss and loss_fn
-        # Chunking specification for positional inputs. (default: `None`)
-        self._args_chunk_spec = args_chunk_spec
-        # Chunking specification for keyword inputs. (default: `None`)
-        self._kwargs_chunk_spec = kwargs_chunk_spec
-        self._output_merge_spec = output_merge_spec
         """
         # args_chunk_spec and kwargs_chunk_spec specify how to chunk inputs.
         # They are used to convert batch to microbatches in `step(x)`.  See
@@ -133,48 +125,7 @@ class _ServerPipelineSchedule(ABC):
         # Derived
         self._has_backward = self._loss_fn is not None
         # print(f"Rank {dist.get_rank()}: _has_backward: {self._has_backward}")
-
-        # Holds the losses for each microbatch.
-        self._internal_losses: List[torch.Tensor] = []  # TODO delete this
         logger.info("Using %s", self.__class__.__name__)
-
-    """
-    no need for compute ,save ,retrive losses!!!!!!!!!!
-    """
-    # def _maybe_compute_loss(self, stage, output, target_mbs, mb_index):
-    #     if stage.is_last and self._has_backward:
-    #         loss = self._compute_loss(output, target_mbs[mb_index])  # type: ignore[index]
-    #         self._internal_losses.append(loss)
-
-    # def _maybe_get_loss(self, stage, mb_index):
-    #     valid_index = 0 <= mb_index < len(self._internal_losses)
-    #     if stage.is_last and self._has_backward and valid_index:
-    #         return self._internal_losses[mb_index]
-    #     elif len(self._internal_losses) != 0 and not valid_index:
-    #         raise RuntimeError(f"Loss for microbatch {mb_index} is not available. " f"Available losses for microbatches: {self._internal_losses}")
-    #     else:
-    #         return None
-
-    # def _update_losses(self, stages, losses):
-    #     """
-    #     Update the losses to those in the internal state
-    #     """
-    #     # if stages not a list turn into a list
-    #     if not isinstance(stages, list):
-    #         stages = [stages]
-    #     contains_last_stage = any(stage.is_last for stage in stages)
-
-    #     # Return losses if there is a container passed in
-    #     if contains_last_stage and losses is not None:
-    #         if len(self._internal_losses) != self._n_microbatches:
-    #             raise RuntimeError(f"Expecting {self._n_microbatches} losses but got {len(self._internal_losses)}")
-
-    #         # Clean external container first
-    #         losses.clear()
-    #         # Copy internal losses to external container
-    #         losses.extend(self._internal_losses)
-
-    #     self._internal_losses.clear()
 
     @abstractmethod
     def _step_microbatches(
@@ -208,6 +159,7 @@ class _ServerPipelineSchedule(ABC):
         """
         raise NotImplementedError
 
+    @deprecated('_check_inputs is deprecated and will be removed in a future version.')
     def _check_inputs(
         self,
         arg_mbs: Optional[List] = None,
@@ -244,9 +196,7 @@ class _ServerPipelineSchedule(ABC):
 
         return arg_mbs, kwarg_mbs
 
-    # def _compute_loss(self, output, target):
-    #     return self._loss_fn(output, target)  # type: ignore[misc]
-
+    @deprecated('_split_inputs is deprecated and will be removed in a future version.')
     def _split_inputs(
         self,
         args: Tuple[Any, ...],
@@ -270,6 +220,7 @@ class _ServerPipelineSchedule(ABC):
             # Return a list of empty tuples/dicts with matching length as chunks
             return [()] * self._n_microbatches, [{}] * self._n_microbatches
 
+    @deprecated('_merge_outputs is deprecated and will be removed in a future version.')
     def _merge_outputs(self, output_chunks: List[Any]) -> Any:
         """
         Merge output chunks back to a batch state.
@@ -292,16 +243,10 @@ class ServerPipelineScheduleSingle(_ServerPipelineSchedule):
         self,
         stage: _ServerPipelineStageBase,
         n_microbatches: int,
-        args_chunk_spec: Optional[Tuple[TensorChunkSpec, ...]] = None,
-        kwargs_chunk_spec: Optional[Dict[str, TensorChunkSpec]] = None,
-        output_merge_spec: Optional[Union[Dict[str, Any], Tuple[Any]]] = None,
     ):
         # Init parent
         super().__init__(
             n_microbatches=n_microbatches,
-            args_chunk_spec=args_chunk_spec,
-            kwargs_chunk_spec=kwargs_chunk_spec,
-            output_merge_spec=output_merge_spec,
         )
         # Self attributes
         self._stage = stage
@@ -310,8 +255,8 @@ class ServerPipelineScheduleSingle(_ServerPipelineSchedule):
         self._stage.has_backward = self._has_backward
         self._stage_initialized = False
 
-    def _initialize_stage(self, args, kwargs):
-        self._stage._prepare_forward_infra(self._n_microbatches, args, kwargs)
+    def _initialize_stage(self):
+        self._stage._prepare_forward_infra(self._n_microbatches)
         if self._has_backward:
             self._stage._prepare_backward_infra(self._n_microbatches)
         self._stage_initialized = True
@@ -330,24 +275,8 @@ class ServerPipelineScheduleSingle(_ServerPipelineSchedule):
 
         # Clean per iteration
         self._stage.clear_runtime_states()
-
-        # Split inputs into microbatches
-        args_split, kwargs_split = self._split_inputs(args, kwargs)
-
-        # Split target into microbatches
-        if target is not None:
-            targets_split = list(torch.tensor_split(target, self._n_microbatches))
-        else:
-            targets_split = None
-
         # Run microbatches
-        self._step_microbatches(args_split, kwargs_split, targets_split, losses)
-
-        # Return merged results per original format
-        # if self._stage.is_last:
-        #     return self._merge_outputs(self._stage.output_chunks)
-        # else:
-        return None
+        self._step_microbatches()
 
     # TODO do profile here
     def send_profile_res(self):

@@ -25,13 +25,7 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
     Will perform one forward and one backward on the microbatches in steady state.
     """
 
-    def _step_microbatches(
-        self,
-        arg_mbs: Optional[List] = None,
-        kwarg_mbs: Optional[List] = None,
-        target_mbs: Optional[List] = None,
-        losses: Optional[List] = None,
-    ):
+    def _step_microbatches(self):
         """
         Run one iteration of the pipeline schedule with list of microbatches.
         Will go through all the microbatches according to the 1F1B schedule.
@@ -39,10 +33,9 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
         Args:
             microbatches: list of microbatch args.
         """
-        arg_mbs, kwarg_mbs = self._check_inputs(arg_mbs, kwarg_mbs, target_mbs, losses)
 
         if not self._stage_initialized:
-            self._initialize_stage(arg_mbs[0], kwarg_mbs[0])
+            self._initialize_stage()
 
         stage_warmup_chunks = min(
             self._n_microbatches,
@@ -63,7 +56,7 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
                 recv_work.wait()
 
             # Compute
-            _ = self._stage.forward_one_chunk(fwd_mb_index, arg_mbs[fwd_mb_index], kwarg_mbs[fwd_mb_index])  # type: ignore[index]
+            _ = self._stage.forward_one_chunk(fwd_mb_index)  # type: ignore[index]
 
             # Clear previous chunk's forward sends (hopefully they have well
             # finished, otherwise, we are heavily communication bound, in which
@@ -79,9 +72,6 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
                 send_work = _batch_p2p(fwd_sends, desc="fwd_send")
             # otherwise:
             #   The last foward send is left for fuse with first 1B in 1B1F below
-
-            # Compute loss
-            # self._maybe_compute_loss(self._stage, output, target_mbs, fwd_mb_index)
             fwd_mb_index += 1
 
         # Now we should have send ops left over, to be fused with first 1B of 1B1F phase below.
@@ -119,10 +109,7 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
                 fuse_work.wait()
 
             # Now do the fwd
-            output = self._stage.forward_one_chunk(fwd_mb_index, arg_mbs[fwd_mb_index], kwarg_mbs[fwd_mb_index])  # type: ignore[index]
-
-            # Compute loss
-            # self._maybe_compute_loss(self._stage, output, target_mbs, fwd_mb_index)
+            _ = self._stage.forward_one_chunk(fwd_mb_index)  # type: ignore[index]
 
             # Get the fwd send ops, but don't fire, leave it for the next iter (wrap-around)
             fwd_sends = self._stage.get_fwd_send_ops(fwd_mb_index)
@@ -139,7 +126,6 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
                 recv_work.wait()
 
             # Backward one chunk
-            # loss = self._maybe_get_loss(self._stage, bwd_mb_index)
             self._stage.backward_one_chunk(
                 bwd_mb_index,
                 loss=None,
@@ -158,6 +144,3 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
         # Wait for the last backward send to finish
         if send_work:
             send_work.wait()
-
-        # Return losses if there is a container passed in
-        # self._update_losses(self._stage, losses)

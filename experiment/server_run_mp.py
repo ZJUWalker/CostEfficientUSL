@@ -49,8 +49,8 @@ def run(rank, world_size, server_args: ServerArgs):
     dist.init_process_group(rank=rank, world_size=world_size)
     model_dir = os.path.join("data/models", server_args.model)
     split_point = server_args.split_point
-    server_args.server_device = f'cuda:{rank+4}'
-    device = f'cuda:{rank+4}'
+    server_args.server_device = f'cuda:{rank}'
+    device = f'cuda:{rank}'
     torch.cuda.set_device(device)
     model_name = server_args.model
     max_seq_len = 512
