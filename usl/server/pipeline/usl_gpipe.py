@@ -118,3 +118,18 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         # Wait for all backward sends to finish
         for work in bwd_sends_to_wait:
             work.wait()
+
+    def send_profile_res(self):
+        profile_data = self._stage.profile_data
+        res = {
+            'profile': profile_data,
+            'max_mem_alloc': round(self._stage.max_cuda_memory_allocated_during_fwd / 1024**2, 4),
+            'server_fwd_time': 0,  # TODO add fwd time
+            'server_fwd_send_time': 0,
+            'server_bwd_time': 0,
+            'server_bwd_send_time': 0,
+            "server_offload_time_durations": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
+            "server_reload_time_durations": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
+            "file_suffix": f'soa_{self.offload_activation_mb_num}' if self.offload_activation else '',
+        }
+        self._stage.send_profile_res(res)

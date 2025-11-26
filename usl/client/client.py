@@ -550,7 +550,7 @@ class Client:
                         print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
                     else:
                         print(f'get profile data: {data},stop training')
-                        # self._save_profile_res(data)
+                        self._save_profile_res(data)
                 except Exception as e:
                     print(f"error when save profile data: {e}")
                 finally:
@@ -737,7 +737,7 @@ class Client:
         # if not os.path.exists(png_save_dir):
         #     os.makedirs(png_save_dir)
         # plot_gantt_per_batch(self.profile_data, fp=self.client_args.build_filename(prefix=png_save_dir, ext="png"))
-        png_save_dir_c = f"log/img/grouped/{self.client_args.model}"
+        png_save_dir_c = f"log/img/{self.client_args.model}"
         if not os.path.exists(png_save_dir_c):
             os.makedirs(png_save_dir_c)
         plot_gantt_grouped(self.profile_data, fp=self.client_args.build_filename(prefix=png_save_dir_c, ext="png").format(server_policy_str))

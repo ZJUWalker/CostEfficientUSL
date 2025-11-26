@@ -208,7 +208,7 @@ class ServerPipelineScheduleSingle(_ServerPipelineSchedule):
 
     # TODO do profile here
     def send_profile_res(self):
-        self._stage.send_profile_res()
+        profile_data = self._stage.profile_data
         #         {
         #     "profile": None,
         #     "max_mem_alloc": round(self.max_cuda_memory_allocated / 1024**2, 4),
@@ -224,3 +224,16 @@ class ServerPipelineScheduleSingle(_ServerPipelineSchedule):
         #     ),
         #     "file_suffix": f'soa_{self.server_args.offload_activation_mb_num}' if self.server_args.offload_activation else '',
         # }
+
+        res = {
+            'profile': profile_data,
+            'max_mem_alloc': round(self._stage.max_cuda_memory_allocated_during_fwd / 1024**2, 4),
+            'server_fwd_time': 0,
+            'server_fwd_send_time': 0,
+            'server_bwd_time': 0,
+            'server_bwd_send_time': 0,
+            "server_offload_time_durations": 0,
+            "server_reload_time_durations": 0,
+            "file_suffix": '',
+        }
+        self._stage.send_profile_res(res)

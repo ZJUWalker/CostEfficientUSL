@@ -4,6 +4,7 @@ import logging
 import operator
 from abc import ABC, abstractmethod
 from queue import Queue
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -21,6 +22,7 @@ from torch.distributed.pipelining._debug import map_debug_info
 from torch.distributed.pipelining._utils import flatten_args, PipeInfo, validate_tensors_metadata
 from torch.distributed.pipelining.stage import _RecvInfo, _RootArgPlaceholder, InputInfo, _make_tensor_from_meta, _normalize_model_output_as_tuple
 from usl.socket import SocketCommunicator, Payload
+from usl.utils.usl_gantt_plot import GanttChartData
 from typing_extensions import deprecated
 
 logger = logging.getLogger(__name__)
@@ -134,6 +136,10 @@ class _ServerPipelineStageBase(ABC):
             )
             self.act_to_client: Queue[Payload] = Queue()
             self.grad_from_client: Queue[Payload] = Queue()
+        # ----- Profile and Metrics ----
+        self.profile_data: List[GanttChartData] = None  # init along with self.chunks later
+        self.max_cuda_memory_allocated_during_fwd = 0
+        self.max_cuda_memory_allocated_during_bwd = 0
 
     @property
     def has_backward(self) -> bool:
@@ -216,6 +222,7 @@ class _ServerPipelineStageBase(ABC):
     def _prepare_backward_infra(self, num_microbatches: int):
         # TODO: this is needed for backward_maybe_with_nosync
         self.chunks = num_microbatches
+        self.profile_data: List[GanttChartData] = [GanttChartData(mini_batch_idx=i) for i in range(num_microbatches)]
 
         for mb_index in range(num_microbatches):
             # `grad_recv_info` is a mirror of `act_send_info`
@@ -459,10 +466,11 @@ class _ServerPipelineStageBase(ABC):
         return grads
 
     @torch.no_grad()
-    def _send_socket_msg(self, is_activation, mb_idx, tensor: torch.Tensor, async_op=False):
+    def _send_socket_msg(self, is_activation: bool, mb_idx: int, tensor: torch.Tensor, async_op=False):
         """
         发送 socket 消息
         """
+        start_time = time.time()
         if tensor.is_cuda:
             cpu_tensor = tensor.cpu().pin_memory()
         # send CPU payload to client
@@ -480,13 +488,19 @@ class _ServerPipelineStageBase(ABC):
             self.communicator_rank_n.send(payload)
         else:
             self.communicator_rank_0.send(payload)
+        end_time = time.time()
+        if is_activation:
+            self.profile_data[mb_idx].server_fwd_send_timestamp[0] = start_time
+            self.profile_data[mb_idx].server_fwd_send_timestamp[1] = end_time
+        else:
+            self.profile_data[mb_idx].server_bwd_send_timestamp[0] = start_time
+            self.profile_data[mb_idx].server_bwd_send_timestamp[1] = end_time
         pass
 
     # TODO define detailed data
-    def send_profile_res(self, profile_data: Union[Dict | Any] = {'profile': 1}):
+    def send_profile_res(self, profile_data: Dict = None):
         if profile_data is None:
-            profile_data = {"profile": 1}
-
+            profile_data = {'profile', self.profile_data}
         group = self.group
         group_rank = dist.get_rank(group)
         group_size = dist.get_world_size(group)
@@ -506,17 +520,17 @@ class _ServerPipelineStageBase(ABC):
 
         if is_first:
             # 这里 obj_list 的长度应该 == group_size，并且每个元素是一个 dict
-            total_profile = 0
-            for i, d in enumerate(obj_list):
-                if d is not None:
-                    total_profile += d.get("profile", 0)
-                else:
-                    print(f"Warning: gathered None from rank {i}")
+            # total_profile = 0
+            # for i, d in enumerate(obj_list):
+            #     if d is not None:
+            #         total_profile += d.get("profile", 0)
+            #     else:
+            #         print(f"Warning: gathered None from rank {i}")
 
-            final_profile = {"profile": total_profile}
-            print(f"rank {group_rank} get final profile data: {final_profile}")
+            # final_profile = {"profile": total_profile}
+            # print(f"rank {group_rank} get final profile data: {profile_data}")
 
-            self.communicator_rank_0.send(final_profile)
+            self.communicator_rank_0.send(profile_data)
 
     def _post_process_payload(self, payload: Payload):
         """
@@ -557,18 +571,27 @@ class _ServerPipelineStageBase(ABC):
                     emb = emb.to(self.device)
         return payload
 
-    def forward_maybe_with_nosync(self, *args, **kwargs):
+    def forward_maybe_with_nosync(self, mb_idx: int, *args, **kwargs):
         # If submod is wrapped with DDP, we use the `no_sync` context manager to
         # avoid gradient all-reduce per microbatch
+        torch.cuda.current_stream().synchronize()
+        s = time.time()
         if isinstance(self.submod, DistributedDataParallel):
             with self.submod.no_sync():  # type: ignore[operator]
                 out_val = self.submod(*args, **kwargs)
         else:
             out_val = self.submod(*args, **kwargs)
+        torch.cuda.current_stream().synchronize()
+        e = time.time()
+        self.profile_data[mb_idx].server_fwd_timestamp[0] = s
+        self.profile_data[mb_idx].server_fwd_timestamp[1] = e
+        if not self.is_last:
+            self.profile_data[mb_idx].server_fwd_send_timestamp[0] = e
+            self.profile_data[mb_idx].server_fwd_send_timestamp[1] = e
         return out_val
 
     def backward_maybe_with_nosync(
-        self, backward_type, bwd_kwargs: Dict, last_backward=False
+        self, backward_type: str, mb_idx: int, bwd_kwargs: Dict, last_backward=False
     ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Optional[List[Dict[str, Any]]]]:
         """
         Whether using PP with FSDP or DDP, there are some runtime differences between the last backward step and the
@@ -639,7 +662,17 @@ class _ServerPipelineStageBase(ABC):
                 run_post_backward(self.submod)
         else:
             # Non-DP submodule, regular backward
+            torch.cuda.current_stream().synchronize()
+            s = time.time()
             result = perform_backward(backward_type)()
+            torch.cuda.current_stream().synchronize()
+            e = time.time()
+            self.profile_data[mb_idx].server_bwd_timestamp[0] = s
+            self.profile_data[mb_idx].server_bwd_timestamp[1] = e
+            if not self.is_first:
+                # we assume that nccl transfer time is neligible
+                self.profile_data[mb_idx].server_bwd_send_timestamp[0] = e
+                self.profile_data[mb_idx].server_bwd_send_timestamp[1] = e
 
         grads, param_groups = result
         return grads, param_groups
@@ -676,7 +709,7 @@ class _ServerPipelineStageBase(ABC):
         # Compute forward
         # print(f"Rank {self.group_rank} try to fwd for chunk {fwd_chunk_id}")
         try:
-            output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
+            output = self.forward_maybe_with_nosync(fwd_chunk_id, *composite_args, **composite_kwargs)
 
         except Exception as e:
             exc_msg = f"""
@@ -708,7 +741,7 @@ class _ServerPipelineStageBase(ABC):
             map_debug_info(output),
         )
         self._validate_fwd_outputs(output_tuple)
-
+        self.max_cuda_memory_allocated_during_fwd = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated_during_fwd)
         # We return the original user-provied output, not normalized to tuple.
         # See [Note: pipeline model output type]
         return output
@@ -772,14 +805,14 @@ class _ServerPipelineStageBase(ABC):
         if self.dw_builder:
             # TODO: We may want to change our semantics so we are allowed to ignore
             # the 'dw_builder' and call full_backward directly when it is a full_backward op.
-            grads_input, _ = self.backward_maybe_with_nosync("full", bwd_kwargs, last_backward=last_backward)
+            grads_input, _ = self.backward_maybe_with_nosync("full", bwd_chunk_id, bwd_kwargs, last_backward=last_backward)
             if full_backward:
                 self.dw_builder()()
             else:
                 self.dw_runner[bwd_chunk_id] = self.dw_builder()
         else:
             if full_backward:
-                grads_input, _ = self.backward_maybe_with_nosync("full", bwd_kwargs, last_backward=last_backward)
+                grads_input, _ = self.backward_maybe_with_nosync("full", bwd_chunk_id, bwd_kwargs, last_backward=last_backward)
             else:
                 param_groups: List[Dict[str, Any]] | None = None
                 # Skip the backward for the first stage since we will perform the weight update with
@@ -790,7 +823,7 @@ class _ServerPipelineStageBase(ABC):
 
                     # perform the partial backwards for the inputs with a custom backward function
                     # when the "stage_ouput" is a loss, then it is a tensor, otherwise it is a tuple of tensors
-                    grads_input, param_groups = self.backward_maybe_with_nosync("input", bwd_kwargs, last_backward=last_backward)
+                    grads_input, param_groups = self.backward_maybe_with_nosync("input", bwd_chunk_id, bwd_kwargs, last_backward=last_backward)
 
                 # TODO: we dont need to save this, add to dw_runner?
                 self.backward_state[bwd_chunk_id] = (
@@ -812,7 +845,7 @@ class _ServerPipelineStageBase(ABC):
             # this should be detached to release autograd graph context and free memory earlier
             for t in stage_output:
                 t.detach_()
-
+        self.max_cuda_memory_allocated_during_bwd = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated_during_bwd)
         logger.debug("%s Backwarded chunk %s", self.log_prefix, bwd_chunk_id)
 
     @deprecated('This method is not used in Gpipe and 1F1B schedule.')
@@ -837,7 +870,7 @@ class _ServerPipelineStageBase(ABC):
                     "stage_output": stage_output,
                     "param_groups": param_groups,
                 }
-                self.backward_maybe_with_nosync("weight", bwd_kwargs, last_backward=last_backward)
+                self.backward_maybe_with_nosync("weight", bwd_chunk_id, bwd_kwargs, last_backward=last_backward)
             else:
                 # TODO: figure out a better way to do this:
                 # if inputs does not require gradient,
@@ -849,7 +882,7 @@ class _ServerPipelineStageBase(ABC):
                     "output_grads": output_grads,
                     "input_values": input_values,
                 }
-                self.backward_maybe_with_nosync("full", bwd_kwargs, last_backward=last_backward)
+                self.backward_maybe_with_nosync("full", bwd_chunk_id, bwd_kwargs, last_backward=last_backward)
 
     def _validate_fwd_input(self, args, kwargs):
         """Raises a RuntimeError if shapes of input args/kwargs do not match the shapes configured for this stage."""
