@@ -120,9 +120,7 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
             work.wait()
 
     def send_profile_res(self):
-        profile_data = self._stage.profile_data
         res = {
-            'profile': profile_data,
             'max_mem_alloc': round(self._stage.max_cuda_memory_allocated_during_fwd / 1024**2, 4),
             'server_fwd_time': 0,  # TODO add fwd time
             'server_fwd_send_time': 0,

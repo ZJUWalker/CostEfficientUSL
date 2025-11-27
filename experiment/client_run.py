@@ -14,7 +14,7 @@ from usl.client import (
     GPipeClientTrainer,
     SequentialClientTrainer,
     PipeDreamStrictClientTrainer,
-    PipeDreamWCClientTrainer,
+    SplitMindClientTrainer,
     PipeDreamWCEagerClientTrainer,
 )
 
@@ -52,7 +52,7 @@ def run_client(args: ClientArgs, profile=False):
     elif args.pipeline_mode == PipelineMode.PIPE_DREAM_STRICT:
         Trainer = PipeDreamStrictClientTrainer
     elif args.pipeline_mode == PipelineMode.PIPE_DREAM_WC:
-        Trainer = PipeDreamWCClientTrainer
+        Trainer = SplitMindClientTrainer
     elif args.pipeline_mode == PipelineMode.PIPE_DREAM_WC_EAGER:
         Trainer = PipeDreamWCEagerClientTrainer
     else:
@@ -78,7 +78,7 @@ def main():
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
     parser.add_argument("-S", "--step", type=int, default=5)
-    parser.add_argument("-DS", "--dataset", type=str, default="dialogsum")
+    parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)

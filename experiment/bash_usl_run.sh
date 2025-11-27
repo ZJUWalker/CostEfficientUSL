@@ -2,12 +2,12 @@ SPLIT_POINT=2
 MBPS=230
 BATCH_SIZE=8
 STEP=2
-PMODE=pdwc
+PMODE=pds
 MODEL_NAME=qwen/qwen3-1.7b
 PORT=9000
 WORLD_SIZE=4
-PROFILE='' # or ''
-OFFLOAD_ACTI='--offload_activation' # or ''
+PROFILE='' #   '--prof' or '' 
+OFFLOAD_ACTI='' # '--offload_activation' or ''
 
 if [ "$PMODE" = "naive" ]; then
     MICRO_BATCH_SIZE=$BATCH_SIZE

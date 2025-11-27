@@ -1,7 +1,7 @@
 from dataclasses import asdict, dataclass, field
 import json
 import matplotlib.pyplot as plt
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional, Union
 
 
 @dataclass
@@ -24,7 +24,7 @@ class GanttChartData:
     head_optimizer_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     tail_optimizer_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     activation_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
-    
+
     head_m_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     tail_m_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
     head_optimizer_reload_ts: List[float] = field(default_factory=lambda: [None] * 2)
@@ -201,70 +201,80 @@ def plot_gantt_per_batch(
         # print(f"Gantt 图已保存到 {fp}")
 
 
-def plot_gantt_grouped(
-    mini_batch_time_gantt: Optional[List[Dict] | List[GanttChartData]] = None,
-    fp: str = "grouped.png",
-    align: bool = True,
-    alpha: float = 0.3,
+def plot_grouped_gantt(
+    mini_batch_time_gantt: List[List[GanttChartData]],
+    fp: str,
+    alpha: float = 0.5,
     show: bool = False,
+    align: bool = True,
 ):
     """
-    绘制分组甘特图（四行：Server Send, Server Compute, Client Send, Client Compute）。
+    数据结构：
+        mini_batch_time_gantt[0]  -> Client 的 List[GanttChartData]
+        mini_batch_time_gantt[1:] -> 各个 Server rank 的 List[GanttChartData]
 
-    Args:
-        mini_batch_time_gantt: GanttChartData 列表或字典列表
-        fp: 保存文件名
-        alpha: 透明度
-        show: 是否直接 plt.show()
+    行顺序：
+        Client Compute
+        Client Send
+        Server-rank0 Compute
+        Server-rank1 Compute
+        ...
+        Server-rankN Compute
+        Server Send
     """
     if not mini_batch_time_gantt:
         print("没有数据")
         return
-    if isinstance(mini_batch_time_gantt[0], GanttChartData):
-        mini_batch_time_gantt = [asdict(data) for data in mini_batch_time_gantt]
 
-    # 对齐时间
-    aligned_list = _to_aligned_ms(mini_batch_time_gantt) if align else mini_batch_time_gantt
+    # ---------- 1. 展平成“扁平的 List[Dict]”，并加上 rank 信息 ----------
+    flat_list: List[Dict[str, Any]] = []
 
-    # 检查是否需要绘制Client Offload / Reload两行
-    OFFLOAD_KEYS = [
-        "head_m_offload_ts", "tail_m_offload_ts",
-        "head_optimizer_offload_ts", "tail_optimizer_offload_ts",
+    for rank_idx, rank_list in enumerate(mini_batch_time_gantt):
+        if not rank_list:
+            continue
+        for mb in rank_list:
+            if mb is None:
+                continue
+            d = asdict(mb)
+            d["rank"] = rank_idx  # 0 = client, 1..N = server ranks
+            flat_list.append(d)
+
+    if not flat_list:
+        print("没有有效的数据（全是 None？）")
+        return
+
+    # ---------- 2. 对齐时间（可选） ----------
+    aligned_list = _to_aligned_ms(flat_list) if align else flat_list
+
+    # ---------- 3. 只用我们要画的 key 来统计 all_times ----------
+    CLIENT_COMPUTE_KEYS = [
+        "head_fwd_timestamp",
+        "head_bwd_timestamp",
+        "tail_fwd_timestamp",
+        "tail_bwd_timestamp",
     ]
-    RELOAD_KEYS = [
-        "head_m_reload_ts", "tail_m_reload_ts",
-        "head_optimizer_reload_ts", "tail_optimizer_reload_ts",
+    CLIENT_SEND_KEYS = [
+        "head_fwd_send_timestamp",
+        "tail_bwd_send_timestamp",
     ]
-    
-    def all_zero(keys):
-        """判断给定 keys 的时间戳是否全为 [0, 0]（跳过 [None, None]）"""
-        for aligned in aligned_list:
-            for k in keys:
-                v = aligned.get(k)
-                if not v or len(v) < 2:
-                    continue
+    SERVER_COMPUTE_KEYS = [
+        "server_fwd_timestamp",
+        "server_bwd_timestamp",
+    ]
+    SERVER_SEND_KEYS = [
+        "server_fwd_send_timestamp",
+        "server_bwd_send_timestamp",
+    ]
 
-                # 跳过 [None, None]
-                if v[0] is None and v[1] is None:
-                    continue
-
-                # 若存在任意非零值，则返回 False
-                if float(v[0]) != 0.0 or float(v[1]) != 0.0:
-                    return False
-        return True
-    
-    skip_offload_reload = all_zero(OFFLOAD_KEYS + RELOAD_KEYS)
-    
-   # 重新计算对齐时间（仅使用实际存在的 keys）
-    valid_keys = list(STAGE_COLOR.keys())
-    if skip_offload_reload:
-        valid_keys = [k for k in valid_keys if "offload" not in k and "reload" not in k]
+    PLOT_KEYS = CLIENT_COMPUTE_KEYS + CLIENT_SEND_KEYS + SERVER_COMPUTE_KEYS + SERVER_SEND_KEYS
 
     all_times = []
     for aligned in aligned_list:
-        for k in valid_keys:
+        for k in PLOT_KEYS:
             v = aligned.get(k)
-            if not v or v[0] is None or v[1] is None:
+            if not v or len(v) < 2:
+                continue
+            if v[0] is None or v[1] is None:
                 continue
             all_times.extend(v)
 
@@ -272,90 +282,114 @@ def plot_gantt_grouped(
         print("没有有效的时间戳")
         return
 
-    # 关键：统一时间零点
+    # 统一时间零点（基于已经转成 ms 的整数）
     min_time = min(all_times)
     for aligned in aligned_list:
         for k, v in aligned.items():
             if not isinstance(v, (list, tuple)) or len(v) != 2:
                 continue
-            aligned[k] = [
-                t - min_time if isinstance(t, (int, float)) else None
-                for t in v
-            ]
+            aligned[k] = [t - min_time if isinstance(t, (int, float)) else None for t in v]
 
     fig, ax = plt.subplots(figsize=(15, 4))
 
-    # 六个分组的映射
-    GROUP_MAPPING = {
-        # "Client Tail FWD/BWD": ["tail_fwd_timestamp", "tail_bwd_timestamp"],
-        # "Client Grad Send": ["tail_bwd_send_timestamp"],
-        # "Server Grad Send": ["server_bwd_send_timestamp"],
-        # "Server Activ Send": ["server_fwd_send_timestamp"],
-        "Server Send": ["server_fwd_send_timestamp", "server_bwd_send_timestamp"],
-        "Server FWD/BWD": ["server_fwd_timestamp", "server_bwd_timestamp"],
-        "Client Send": ["head_fwd_send_timestamp", "tail_bwd_send_timestamp"],
-        # "Client Activ Send": ["head_fwd_send_timestamp"],
-        "Client FWD/BWD": ["head_fwd_timestamp", "head_bwd_timestamp", "tail_fwd_timestamp", "tail_bwd_timestamp"],
-    }
-    
-    if not skip_offload_reload:
-        # 构造新的映射，按原注释顺序插入
-        new_mapping = {}
-        for k, v in GROUP_MAPPING.items():
-            new_mapping[k] = v
-            if k == "Client Send":
-                new_mapping["Client Offload"] = OFFLOAD_KEYS
-                new_mapping["Client Reload"] = RELOAD_KEYS
-        GROUP_MAPPING = new_mapping
+    # ---------- 4. 构造行顺序 ----------
+    # server ranks: 所有 rank > 0 的集合
+    server_ranks = sorted({aligned.get("rank", 0) for aligned in aligned_list if aligned.get("rank", 0) > 0})
 
-    groups = list(GROUP_MAPPING.keys())
+    # rows: (行名, 行类型, server_rank_or_None)
+    # 行类型: client_compute / client_send / server_compute / server_send
+    rows = []
+    rows.append(("Client Compute", "client_compute", None))
+    rows.append(("Client Send", "client_send", None))
+    for r in server_ranks:
+        rows.append((f"Server-rank{r-1} Compute", "server_compute", r))
+    rows.append(("Server Send", "server_send", None))
+    rows.reverse()
+
+    y_labels = [name for name, _, _ in rows]
+
+    # ---------- 5. 画图 ----------
+    used_labels = set()
 
     for aligned in aligned_list:
-        mb_idx = aligned["mini_batch_idx"]  # 当前 mini_batch 序号
-        for row_idx, group_name in enumerate(groups):
-            skip_text = group_name in ["Client Offload", "Client Reload"]
-            for key in GROUP_MAPPING[group_name]:
+        mb_idx = aligned.get("mini_batch_idx", 0)
+        rank_idx = aligned.get("rank", 0)
+
+        for row_idx, (row_name, row_type, row_rank) in enumerate(rows):
+            # Client 行：只画 rank == 0 的数据
+            if row_type.startswith("client") and rank_idx != 0:
+                continue
+            # Server 行：只画 rank > 0 的数据
+            if row_type.startswith("server") and rank_idx == 0:
+                continue
+            # Server Compute 行：只画对应 rank 的
+            if row_type == "server_compute" and row_rank is not None and rank_idx != row_rank:
+                continue
+
+            if row_type == "client_compute":
+                keys = CLIENT_COMPUTE_KEYS
+            elif row_type == "client_send":
+                keys = CLIENT_SEND_KEYS
+            elif row_type == "server_compute":
+                keys = SERVER_COMPUTE_KEYS
+            elif row_type == "server_send":
+                keys = SERVER_SEND_KEYS
+            else:
+                continue
+
+            for key in keys:
                 interval = aligned.get(key)
-                if not interval or interval[0] is None or interval[1] is None or interval[0] == interval[1]:
+                if not interval or len(interval) < 2 or interval[0] is None or interval[1] is None or interval[0] == interval[1]:
                     continue
+
                 start, end = interval
                 duration = end - start
-                label, color = STAGE_COLOR.get(key, ("Unknown", "#cccccc"))
+                stage_name, color = STAGE_COLOR.get(key, ("Unknown", "#cccccc"))
+
+                # 控制图例：同一个 stage_name 只出现一次
+                if stage_name not in used_labels:
+                    plot_label = stage_name
+                    used_labels.add(stage_name)
+                else:
+                    plot_label = ""
+
                 ax.barh(
                     y=row_idx,
                     width=duration,
                     left=start,
-                    height=0.5,
+                    height=0.8,  # ← 这里
                     color=color,
                     edgecolor="black",
                     alpha=alpha,
-                    label=label if aligned["mini_batch_idx"] == 0 else "",  # 避免重复图例
+                    label=plot_label,
                 )
-                # 在块的中心标注 mini_batch_idx
+
+                # 在块的中心标注 mini_batch_idx（如果想看到 rank，可以用 f"{rank_idx}:{mb_idx}"）
                 x_center = start + duration / 2
                 y_center = row_idx
-                if not skip_text:  # 跳过两行的 Offload / Reload
-                    ax.text(
-                        x_center,
-                        y_center,
-                        str(mb_idx),
-                        ha="center",
-                        va="center",
-                        fontsize=8,
-                        color="black",
-                        fontweight="bold",
-                    )
+                ax.text(
+                    x_center,
+                    y_center,
+                    str(mb_idx),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="black",
+                    fontweight="bold",
+                )
 
     ax.set_xlabel("Time (ms, aligned)")
-    ax.set_yticks(range(len(groups)))
-    ax.set_yticklabels(groups)
-    ax.set_title(f"Grouped Gantt Chart (4 Rows)(Config:{fp.split('/')[-1].split('.')[0]})")
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels(y_labels)
+    ax.set_ylim(-0.5, len(rows) - 0.5)
+    ax.margins(y=0)
+    ax.set_title(f"Gantt Chart (Client & Server Ranks)(Config:{fp.split('/')[-1].split('.')[0]})")
     ax.grid(True, axis="x", linestyle="--", alpha=0.5)
     ax.legend(
-        fontsize=6,  # 再缩小字体
-        markerscale=0.6,  # 再缩小 marker
-        loc="lower right",  # 右下角
-        bbox_to_anchor=(1, 0.2),  # 稍微上移，避免和 x 轴重叠
+        fontsize=6,
+        markerscale=0.6,
+        loc="lower right",
+        bbox_to_anchor=(1, 0.2),
         frameon=True,
         borderaxespad=0.3,
         handlelength=1.0,

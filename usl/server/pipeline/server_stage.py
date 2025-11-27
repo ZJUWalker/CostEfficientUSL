@@ -498,39 +498,28 @@ class _ServerPipelineStageBase(ABC):
         pass
 
     # TODO define detailed data
-    def send_profile_res(self, profile_data: Dict = None):
-        if profile_data is None:
-            profile_data = {'profile', self.profile_data}
+    def send_profile_res(self, appendix: Dict):
+        profile_data = self.profile_data
         group = self.group
-        group_rank = dist.get_rank(group)
-        group_size = dist.get_world_size(group)
-        is_first = group_rank == 0
-
+        group_rank = self.group_rank
+        group_size = self.num_stages
         print(f"Rank {group_rank} try to send profile data")
 
         # 只有 dst rank(这里就是 group_rank == 0) 需要提供 list，其他都必须是 None
-        obj_list = [None] * group_size if is_first else None
+        profile_list = [None] * group_size if self.is_first else None
 
         dist.gather_object(
             obj=profile_data,
-            object_gather_list=obj_list,
+            object_gather_list=profile_list,
             dst=0,
             group=group,
         )
 
-        if is_first:
-            # 这里 obj_list 的长度应该 == group_size，并且每个元素是一个 dict
-            # total_profile = 0
-            # for i, d in enumerate(obj_list):
-            #     if d is not None:
-            #         total_profile += d.get("profile", 0)
-            #     else:
-            #         print(f"Warning: gathered None from rank {i}")
-
-            # final_profile = {"profile": total_profile}
-            # print(f"rank {group_rank} get final profile data: {profile_data}")
-
-            self.communicator_rank_0.send(profile_data)
+        if self.is_first:
+            profile_list[0] = profile_data
+            final_profile = {'profile': profile_list, **appendix}
+            # print(f"rank {group_rank} send final profile data: {final_profile}")
+            self.communicator_rank_0.send(final_profile)
 
     def _post_process_payload(self, payload: Payload):
         """

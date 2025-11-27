@@ -1,7 +1,8 @@
 from .client import Client, ClientArgs
 from .gpipe import GPipeClientTrainer
 from .sequential import SequentialClientTrainer
-from .pipedream import PipeDreamStrictClientTrainer, PipeDreamWCClientTrainer, PipeDreamWCEagerClientTrainer
+from .pipedream import PipeDreamStrictClientTrainer
+from .split_mind import SplitMindClientTrainer, PipeDreamWCEagerClientTrainer
 
 __all__ = [
     "Client",
@@ -9,6 +10,6 @@ __all__ = [
     "GPipeClientTrainer",
     "SequentialClientTrainer",
     "PipeDreamStrictClientTrainer",
-    "PipeDreamWCClientTrainer",
+    "SplitMindClientTrainer",
     "PipeDreamWCEagerClientTrainer",
 ]

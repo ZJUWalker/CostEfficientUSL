@@ -20,10 +20,9 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from usl.offload import ModelParamOffload, OptimizerStateOffload, CpuOffloadHookWithOffloadHandler, AsyncDoubleBufferGroupOffloadHandler
 from usl.server.single_server import PipelineMode
 from usl.socket import SocketCommunicator, Payload
-from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_gantt_grouped
+from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_grouped_gantt
 from usl.utils.tensor_utils import pad_inputs
 from transformers import PreTrainedModel
-from typing_extensions import deprecated
 
 
 @dataclass
@@ -229,7 +228,7 @@ class Client:
         )
         print(self.communicator_rank_n.conn)
 
-        # ---- Queues (compute pipeline)
+        # ---- Queues and Locks(compute pipeline)
         self.activation_to_server_queue: Queue[Payload] = Queue()  # used for serve fwd
         self.activation_from_server_queue: Queue[Payload] = Queue()  # used for tail fwd
         self.gradient_to_server_queue: Queue[Payload] = Queue()  # used for server bwd
@@ -507,7 +506,7 @@ class Client:
         self._check_comm(self.communicator_rank_n)
         while not self.stop_event.is_set():
             try:
-                if self.client_args.pipeline_mode == PipelineMode.PIPE_DREAM_WC:
+                if self.client_args.pipeline_mode in [PipelineMode.PIPE_DREAM_WC, PipelineMode.GPIPE]:
                     if not self.activation_to_server_queue.empty():
                         time.sleep(0.001)  # 发送给服务器的等待队列中有数据，避免频繁发送
                         continue
@@ -549,7 +548,7 @@ class Client:
                     if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
                         print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
                     else:
-                        print(f'get profile data: {data},stop training')
+                        # print(f'get profile data: {data},stop training')
                         self._save_profile_res(data)
                 except Exception as e:
                     print(f"error when save profile data: {e}")
@@ -588,7 +587,8 @@ class Client:
         batch_train_time_ms = 0
         local_compute_time_ms = 0
         server_compute_time_ms = 0
-        server_profile_gantt_data: List[GanttChartData] = server_profile_res.get('profile', [])
+        # server_profile_gantt_data: List[GanttChartData] = server_profile_res.get('profile', [])
+        server_profile_gantt_data: List[List[GanttChartData]] = server_profile_res.get('profile', [])  # multi rank profile
         server_fwd_time = server_profile_res.get('server_fwd_time', 0)
         server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
         server_bwd_time = server_profile_res.get('server_bwd_time', 0)
@@ -601,138 +601,138 @@ class Client:
         client_send_time_ms = 0
         server_send_time_ms = 0
         delay_time_ms_in_send_and_compute = 0
-        assert len(self.profile_data) == len(server_profile_gantt_data), "error in profile data length between client and server"
-        for client_item, server_item in zip(self.profile_data, server_profile_gantt_data):
-            client_item.server_fwd_timestamp = server_item.server_fwd_timestamp
-            client_item.server_bwd_timestamp = server_item.server_bwd_timestamp
-            client_item.server_fwd_send_timestamp = server_item.server_fwd_send_timestamp
-            client_item.server_bwd_send_timestamp = server_item.server_bwd_send_timestamp
-            client_item.train_time_duration_ms = round((client_item.head_bwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000, 2)
-            # 计算通信时间
-            client_send_time_ms += (
-                client_item.head_fwd_send_timestamp[1]
-                - client_item.head_fwd_send_timestamp[0]
-                + client_item.tail_bwd_send_timestamp[1]
-                - client_item.tail_bwd_send_timestamp[0]
-            ) * 1000
-            server_send_time_ms += (
-                client_item.server_fwd_send_timestamp[1]
-                - client_item.server_fwd_send_timestamp[0]
-                + client_item.server_bwd_send_timestamp[1]
-                - client_item.server_bwd_send_timestamp[0]
-            ) * 1000
-            # 计算训练时间
-            local_compute_time_ms += (
-                client_item.head_fwd_timestamp[1]
-                - client_item.head_fwd_timestamp[0]
-                + client_item.tail_fwd_timestamp[1]
-                - client_item.tail_fwd_timestamp[0]
-                + client_item.tail_bwd_timestamp[1]
-                - client_item.tail_bwd_timestamp[0]
-                + client_item.head_bwd_timestamp[1]
-                - client_item.head_bwd_timestamp[0]
-            ) * 1000
-            server_compute_time_ms += (
-                server_item.server_fwd_timestamp[1]
-                - server_item.server_fwd_timestamp[0]
-                + server_item.server_bwd_timestamp[1]
-                - server_item.server_bwd_timestamp[0]
-            ) * 1000
-            # 计算 每个sub model的训练时间
-            client_item.head_m_offload_ts = self.head_model_offload_timestamp
-            client_item.head_m_reload_ts = self.head_model_reload_timestamp
-            client_item.tail_m_offload_ts = self.tail_model_offload_timestamp
-            client_item.tail_m_reload_ts = self.tail_model_reload_timestamp
-            head_m_offload_time_ms = self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]
-            head_m_reload_time_ms = self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]
-            tail_m_offload_time_ms = self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]
-            tail_m_reload_time_ms = self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0]
-            client_item.head_optimizer_offload_ts = [var + head_m_offload_time_ms for var in self.head_optimizer_offload_timestamp]
-            client_item.head_optimizer_reload_ts = [var + head_m_reload_time_ms for var in self.head_optimizer_reload_timestamp]
-            client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
-            client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
+        assert len(self.profile_data) == len(server_profile_gantt_data[0]), "error in profile data length between client and server"
+        # for client_item, server_item in zip(self.profile_data, server_profile_gantt_data[0]):
+        #     client_item.server_fwd_timestamp = server_item.server_fwd_timestamp
+        #     client_item.server_bwd_timestamp = server_item.server_bwd_timestamp
+        #     client_item.server_fwd_send_timestamp = server_item.server_fwd_send_timestamp
+        #     client_item.server_bwd_send_timestamp = server_item.server_bwd_send_timestamp
+        #     client_item.train_time_duration_ms = round((client_item.head_bwd_timestamp[1] - client_item.head_fwd_timestamp[0]) * 1000, 2)
+        #     # 计算通信时间
+        #     client_send_time_ms += (
+        #         client_item.head_fwd_send_timestamp[1]
+        #         - client_item.head_fwd_send_timestamp[0]
+        #         + client_item.tail_bwd_send_timestamp[1]
+        #         - client_item.tail_bwd_send_timestamp[0]
+        #     ) * 1000
+        #     server_send_time_ms += (
+        #         client_item.server_fwd_send_timestamp[1]
+        #         - client_item.server_fwd_send_timestamp[0]
+        #         + client_item.server_bwd_send_timestamp[1]
+        #         - client_item.server_bwd_send_timestamp[0]
+        #     ) * 1000
+        #     # 计算训练时间
+        #     local_compute_time_ms += (
+        #         client_item.head_fwd_timestamp[1]
+        #         - client_item.head_fwd_timestamp[0]
+        #         + client_item.tail_fwd_timestamp[1]
+        #         - client_item.tail_fwd_timestamp[0]
+        #         + client_item.tail_bwd_timestamp[1]
+        #         - client_item.tail_bwd_timestamp[0]
+        #         + client_item.head_bwd_timestamp[1]
+        #         - client_item.head_bwd_timestamp[0]
+        #     ) * 1000
+        #     server_compute_time_ms += (
+        #         server_item.server_fwd_timestamp[1]
+        #         - server_item.server_fwd_timestamp[0]
+        #         + server_item.server_bwd_timestamp[1]
+        #         - server_item.server_bwd_timestamp[0]
+        #     ) * 1000
+        #     # 计算 每个sub model的训练时间
+        #     client_item.head_m_offload_ts = self.head_model_offload_timestamp
+        #     client_item.head_m_reload_ts = self.head_model_reload_timestamp
+        #     client_item.tail_m_offload_ts = self.tail_model_offload_timestamp
+        #     client_item.tail_m_reload_ts = self.tail_model_reload_timestamp
+        #     head_m_offload_time_ms = self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]
+        #     head_m_reload_time_ms = self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]
+        #     tail_m_offload_time_ms = self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]
+        #     tail_m_reload_time_ms = self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0]
+        #     client_item.head_optimizer_offload_ts = [var + head_m_offload_time_ms for var in self.head_optimizer_offload_timestamp]
+        #     client_item.head_optimizer_reload_ts = [var + head_m_reload_time_ms for var in self.head_optimizer_reload_timestamp]
+        #     client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
+        #     client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
 
-        # 计算通信和计算之间的延迟时间
-        for i in range(len(self.profile_data)):
-            delay_time_ms_in_send_and_compute += (client_item.server_fwd_timestamp[0] - client_item.head_fwd_send_timestamp[1]) * 1000
-            delay_time_ms_in_send_and_compute += (client_item.tail_fwd_timestamp[0] - client_item.server_fwd_send_timestamp[1]) * 1000
-            delay_time_ms_in_send_and_compute += (client_item.server_bwd_timestamp[0] - client_item.tail_bwd_send_timestamp[1]) * 1000
-            delay_time_ms_in_send_and_compute += (client_item.head_bwd_timestamp[0] - client_item.server_bwd_send_timestamp[1]) * 1000
-        # 计算平均时间
-        grad_accum_steps = len(self.profile_data)
-        head_fwd_time_avg = self.head_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        head_fwd_send_time_avg = self.head_fwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        head_bwd_time_avg = self.head_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        server_fwd_time_avg = server_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        server_fwd_send_time_avg = server_fwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        server_bwd_time_avg = server_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        server_bwd_send_time_avg = server_bwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        tail_fwd_time_avg = self.tail_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        tail_bwd_time_avg = self.tail_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        tail_bwd_send_time_avg = self.tail_bwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
-        delay_time_avg_ms = delay_time_ms_in_send_and_compute / grad_accum_steps / 4
-        # 计算平均通信时间
+        # # 计算通信和计算之间的延迟时间
+        # for i in range(len(self.profile_data)):
+        #     delay_time_ms_in_send_and_compute += (client_item.server_fwd_timestamp[0] - client_item.head_fwd_send_timestamp[1]) * 1000
+        #     delay_time_ms_in_send_and_compute += (client_item.tail_fwd_timestamp[0] - client_item.server_fwd_send_timestamp[1]) * 1000
+        #     delay_time_ms_in_send_and_compute += (client_item.server_bwd_timestamp[0] - client_item.tail_bwd_send_timestamp[1]) * 1000
+        #     delay_time_ms_in_send_and_compute += (client_item.head_bwd_timestamp[0] - client_item.server_bwd_send_timestamp[1]) * 1000
+        # # 计算平均时间
+        # grad_accum_steps = len(self.profile_data)
+        # head_fwd_time_avg = self.head_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # head_fwd_send_time_avg = self.head_fwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # head_bwd_time_avg = self.head_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # server_fwd_time_avg = server_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # server_fwd_send_time_avg = server_fwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # server_bwd_time_avg = server_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # server_bwd_send_time_avg = server_bwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # tail_fwd_time_avg = self.tail_fwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # tail_bwd_time_avg = self.tail_bwd_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # tail_bwd_send_time_avg = self.tail_bwd_send_time * 1000 / grad_accum_steps / (self.client_args.step - 1)
+        # delay_time_avg_ms = delay_time_ms_in_send_and_compute / grad_accum_steps / 4
+        # # 计算平均通信时间
 
-        # 计算batch训练时间
-        batch_train_time_ms = round((self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2)
-        # 计算本地计算时间
+        # # 计算batch训练时间
+        # batch_train_time_ms = round((self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2)
+        # # 计算本地计算时间
 
-        # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
-        layer_num = self.client_args.split_point if self.client_args.split_point > 0 else 1
-        data_dict = {
-            "mbps": self.client_args.rate_mbps,
-            "split_point": self.client_args.split_point,
-            "batch_size": self.client_args.batch_size,
-            "micro_batch_size": self.client_args.micro_batch_size,
-            "max_seq_len": self.client_args.max_seq_len,
-            "offload_model_state": self.client_args.offload_model_state,
-            "offload_activation": self.client_args.offload_activation,
-            "head_model_size": self.head_model_param_mem_alloc,
-            "offload_model_state_sp_num": self.client_args.offload_model_state_sp_num,
-            "offload_activation_mb_num": self.client_args.offload_activation_mb_num,
-            "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
-            "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
-            "batch_train_time_ms": batch_train_time_ms,
-            "GPU_rent_cost": round(batch_train_time_ms * server_profile_res.get("max_mem_alloc", 0) / 1e6, 6),
-            "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
-            "head_fwd_send_time_avg_ms": round(head_fwd_send_time_avg, 2),
-            "head_bwd_time_avg_ms": round(head_bwd_time_avg, 2),
-            "server_fwd_time_avg_ms": round(server_fwd_time_avg, 2),
-            "server_fwd_send_time_avg_ms": round(server_fwd_send_time_avg, 2),
-            "server_bwd_time_avg_ms": round(server_bwd_time_avg, 2),
-            "server_bwd_send_time_avg_ms": round(server_bwd_send_time_avg, 2),
-            "tail_fwd_time_avg_ms": round(tail_fwd_time_avg, 2),
-            "tail_bwd_send_time_avg_ms": round(tail_bwd_send_time_avg, 2),
-            "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
-            "client_compute_time_ms": round(local_compute_time_ms, 2),
-            "server_compute_time_ms": round(server_compute_time_ms, 2),
-            "delay_time_avg_ms": round(delay_time_avg_ms, 2),
-            "head_m_offload_time_ms": round((self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]) * 1000, 2),
-            "head_m_reload_time_ms": round((self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]) * 1000, 2),
-            "tail_m_offload_time_ms": round((self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]) * 1000, 2),
-            "tail_m_reload_time_ms": round((self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0]) * 1000, 2),
-            "head_os_offload_time_ms": round((self.head_optimizer_offload_timestamp[1] - self.head_optimizer_offload_timestamp[0]) * 1000, 2),
-            "head_os_reload_time_ms": round((self.head_optimizer_reload_timestamp[1] - self.head_optimizer_reload_timestamp[0]) * 1000, 2),
-            "tail_os_offload_time_ms": round((self.tail_optimizer_offload_timestamp[1] - self.tail_optimizer_offload_timestamp[0]) * 1000, 2),
-            "tail_os_reload_time_ms": round((self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0]) * 1000, 2),
-            "activation_offload_time_ms": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
-            "activation_reload_time_ms": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
-            "server_activation_offload_time_ms": server_offload_time_durations,
-            "server_activation_reload_time_ms": server_reload_time_durations,
-            "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
-            "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
-            "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
-            "server_idle_rate": round((1 - server_compute_time_ms / batch_train_time_ms) * 100, 2),
-            "total_bytes_sent": self.sent_payload_bytes,
-            "bytes_sent_per_ms": round(self.sent_payload_bytes / client_send_time_ms, 0),
-            "mini_batch_data": [asdict(item) for item in self.profile_data],
-        }
-        print(data_dict["client_max_mem_alloc_mb"], data_dict["server_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
+        # # plot_gantt_per_batch(self.profile_data, fp=f"log/img/gantt_batch.png")
+        # layer_num = self.client_args.split_point if self.client_args.split_point > 0 else 1
+        # data_dict = {
+        #     "mbps": self.client_args.rate_mbps,
+        #     "split_point": self.client_args.split_point,
+        #     "batch_size": self.client_args.batch_size,
+        #     "micro_batch_size": self.client_args.micro_batch_size,
+        #     "max_seq_len": self.client_args.max_seq_len,
+        #     "offload_model_state": self.client_args.offload_model_state,
+        #     "offload_activation": self.client_args.offload_activation,
+        #     "head_model_size": self.head_model_param_mem_alloc,
+        #     "offload_model_state_sp_num": self.client_args.offload_model_state_sp_num,
+        #     "offload_activation_mb_num": self.client_args.offload_activation_mb_num,
+        #     "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
+        #     "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
+        #     "batch_train_time_ms": batch_train_time_ms,
+        #     "GPU_rent_cost": round(batch_train_time_ms * server_profile_res.get("max_mem_alloc", 0) / 1e6, 6),
+        #     "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
+        #     "head_fwd_send_time_avg_ms": round(head_fwd_send_time_avg, 2),
+        #     "head_bwd_time_avg_ms": round(head_bwd_time_avg, 2),
+        #     "server_fwd_time_avg_ms": round(server_fwd_time_avg, 2),
+        #     "server_fwd_send_time_avg_ms": round(server_fwd_send_time_avg, 2),
+        #     "server_bwd_time_avg_ms": round(server_bwd_time_avg, 2),
+        #     "server_bwd_send_time_avg_ms": round(server_bwd_send_time_avg, 2),
+        #     "tail_fwd_time_avg_ms": round(tail_fwd_time_avg, 2),
+        #     "tail_bwd_send_time_avg_ms": round(tail_bwd_send_time_avg, 2),
+        #     "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
+        #     "client_compute_time_ms": round(local_compute_time_ms, 2),
+        #     "server_compute_time_ms": round(server_compute_time_ms, 2),
+        #     "delay_time_avg_ms": round(delay_time_avg_ms, 2),
+        #     "head_m_offload_time_ms": round((self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]) * 1000, 2),
+        #     "head_m_reload_time_ms": round((self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]) * 1000, 2),
+        #     "tail_m_offload_time_ms": round((self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]) * 1000, 2),
+        #     "tail_m_reload_time_ms": round((self.tail_model_reload_timestamp[1] - self.tail_model_reload_timestamp[0]) * 1000, 2),
+        #     "head_os_offload_time_ms": round((self.head_optimizer_offload_timestamp[1] - self.head_optimizer_offload_timestamp[0]) * 1000, 2),
+        #     "head_os_reload_time_ms": round((self.head_optimizer_reload_timestamp[1] - self.head_optimizer_reload_timestamp[0]) * 1000, 2),
+        #     "tail_os_offload_time_ms": round((self.tail_optimizer_offload_timestamp[1] - self.tail_optimizer_offload_timestamp[0]) * 1000, 2),
+        #     "tail_os_reload_time_ms": round((self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0]) * 1000, 2),
+        #     "activation_offload_time_ms": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
+        #     "activation_reload_time_ms": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
+        #     "server_activation_offload_time_ms": server_offload_time_durations,
+        #     "server_activation_reload_time_ms": server_reload_time_durations,
+        #     "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
+        #     "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
+        #     "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
+        #     "server_idle_rate": round((1 - server_compute_time_ms / batch_train_time_ms) * 100, 2),
+        #     "total_bytes_sent": self.sent_payload_bytes,
+        #     "bytes_sent_per_ms": round(self.sent_payload_bytes / client_send_time_ms, 0),
+        #     # "mini_batch_data": [asdict(item) for item in self.profile_data],
+        # }
+        # print(data_dict["client_max_mem_alloc_mb"], data_dict["server_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
         # dt_save_dir = f"{self.client_args.save_dir}/{self.client_args.model}"
-        dt_save_dir = os.path.join(self.client_args.save_dir, self.client_args.model)
-        if not os.path.exists(dt_save_dir):
-            os.makedirs(dt_save_dir)
-        save_gantt_chart_data(data_dict, fp=self.client_args.build_filename(prefix=dt_save_dir, ext="json").format(server_policy_str))
+        # dt_save_dir = os.path.join(self.client_args.save_dir, self.client_args.model)
+        # if not os.path.exists(dt_save_dir):
+        #     os.makedirs(dt_save_dir)
+        # save_gantt_chart_data(data_dict, fp=self.client_args.build_filename(prefix=dt_save_dir, ext="json").format(server_policy_str))
         # png_save_dir = f"log/img/{self.client_args.model}"
         # if not os.path.exists(png_save_dir):
         #     os.makedirs(png_save_dir)
@@ -740,7 +740,8 @@ class Client:
         png_save_dir_c = f"log/img/{self.client_args.model}"
         if not os.path.exists(png_save_dir_c):
             os.makedirs(png_save_dir_c)
-        plot_gantt_grouped(self.profile_data, fp=self.client_args.build_filename(prefix=png_save_dir_c, ext="png").format(server_policy_str))
+        server_profile_gantt_data.insert(0, self.profile_data)
+        plot_grouped_gantt(server_profile_gantt_data, fp=self.client_args.build_filename(prefix=png_save_dir_c, ext="png").format(server_policy_str))
         self.stop_event.set()
 
     @abstractmethod

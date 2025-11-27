@@ -89,7 +89,6 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
             # loss = self._maybe_get_loss(self._stage, bwd_mb_index)
             self._stage.backward_one_chunk(
                 bwd_mb_index,
-                loss=None,
                 last_backward=bwd_mb_index == self._n_microbatches - 1,
             )
 
@@ -128,7 +127,6 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
             # Backward one chunk
             self._stage.backward_one_chunk(
                 bwd_mb_index,
-                loss=None,
                 last_backward=bwd_mb_index == self._n_microbatches - 1,
             )
 
@@ -144,3 +142,16 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
         # Wait for the last backward send to finish
         if send_work:
             send_work.wait()
+
+    def send_profile_res(self):
+        res = {
+            'max_mem_alloc': round(self._stage.max_cuda_memory_allocated_during_fwd / 1024**2, 4),
+            'server_fwd_time': 0,  # TODO add fwd time
+            'server_fwd_send_time': 0,
+            'server_bwd_time': 0,
+            'server_bwd_send_time': 0,
+            "server_offload_time_durations": [],
+            "server_reload_time_durations": [],
+            "file_suffix": '',
+        }
+        self._stage.send_profile_res(res)
