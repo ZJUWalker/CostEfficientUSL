@@ -33,10 +33,10 @@ class PipeDreamStrictClientTrainer(Client):
         )
         self.server_stage_num = client_args.server_world_size
         self.warmup_steps = None
-        self.is_sending_activation = AtomicBool(False)
+        # self.is_sending_activation = AtomicBool(False)
 
         #     self.send_gradient = AtomicBool(False)
-        self.curr_send_activation_mb_count = AtomicInt(0)
+        # self.curr_send_activation_mb_count = AtomicInt(0)
 
     #     self.curr_recv_activation_mb_count = AtomicInt(0)
     #     self.curr_send_gradient_mb_count = AtomicInt(0)
@@ -57,13 +57,13 @@ class PipeDreamStrictClientTrainer(Client):
             try:
                 payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
                 if payload is not None:  # 可能是 None（队列空）
-                    self.is_sending_activation.set(True)
+                    # self.is_sending_activation.set(True)
                     start_send = time.time()
                     self.communicator_rank_0.send(payload)
                     end_time = time.time()
-                    self.is_sending_activation.set(False)
-                    self.curr_send_activation_mb_count.increment()
-                    print(f"client rank 0 send activation, mb_idx: {payload.mb_idx}, mb_total: {payload.mb_total}")
+                    # self.is_sending_activation.set(False)
+                    # self.curr_send_activation_mb_count.increment()
+                    # print(f"client rank 0 send activation, mb_idx: {payload.mb_idx}, mb_total: {payload.mb_total}")
                     if isinstance(payload, dict) and "stop" in payload:
                         print("send stop flag")
                         continue
@@ -87,9 +87,9 @@ class PipeDreamStrictClientTrainer(Client):
         self._check_comm(self.communicator_rank_n)
         while not self.stop_event.is_set():
             try:
-                if self.is_sending_activation.get() or self.curr_send_activation_mb_count.get() < self.warmup_steps:
-                    time.sleep(0.001)
-                    continue
+                # if self.is_sending_activation.get() or self.curr_send_activation_mb_count.get() < self.warmup_steps:
+                #     time.sleep(0.001)
+                #     continue
                 payload = self.gradient_to_server_queue.get(timeout=0.001)
                 # print(f'rank n send payload: {payload.mb_idx}, {payload.is_activation}')
                 if payload is not None:  # 可能是 None（队列空）
@@ -98,7 +98,7 @@ class PipeDreamStrictClientTrainer(Client):
                     start_send = time.time()
                     self.communicator_rank_n.send(payload)
                     end_time = time.time()
-                    print(f"client rank n send gradient, mb_idx: {payload.mb_idx}, mb_total: {payload.mb_total}")
+                    # print(f"client rank n send gradient, mb_idx: {payload.mb_idx}, mb_total: {payload.mb_total}")
                     mb_idx = payload.mb_idx
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[0] = start_send
                     self.profile_data[mb_idx].tail_bwd_send_timestamp[1] = end_time
@@ -186,7 +186,7 @@ class PipeDreamStrictClientTrainer(Client):
             # Tail operation
             if not all(no_tail_fwd_bwd_mb_list):
                 try:
-                    server_activation_payload = self.activation_from_server_queue.get(block=True)
+                    server_activation_payload = self.activation_from_server_queue.get()
                     if server_activation_payload is not None:
                         mb_idx = server_activation_payload.mb_idx
                         no_tail_fwd_bwd_mb_list[mb_idx] = True
@@ -208,7 +208,7 @@ class PipeDreamStrictClientTrainer(Client):
             # Head operation
             if not all(no_head_bwd_mb_list):
                 try:
-                    server_grad_payload = self.gradient_from_server_queue.get(block=True)
+                    server_grad_payload = self.gradient_from_server_queue.get()
                     if server_grad_payload is not None:
                         mb_idx = server_grad_payload.mb_idx
                         no_head_bwd_mb_list[mb_idx] = True
@@ -238,7 +238,7 @@ class PipeDreamStrictClientTrainer(Client):
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
         # self._reset()
-        self.curr_send_activation_mb_count.set(0)
+        # self.curr_send_activation_mb_count.set(0)
 
         # 4. Memory tracking
         self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)

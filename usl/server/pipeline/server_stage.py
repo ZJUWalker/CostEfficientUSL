@@ -3,7 +3,7 @@
 import logging
 import operator
 import threading
-from concurrent.futures import ThreadPoolExecutor,Future
+from concurrent.futures import ThreadPoolExecutor, Future
 from abc import ABC, abstractmethod
 from queue import Queue
 import time
@@ -139,6 +139,7 @@ class _ServerPipelineStageBase(ABC):
             self.act_to_client: Queue[Payload] = Queue()
             self.grad_from_client: Queue[Payload] = Queue()
         self._send_executor = ThreadPoolExecutor(max_workers=1)
+        self._recv_executor = ThreadPoolExecutor(max_workers=1)
         # ----- Profile and Metrics ----
         self.profile_data: List[GanttChartData] = None  # init along with self.chunks later
         self.max_cuda_memory_allocated_during_fwd = 0
@@ -304,20 +305,19 @@ class _ServerPipelineStageBase(ABC):
             assert isinstance(info, _RecvInfo), f"Expected a recv info, got {type(info)}"
             info.buffer = tensor
 
-    def get_fwd_recv_ops(self, fwd_chunk_id: int) -> List[dist.P2POp]:
+    def get_fwd_recv_ops(self, fwd_chunk_id: int) -> List[dist.P2POp] | Future:
         """
         Returns a list of ops that are needed to receive the input arguments
         for this stage.
         """
         if self.is_first:
-            payload = self._recv_socket_msg(is_activation=True)  # receive input activations from client
-            self.act_from_client.put(payload)
-            return []
+            fut = self._recv_socket_msg(is_activation=True, async_op=True)  # receive input activations from client
+            return fut
         recv_infos: Tuple[InputInfo, ...] = self.args_recv_info[fwd_chunk_id]
 
         return self._get_recv_ops(recv_infos)
 
-    def get_bwd_recv_ops(self, bwd_chunk_id: int) -> List[dist.P2POp]:
+    def get_bwd_recv_ops(self, bwd_chunk_id: int) -> List[dist.P2POp] | Future:
         """
         Returns a list of ops that are needed to receive the gradients
         for this stage.
@@ -325,14 +325,13 @@ class _ServerPipelineStageBase(ABC):
         if not self.has_backward:
             return []
         if self.is_last:
-            payload = self._recv_socket_msg(is_activation=False)  # receive grads from client
-            self.grad_from_client.put(payload)
-            return []
+            fut = self._recv_socket_msg(is_activation=False, async_op=True)  # receive grads from client
+            return fut
 
         recv_infos = self.grad_recv_info[bwd_chunk_id]
         return self._get_recv_ops(recv_infos)
 
-    def get_fwd_send_ops(self, fwd_chunk_id: int) -> List[dist.P2POp]|Future:
+    def get_fwd_send_ops(self, fwd_chunk_id: int) -> List[dist.P2POp] | Future:
         """
         Get the activation send ops for current stage's forward.
         """
@@ -341,7 +340,7 @@ class _ServerPipelineStageBase(ABC):
         if self.is_last:
             # Send output to client
             tensor = output_tuple[0]
-            fut=self._send_socket_msg(is_activation=True, mb_idx=fwd_chunk_id, tensor=tensor,async_op=True)
+            fut = self._send_socket_msg(is_activation=True, mb_idx=fwd_chunk_id, tensor=tensor, async_op=True)
             return fut
         # Unify output form to tuple for easy correspondance with
         # `act_send_info`
@@ -365,7 +364,7 @@ class _ServerPipelineStageBase(ABC):
 
         return ops
 
-    def get_bwd_send_ops(self, bwd_chunk_id: int) -> List[dist.P2POp]|Future:
+    def get_bwd_send_ops(self, bwd_chunk_id: int) -> List[dist.P2POp] | Future:
         """
         Get the gradient send ops for current stage's backward.
         """
@@ -376,7 +375,7 @@ class _ServerPipelineStageBase(ABC):
             grads_input = self.bwd_cache.pop(bwd_chunk_id)
             if isinstance(grads_input, torch.Tensor):
                 grads_input = (grads_input,)
-            fut=self._send_socket_msg(is_activation=False, mb_idx=bwd_chunk_id, tensor=grads_input[0],async_op=True)
+            fut = self._send_socket_msg(is_activation=False, mb_idx=bwd_chunk_id, tensor=grads_input[0], async_op=True)
             return fut
 
         # Create bwd send infra lazily
@@ -469,7 +468,7 @@ class _ServerPipelineStageBase(ABC):
         return grads
 
     @torch.no_grad()
-    def _send_socket_msg(self, is_activation: bool, mb_idx: int, tensor: torch.Tensor, async_op=False)->Optional[Future]:
+    def _send_socket_msg(self, is_activation: bool, mb_idx: int, tensor: torch.Tensor, async_op=False) -> Optional[Future]:
         """
         发送 socket 消息
         """
@@ -488,7 +487,7 @@ class _ServerPipelineStageBase(ABC):
             # TODO solve token and group_id in Payload
         )
 
-        def send_payload(payload:Payload):
+        def send_payload(payload: Payload):
             if payload.is_activation:
                 self.communicator_rank_n.send(payload)
             else:
@@ -500,9 +499,9 @@ class _ServerPipelineStageBase(ABC):
             else:
                 self.profile_data[mb_idx].server_bwd_send_timestamp[0] = start_time
                 self.profile_data[mb_idx].server_bwd_send_timestamp[1] = end_time
-        
+
         if async_op:
-            fut=self._send_executor.submit(send_payload, payload)
+            fut = self._send_executor.submit(send_payload, payload)
             return fut
         else:
             send_payload(payload)
@@ -546,10 +545,19 @@ class _ServerPipelineStageBase(ABC):
         #     接收 socket 消息
         #     """
         if is_activation:
-            payload = self.communicator_rank_0.receive()
+            communicator = self.communicator_rank_0
+            place = self.act_from_client
         else:
-            payload = self.communicator_rank_n.receive()
+            communicator = self.communicator_rank_n
+            place = self.grad_from_client
+        if async_op:
+            fut = self._recv_executor.submit(self._recv_meta, communicator, place)
+            return fut
+        else:
+            self._recv_meta(communicator, place)
 
+    def _recv_meta(self, communicator: SocketCommunicator, place_queue: Queue):
+        payload = communicator.receive()
         if payload is None:
             print(f"Rank {self.group_rank} receive None (peer closed?)")
             return None
@@ -569,7 +577,7 @@ class _ServerPipelineStageBase(ABC):
             for emb in payload.position_embeddings:
                 if emb is not None:
                     emb = emb.to(self.device)
-        return payload
+        place_queue.put(payload)
 
     def forward_maybe_with_nosync(self, mb_idx: int, *args, **kwargs):
         # If submod is wrapped with DDP, we use the `no_sync` context manager to

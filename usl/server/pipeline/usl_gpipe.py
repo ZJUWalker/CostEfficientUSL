@@ -13,7 +13,8 @@ from torch.profiler import record_function
 from torch.distributed.pipelining.schedules import _sorted_batch_p2p
 from usl.server.pipeline.base_schedule import ServerPipelineScheduleSingle
 from usl.offload import AsyncDoubleBufferGroupOffloadHandler, CpuOffloadHookWithOffloadHandler
-from concurrent.futures import ThreadPoolExecutor,Future
+from concurrent.futures import ThreadPoolExecutor, Future
+
 if TYPE_CHECKING:
     from torch.distributed import Work
 
@@ -59,7 +60,7 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
             self._initialize_stage()
 
         # Delay send waits
-        fwd_sends_to_wait: List[Union[dist.Work|Future]] = []
+        fwd_sends_to_wait: List[Union[dist.Work | Future]] = []
 
         # Run microbatches
         if self.offload_activation:
@@ -67,9 +68,12 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         for i in range(self._n_microbatches):
             with record_function(f"Forward {i}"):
                 ops = self._stage.get_fwd_recv_ops(i)
-                works = _sorted_batch_p2p(ops, desc="fwd_recv")
-                for work in works.values():
-                    work.wait()
+                if isinstance(ops, Future):
+                    ops.result()
+                else:
+                    works = _sorted_batch_p2p(ops, desc="fwd_recv")
+                    for work in works.values():
+                        work.wait()
 
                 if i < self.offload_activation_mb_num:
                     with self.activation_offload_ctx:
@@ -104,13 +108,16 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         # Delay send waits
         if self.offload_activation:
             self.activation_offload_handler.start_bwd()  # mark the start of bwd
-        bwd_sends_to_wait: List[Union[dist.Work|Future]] = []
+        bwd_sends_to_wait: List[Union[dist.Work | Future]] = []
         for i in range(self._n_microbatches):
             with record_function(f"Backward {i}"):
                 ops = self._stage.get_bwd_recv_ops(i)
-                works = _sorted_batch_p2p(ops, desc="bwd_recv")
-                for work in works.values():
-                    work.wait()
+                if isinstance(ops, Future):
+                    ops.result()
+                else:
+                    works = _sorted_batch_p2p(ops, desc="bwd_recv")
+                    for work in works.values():
+                        work.wait()
                 if i < self.offload_activation_mb_num:
                     self.activation_offload_handler.on_minibatch_commit_backward()
                 self._stage.backward_one_chunk(i, last_backward=i == self._n_microbatches - 1)

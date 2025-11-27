@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 import logging
 from typing import (
     List,
@@ -47,12 +48,16 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
         bwd_mb_index = 0
 
         # Warmup phase
-        send_work = None
+        send_work: dist.Work = None
+        send_future: Future = None
+        recv_future: Future = None
         fwd_sends = []
         for _ in range(stage_warmup_chunks):
             # Receive activations
             fwd_recvs = self._stage.get_fwd_recv_ops(fwd_mb_index)
-            if recv_work := _batch_p2p(fwd_recvs, desc="fwd_recv"):
+            if isinstance(fwd_recvs, Future):
+                fwd_recvs.result()
+            elif recv_work := _batch_p2p(fwd_recvs, desc="fwd_recv"):
                 recv_work.wait()
 
             # Compute
@@ -64,26 +69,53 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
             # eagerly either)
             if send_work:
                 send_work.wait()
+            if send_future:
+                send_future.result()
 
             # Send activations
             fwd_sends = self._stage.get_fwd_send_ops(fwd_mb_index)
             if fwd_mb_index != stage_warmup_chunks - 1:
                 # Safe to fire
-                send_work = _batch_p2p(fwd_sends, desc="fwd_send")
+                if isinstance(fwd_sends, Future):
+                    send_future = fwd_sends
+                else:
+                    send_work = _batch_p2p(fwd_sends, desc="fwd_send")
+
+            # Receive gradients
             # otherwise:
             #   The last foward send is left for fuse with first 1B in 1B1F below
             fwd_mb_index += 1
+        print(f"Warmup phase done, starting 1B1F phase")
 
         # Now we should have send ops left over, to be fused with first 1B of 1B1F phase below.
-
         # 1B1F phase
+        def _1f1b_wait(recv, send, desc):
+            ops = []
+            if isinstance(recv, Future):
+                print(f"Waiting for {desc}...")
+                recv.result()
+            else:
+                ops.extend(recv)
+            if isinstance(send, Future):
+                send.result()
+            else:
+                ops.extend(send)
+            if fuse_work := _batch_p2p(ops, desc=desc):
+                fuse_work.wait()
+
         while True:  # Don't worry, we have a break inside
             # We actually do 1B first as the `1B1F` name indicates, so prepare its recv ops
             bwd_recvs = self._stage.get_bwd_recv_ops(bwd_mb_index)
 
             # Now, we need to fire the fwd_sends and bwd_recvs together
-            if fuse_work := _batch_p2p(fwd_sends + bwd_recvs, desc="fwd_send_bwd_recv"):
-                fuse_work.wait()
+            _1f1b_wait(bwd_recvs, fwd_sends, "fwd_send_bwd_recv")
+            # if isinstance(bwd_recvs, Future):
+            #     bwd_recvs.result()
+            # if isinstance(fwd_sends, Future):
+            #     fwd_sends.result()
+            # else:
+            #     fuse_work := _batch_p2p(fwd_sends + bwd_recvs, desc="fwd_send_bwd_recv"):
+            #     fuse_work.wait()
 
             # Backward one chunk
             # loss = self._maybe_get_loss(self._stage, bwd_mb_index)
@@ -104,8 +136,13 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
             fwd_recvs = self._stage.get_fwd_recv_ops(fwd_mb_index)
 
             # Fuse it with bwd_sends above
-            if fuse_work := _batch_p2p(bwd_sends + fwd_recvs, desc="bwd_send_fwd_recv"):
-                fuse_work.wait()
+            # if isinstance(fwd_recvs, Future):
+            #     fwd_recvs.result()
+            # if isinstance(bwd_sends, Future):
+            #     bwd_sends.result()
+            # if fuse_work := _batch_p2p(bwd_sends + fwd_recvs, desc="bwd_send_fwd_recv"):
+            #     fuse_work.wait()
+            _1f1b_wait(bwd_sends, fwd_recvs, "bwd_send_fwd_recv")
 
             # Now do the fwd
             _ = self._stage.forward_one_chunk(fwd_mb_index)  # type: ignore[index]
@@ -115,13 +152,18 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
             fwd_mb_index += 1
 
         # Remember we still have some bwd_sends left over after the break? Now it is time to fire it
-        send_work = _batch_p2p(bwd_sends, desc="bwd_send")
+        if isinstance(bwd_sends, Future):
+            bwd_sends.result()
+        else:
+            send_work = _batch_p2p(bwd_sends, desc="bwd_send")
 
         # Cooldown
         while bwd_mb_index < self._n_microbatches:
             # prepare bwd recv ops
             bwd_recvs = self._stage.get_bwd_recv_ops(bwd_mb_index)
-            if recv_work := _batch_p2p(bwd_recvs, desc="bwd_recv"):
+            if isinstance(bwd_recvs, Future):
+                bwd_recvs.result()
+            elif recv_work := _batch_p2p(bwd_recvs, desc="bwd_recv"):
                 recv_work.wait()
 
             # Backward one chunk
@@ -136,12 +178,17 @@ class ServerSchedule1F1B(ServerPipelineScheduleSingle):
 
             # Get the bwd send ops, fire it
             bwd_sends = self._stage.get_bwd_send_ops(bwd_mb_index)
-            send_work = _batch_p2p(bwd_sends, desc="bwd_send")
+            if isinstance(bwd_sends, Future):
+                send_future = bwd_sends
+            else:
+                send_work = _batch_p2p(bwd_sends, desc="bwd_send")
             bwd_mb_index += 1
 
         # Wait for the last backward send to finish
         if send_work:
             send_work.wait()
+        if send_future:
+            send_future.result()
 
     def send_profile_res(self):
         res = {
