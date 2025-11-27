@@ -3,6 +3,7 @@ from typing import (
     List,
     Optional,
     TYPE_CHECKING,
+    Union,
 )
 
 import torch
@@ -12,7 +13,7 @@ from torch.profiler import record_function
 from torch.distributed.pipelining.schedules import _sorted_batch_p2p
 from usl.server.pipeline.base_schedule import ServerPipelineScheduleSingle
 from usl.offload import AsyncDoubleBufferGroupOffloadHandler, CpuOffloadHookWithOffloadHandler
-
+from concurrent.futures import ThreadPoolExecutor,Future
 if TYPE_CHECKING:
     from torch.distributed import Work
 
@@ -58,7 +59,7 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
             self._initialize_stage()
 
         # Delay send waits
-        fwd_sends_to_wait: List[dist.Work] = []
+        fwd_sends_to_wait: List[Union[dist.Work|Future]] = []
 
         # Run microbatches
         if self.offload_activation:
@@ -78,8 +79,11 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
                 else:
                     _ = self._stage.forward_one_chunk(i)
                 ops = self._stage.get_fwd_send_ops(i)
-                works = _sorted_batch_p2p(ops, desc="fwd_send")
-                fwd_sends_to_wait.extend(works.values())
+                if isinstance(ops, Future):
+                    fwd_sends_to_wait.append(ops)
+                else:
+                    works = _sorted_batch_p2p(ops, desc="fwd_send")
+                    fwd_sends_to_wait.extend(works.values())
 
             logger.debug("[%s] Forwarded microbatch %s", self._stage.stage_index, i)
 
@@ -87,7 +91,10 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         # This should not have performance impact because by the time the first
         # backward arrives all the forward sends should have been finished.
         for work in fwd_sends_to_wait:
-            work.wait()
+            if isinstance(work, dist.Work):
+                work.wait()
+            elif isinstance(work, Future):
+                work.result()
 
         # No loss function, no need to run backward
         if not self._has_backward:
@@ -97,7 +104,7 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         # Delay send waits
         if self.offload_activation:
             self.activation_offload_handler.start_bwd()  # mark the start of bwd
-        bwd_sends_to_wait: List[dist.Work] = []
+        bwd_sends_to_wait: List[Union[dist.Work|Future]] = []
         for i in range(self._n_microbatches):
             with record_function(f"Backward {i}"):
                 ops = self._stage.get_bwd_recv_ops(i)
@@ -108,8 +115,11 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
                     self.activation_offload_handler.on_minibatch_commit_backward()
                 self._stage.backward_one_chunk(i, last_backward=i == self._n_microbatches - 1)
                 ops = self._stage.get_bwd_send_ops(i)
-                works = _sorted_batch_p2p(ops, desc="bwd_send")
-                bwd_sends_to_wait.extend(works.values())
+                if isinstance(ops, Future):
+                    bwd_sends_to_wait.append(ops)
+                else:
+                    works = _sorted_batch_p2p(ops, desc="bwd_send")
+                    bwd_sends_to_wait.extend(works.values())
 
             logger.debug("[%s] Backwarded microbatch %s", self._stage.stage_index, i)
 
@@ -117,7 +127,10 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
 
         # Wait for all backward sends to finish
         for work in bwd_sends_to_wait:
-            work.wait()
+            if isinstance(work, dist.Work):
+                work.wait()
+            elif isinstance(work, Future):
+                work.result()
 
     def send_profile_res(self):
         res = {

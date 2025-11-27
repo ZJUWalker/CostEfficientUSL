@@ -2,6 +2,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates
 import logging
 import operator
+import threading
+from concurrent.futures import ThreadPoolExecutor,Future
 from abc import ABC, abstractmethod
 from queue import Queue
 import time
@@ -136,6 +138,7 @@ class _ServerPipelineStageBase(ABC):
             )
             self.act_to_client: Queue[Payload] = Queue()
             self.grad_from_client: Queue[Payload] = Queue()
+        self._send_executor = ThreadPoolExecutor(max_workers=1)
         # ----- Profile and Metrics ----
         self.profile_data: List[GanttChartData] = None  # init along with self.chunks later
         self.max_cuda_memory_allocated_during_fwd = 0
@@ -329,7 +332,7 @@ class _ServerPipelineStageBase(ABC):
         recv_infos = self.grad_recv_info[bwd_chunk_id]
         return self._get_recv_ops(recv_infos)
 
-    def get_fwd_send_ops(self, fwd_chunk_id: int) -> List[dist.P2POp]:
+    def get_fwd_send_ops(self, fwd_chunk_id: int) -> List[dist.P2POp]|Future:
         """
         Get the activation send ops for current stage's forward.
         """
@@ -338,8 +341,8 @@ class _ServerPipelineStageBase(ABC):
         if self.is_last:
             # Send output to client
             tensor = output_tuple[0]
-            self._send_socket_msg(is_activation=True, mb_idx=fwd_chunk_id, tensor=tensor)
-            return []
+            fut=self._send_socket_msg(is_activation=True, mb_idx=fwd_chunk_id, tensor=tensor,async_op=True)
+            return fut
         # Unify output form to tuple for easy correspondance with
         # `act_send_info`
 
@@ -362,7 +365,7 @@ class _ServerPipelineStageBase(ABC):
 
         return ops
 
-    def get_bwd_send_ops(self, bwd_chunk_id: int) -> List[dist.P2POp]:
+    def get_bwd_send_ops(self, bwd_chunk_id: int) -> List[dist.P2POp]|Future:
         """
         Get the gradient send ops for current stage's backward.
         """
@@ -373,8 +376,8 @@ class _ServerPipelineStageBase(ABC):
             grads_input = self.bwd_cache.pop(bwd_chunk_id)
             if isinstance(grads_input, torch.Tensor):
                 grads_input = (grads_input,)
-            self._send_socket_msg(is_activation=False, mb_idx=bwd_chunk_id, tensor=grads_input[0])
-            return []
+            fut=self._send_socket_msg(is_activation=False, mb_idx=bwd_chunk_id, tensor=grads_input[0],async_op=True)
+            return fut
 
         # Create bwd send infra lazily
         if self.grad_send_info is None:
@@ -466,7 +469,7 @@ class _ServerPipelineStageBase(ABC):
         return grads
 
     @torch.no_grad()
-    def _send_socket_msg(self, is_activation: bool, mb_idx: int, tensor: torch.Tensor, async_op=False):
+    def _send_socket_msg(self, is_activation: bool, mb_idx: int, tensor: torch.Tensor, async_op=False)->Optional[Future]:
         """
         发送 socket 消息
         """
@@ -484,17 +487,25 @@ class _ServerPipelineStageBase(ABC):
             position_embeddings=None,
             # TODO solve token and group_id in Payload
         )
-        if payload.is_activation:
-            self.communicator_rank_n.send(payload)
+
+        def send_payload(payload:Payload):
+            if payload.is_activation:
+                self.communicator_rank_n.send(payload)
+            else:
+                self.communicator_rank_0.send(payload)
+            end_time = time.time()
+            if is_activation:
+                self.profile_data[mb_idx].server_fwd_send_timestamp[0] = start_time
+                self.profile_data[mb_idx].server_fwd_send_timestamp[1] = end_time
+            else:
+                self.profile_data[mb_idx].server_bwd_send_timestamp[0] = start_time
+                self.profile_data[mb_idx].server_bwd_send_timestamp[1] = end_time
+        
+        if async_op:
+            fut=self._send_executor.submit(send_payload, payload)
+            return fut
         else:
-            self.communicator_rank_0.send(payload)
-        end_time = time.time()
-        if is_activation:
-            self.profile_data[mb_idx].server_fwd_send_timestamp[0] = start_time
-            self.profile_data[mb_idx].server_fwd_send_timestamp[1] = end_time
-        else:
-            self.profile_data[mb_idx].server_bwd_send_timestamp[0] = start_time
-            self.profile_data[mb_idx].server_bwd_send_timestamp[1] = end_time
+            send_payload(payload)
         pass
 
     # TODO define detailed data
