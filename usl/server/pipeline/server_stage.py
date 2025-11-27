@@ -510,6 +510,19 @@ class _ServerPipelineStageBase(ABC):
     # TODO define detailed data
     def send_profile_res(self, appendix: Dict):
         profile_data = self.profile_data
+        # process time
+        if self.is_first:
+            # 对第一个stage，由于多线程的发送，可能会导致发送梯度开始发送时间有偏差，这里需要对齐时间戳
+            for i in range(1, self.chunks):
+                profile_data[i].server_bwd_send_timestamp[0] = max(
+                    profile_data[i].server_bwd_send_timestamp[0], profile_data[i - 1].server_bwd_send_timestamp[1]
+                )
+        if self.is_last:
+            # 对最后一个stage，由于多线程的接收，可能会导致发送激活量结束时间有偏差，这里需要对齐时间戳
+            for i in range(1, self.chunks):
+                profile_data[i].server_fwd_send_timestamp[0] = max(
+                    profile_data[i].server_fwd_send_timestamp[0], profile_data[i - 1].server_fwd_send_timestamp[1]
+                )
         group = self.group
         group_rank = self.group_rank
         group_size = self.num_stages
