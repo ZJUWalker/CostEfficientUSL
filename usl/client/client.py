@@ -589,10 +589,10 @@ class Client:
         server_compute_time_ms = 0
         # server_profile_gantt_data: List[GanttChartData] = server_profile_res.get('profile', [])
         server_profile_gantt_data: List[List[GanttChartData]] = server_profile_res.get('profile', [])  # multi rank profile
-        server_fwd_time = server_profile_res.get('server_fwd_time', 0)
-        server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
-        server_bwd_time = server_profile_res.get('server_bwd_time', 0)
-        server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
+        # server_fwd_time = server_profile_res.get('server_fwd_time', 0)
+        # server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
+        # server_bwd_time = server_profile_res.get('server_bwd_time', 0)
+        # server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
         server_offload_time_durations = server_profile_res.get('server_offload_time_durations', [])
         server_reload_time_durations = server_profile_res.get('server_reload_time_durations', [])
         server_policy_str = server_profile_res.get('file_suffix', '')
@@ -605,8 +605,33 @@ class Client:
         """
         self.profile_data is the client profile res, and server_profile_gantt_data all of the server ranks[0 to N-1] profile data list.
         """
+
+        def avg_value(value_list: List[float] | float, mul=1000, round_num=2):
+            if not isinstance(value_list, list):
+                value_list = [value_list]
+            if value_list is None or len(value_list) == 0:
+                return 0.0
+            if len(value_list) <= 2:
+                return round(sum(value_list) / len(value_list) * mul, round_num)
+            else:
+                value_list.sort()
+                return round(sum(value_list[1:-1]) / (len(value_list) - 2) * mul, round_num)
+
         # 计算客户端时间
+        client_data_dict = {}
+        mb_head_fwd_times_client = []
+        mb_head_bwd_times_client = []
+        mb_tail_fwd_times_client = []
+        mb_tail_bwd_times_client = []
+        fwd_send_time_client = []
+        bwd_send_time_client = []
         for client_item in self.profile_data:
+            mb_head_fwd_times_client.append(client_item.head_fwd_timestamp[1] - client_item.head_fwd_timestamp[0])
+            mb_head_bwd_times_client.append(client_item.head_bwd_timestamp[1] - client_item.head_bwd_timestamp[0])
+            mb_tail_fwd_times_client.append(client_item.tail_fwd_timestamp[1] - client_item.tail_fwd_timestamp[0])
+            mb_tail_bwd_times_client.append(client_item.tail_bwd_timestamp[1] - client_item.tail_bwd_timestamp[0])
+            fwd_send_time_client.append(client_item.head_fwd_send_timestamp[1] - client_item.head_fwd_send_timestamp[0])
+            bwd_send_time_client.append(client_item.tail_bwd_send_timestamp[1] - client_item.tail_bwd_send_timestamp[0])
             client_send_time_ms += (
                 client_item.head_fwd_send_timestamp[1]
                 - client_item.head_fwd_send_timestamp[0]
@@ -637,9 +662,16 @@ class Client:
             client_item.head_optimizer_reload_ts = [var + head_m_reload_time_ms for var in self.head_optimizer_reload_timestamp]
             client_item.tail_optimizer_offload_ts = [var + tail_m_offload_time_ms for var in self.tail_optimizer_offload_timestamp]
             client_item.tail_optimizer_reload_ts = [var + tail_m_reload_time_ms for var in self.tail_optimizer_reload_timestamp]
-
+        client_data_dict['mb_head_fwd_time_avg'] = avg_value(mb_head_fwd_times_client)
+        client_data_dict['mb_head_bwd_time_avg'] = avg_value(mb_head_bwd_times_client)
+        client_data_dict['mb_tail_fwd_time_avg'] = avg_value(mb_tail_fwd_times_client)
+        client_data_dict['mb_tail_bwd_time_avg'] = avg_value(mb_tail_bwd_times_client)
+        client_data_dict['mb_bwd_time_avg'] = avg_value(mb_tail_bwd_times_client)
+        client_data_dict['fwd_send_time_avg'] = avg_value(fwd_send_time_client)
+        client_data_dict['bwd_send_time_avg'] = avg_value(bwd_send_time_client)
         # process server profile data
         server_data_list = [{} for _ in range(len(server_profile_gantt_data))]
+
         for rank in range(len(server_profile_gantt_data)):
             mb_fwd_times_curr_rank = []
             mb_bwd_times_curr_rank = []
@@ -653,11 +685,20 @@ class Client:
                     fwd_send_time_curr_rank.append(server_item.server_fwd_send_timestamp[1] - server_item.server_fwd_send_timestamp[0])
                 elif rank == 0:
                     bwd_send_time_curr_rank.append(server_item.server_bwd_send_timestamp[1] - server_item.server_bwd_send_timestamp[0])
-            rank_data_dict['mb_fwd_times'] = mb_fwd_times_curr_rank
-            rank_data_dict['mb_bwd_times'] = mb_bwd_times_curr_rank
+            rank_data_dict['mb_fwd_time_avg'] = avg_value(mb_fwd_times_curr_rank)
+            rank_data_dict['mb_bwd_time_avg'] = avg_value(mb_bwd_times_curr_rank)
             rank_data_dict['rank'] = rank
-            rank_data_dict['fwd_send_times'] = fwd_send_time_curr_rank
-            rank_data_dict['bwd_send_times'] = bwd_send_time_curr_rank
+            rank_data_dict['fwd_send_time_avg'] = avg_value(fwd_send_time_curr_rank)
+            rank_data_dict['bwd_send_time_avg'] = avg_value(bwd_send_time_curr_rank)
+            rank_data_dict['activation_offload_time_avg'] = avg_value(server_offload_time_durations, mul=1)
+            rank_data_dict['activation_reload_time_avg'] = avg_value(server_reload_time_durations, mul=1)
+        # 计算服务端所有rank所有mb的平均时间
+        server_mb_fwd_time_avg = avg_value([item['mb_fwd_time_avg'] for item in server_data_list], mul=1)
+        server_mb_bwd_time_avg = avg_value([item['mb_bwd_time_avg'] for item in server_data_list], mul=1)
+        server_fwd_send_time_avg = server_data_list[-1]['fwd_send_time_avg']
+        server_bwd_send_time_avg = server_data_list[0]['bwd_send_time_avg']
+        server_activation_offload_time_avg = avg_value(server_offload_time_durations, mul=1)
+        server_activation_reload_time_avg = avg_value(server_reload_time_durations, mul=1)
         # server_data_list.append(rank_data_dict.)
         # # 计算batch训练时间
         batch_train_time_ms = round((self.profile_data[-1].head_bwd_timestamp[1] - self.profile_data[0].head_fwd_timestamp[0]) * 1000, 2)
@@ -679,20 +720,18 @@ class Client:
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
             "batch_train_time_ms": batch_train_time_ms,
-            # "GPU_rent_cost": round(batch_train_time_ms * server_profile_res.get("max_mem_alloc", 0) / 1e6, 6),
-            # "head_fwd_time_avg_ms": round(head_fwd_time_avg, 2),
-            # "head_fwd_send_time_avg_ms": round(head_fwd_send_time_avg, 2),
-            # "head_bwd_time_avg_ms": round(head_bwd_time_avg, 2),
-            # "server_fwd_time_avg_ms": round(server_fwd_time_avg, 2),
-            # "server_fwd_send_time_avg_ms": round(server_fwd_send_time_avg, 2),
-            # "server_bwd_time_avg_ms": round(server_bwd_time_avg, 2),
-            # "server_bwd_send_time_avg_ms": round(server_bwd_send_time_avg, 2),
-            # "tail_fwd_time_avg_ms": round(tail_fwd_time_avg, 2),
-            # "tail_bwd_send_time_avg_ms": round(tail_bwd_send_time_avg, 2),
-            # "tail_bwd_time_avg_ms": round(tail_bwd_time_avg, 2),
-            # "client_compute_time_ms": round(local_compute_time_ms, 2),
-            # "server_compute_time_ms": round(server_compute_time_ms, 2),
-            # "delay_time_avg_ms": round(delay_time_avg_ms, 2),
+            "GPU_rent_cost": round(self.client_args.server_world_size * batch_train_time_ms * server_profile_res.get("max_mem_alloc", 0) / 1e6, 6),
+            "head_fwd_time_avg_ms": avg_value(mb_head_fwd_times_client),
+            "head_bwd_time_avg_ms": avg_value(mb_head_bwd_times_client),
+            "tail_fwd_time_avg_ms": avg_value(mb_tail_fwd_times_client),
+            "tail_bwd_time_avg_ms": avg_value(mb_tail_bwd_times_client),
+            "head_fwd_send_time_avg_ms": avg_value(fwd_send_time_client),
+            "tail_bwd_send_time_avg_ms": avg_value(bwd_send_time_client),
+            "server_fwd_time_avg_ms": server_mb_fwd_time_avg,
+            "server_bwd_time_avg_ms": server_mb_bwd_time_avg,
+            "server_fwd_send_time_avg_ms": server_fwd_send_time_avg,
+            "server_bwd_send_time_avg_ms": server_bwd_send_time_avg,
+            # "delay_time_avg_ms": delay_time_avg_ms,
             "head_m_offload_time_ms": round((self.head_model_offload_timestamp[1] - self.head_model_offload_timestamp[0]) * 1000, 2),
             "head_m_reload_time_ms": round((self.head_model_reload_timestamp[1] - self.head_model_reload_timestamp[0]) * 1000, 2),
             "tail_m_offload_time_ms": round((self.tail_model_offload_timestamp[1] - self.tail_model_offload_timestamp[0]) * 1000, 2),
@@ -701,18 +740,18 @@ class Client:
             "head_os_reload_time_ms": round((self.head_optimizer_reload_timestamp[1] - self.head_optimizer_reload_timestamp[0]) * 1000, 2),
             "tail_os_offload_time_ms": round((self.tail_optimizer_offload_timestamp[1] - self.tail_optimizer_offload_timestamp[0]) * 1000, 2),
             "tail_os_reload_time_ms": round((self.tail_optimizer_reload_timestamp[1] - self.tail_optimizer_reload_timestamp[0]) * 1000, 2),
-            "activation_offload_time_ms": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
-            "activation_reload_time_ms": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
-            "server_activation_offload_time_ms": server_offload_time_durations,
-            "server_activation_reload_time_ms": server_reload_time_durations,
+            "activation_offload_time_ms": avg_value(self.activation_offload_handler.offload_time_durations, mul=1) if self.offload_activation else 0,
+            "activation_reload_time_ms": avg_value(self.activation_offload_handler.reload_time_durations, mul=1) if self.offload_activation else 0,
+            "server_activation_offload_time_ms": server_activation_offload_time_avg,
+            "server_activation_reload_time_ms": server_activation_reload_time_avg,
             "client_send_rate": round(client_send_time_ms / batch_train_time_ms * 100, 2),
             "server_send_rate": round(server_send_time_ms / batch_train_time_ms * 100, 2),
             "client_idle_rate": round((1 - local_compute_time_ms / batch_train_time_ms) * 100, 2),
             "server_idle_rate": round((1 - server_compute_time_ms / batch_train_time_ms) * 100, 2),
             "total_bytes_sent": self.sent_payload_bytes,
             "bytes_sent_per_ms": round(self.sent_payload_bytes / client_send_time_ms, 0),
-            # "mini_batch_data": [asdict(item) for item in self.profile_data],
-            "server_compute_times": server_data_list,
+            "client_data": client_data_dict,
+            "server_ranks_data": server_data_list,
         }
         # print(data_dict["client_max_mem_alloc_mb"], data_dict["server_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
         # dt_save_dir = f"{self.client_args.save_dir}/{self.client_args.model}"
