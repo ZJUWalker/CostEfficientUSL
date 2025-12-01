@@ -112,59 +112,6 @@ class PipeDreamStrictClientTrainer(Client):
         print("client rank-0 send thread exit")
         pass
 
-    # TODO: 处理recv操作
-    @torch.no_grad()
-    def _handle_server_rank_0_send(self):
-        self._check_comm(self.communicator_rank_0)
-        while not self.stop_event.is_set():
-            try:
-                data: Optional[Dict | Payload] = self.communicator_rank_0.receive()
-            except Exception as e:
-                break
-            if data is None:
-                break
-            if isinstance(data, dict) and "profile" in data:
-                print(f"get profile data")
-                try:
-                    if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
-                        print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
-                    else:
-                        # print(f'get profile data: {data},stop training')
-                        self._save_profile_res(data)
-                except Exception as e:
-                    print(f"error when save profile data: {e}")
-                finally:
-                    self.stop_event.set()
-                    break
-            # print(f"client rank 0 recv gradient, mb_idx: {data.mb_idx}, mb_total: {data.mb_total}")
-            # print(f'rank 0 recv payload: {data.mb_idx}, {data.is_activation}')
-            assert not data.is_activation, "rank n recv data should be gradient"
-            data.tensor = data.tensor.pin_memory()
-            self.gradient_from_server_queue.put(data)
-            time.sleep(0.001)  # 避免频繁发送
-
-        print("server rank 0 send thread exit")
-
-    @torch.no_grad()
-    def _handle_server_rank_n_send(self):
-        self._check_comm(self.communicator_rank_n)
-        while not self.stop_event.is_set():
-            try:
-                data: Optional[Dict | Payload] = self.communicator_rank_n.receive()
-                # print(f"client rank n recv activation, mb_idx: {data.mb_idx}, mb_total: {data.mb_total}")
-            except Exception as e:
-                print(f"server rank n recv error: {e}")
-                break
-            if data is None:
-                print(f"server rank n recv None")
-                break
-            # print(f'rank n recv payload: {data.mb_idx}, {data.is_activation}')
-            assert data.is_activation, "rank 0 recv data should be activation"
-            data.tensor = data.tensor.pin_memory()
-            self.activation_from_server_queue.put(data)
-            time.sleep(0.001)  # 避免频繁发送
-        print("server rank n send thread exit")
-
     def _train_minibatches(self, grad_accum_steps, micro_inputs, micro_masks, micro_labels, group_id, global_batch_idx):
         self.warmup_steps = min(grad_accum_steps, 2 + self.server_stage_num)
         curr_head_fwd_mb_idx = 0

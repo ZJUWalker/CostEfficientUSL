@@ -2,12 +2,12 @@ SPLIT_POINT=2
 MBPS=230
 BATCH_SIZE=8
 STEP=2
-PMODE=gpipe
+PMODE=pdwc
 MODEL_NAME=qwen/qwen3-1.7b
 PORT=9000
 WORLD_SIZE=4
 PROFILE='' #   '--prof' or '' 
-OFFLOAD_ACTI='' # '--offload_activation' or ''
+OFFLOAD_ACTI='-OA' # '--offload_activation' or ''
 
 if [ "$PMODE" = "naive" ]; then
     MICRO_BATCH_SIZE=$BATCH_SIZE
@@ -24,7 +24,7 @@ SERVER_PID=$!
 # 启动 client
 python experiment/client_run.py --model=$MODEL_NAME --pmode=$PMODE --mbps=$MBPS \
     --batch_size=$BATCH_SIZE --micro_batch_size=$MICRO_BATCH_SIZE --split_point=$SPLIT_POINT \
-    --step=$STEP --port=$PORT --server_world_size=$WORLD_SIZE
+    --step=$STEP --port=$PORT --server_world_size=$WORLD_SIZE  $OFFLOAD_ACTI
 
 # 等待 server 执行完成
 wait $SERVER_PID

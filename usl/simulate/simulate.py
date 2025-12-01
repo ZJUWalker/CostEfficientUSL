@@ -6,7 +6,7 @@ import os
 import json
 import time
 from typing import Dict, List
-from usl.utils.usl_gantt_plot import plot_gantt_grouped
+from usl.utils.usl_gantt_plot import GanttChartData, plot_grouped_gantt
 from usl.simulate import *
 from usl.simulate.profile_separate_nodes import run_profile
 import pandas as pd
@@ -66,10 +66,15 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     head_offload_timestamp = [0, 0]
     tail_reload_timestamp = [0, 0]
     head_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    server_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    server_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    # 将服务端改成多卡
+    # server_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    # server_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     server_activation_offload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     server_activation_reload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
+    server_ranks_fwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
+    server_ranks_bwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
+    server_ranks_activation_offload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
+    server_ranks_activation_reload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
     tail_offload_timestamp = [0, 0]
     head_reload_timestamp = [0, 0]
     tail_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
@@ -107,34 +112,63 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         head_activation_send_timestamps[i][1] = head_activation_send_timestamps[i][0] + head_fwd_send_time * (
             1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
         )
-    # step3 : do server fwd
+    # step3 : do server ranks fwd
     for i in range(micro_batch_num):
-        if i == 0:
-            server_fwd_timestamps[0][0] = head_activation_send_timestamps[0][1] + time_const.delay_time_avg_ms
-        else:
-            if i > 1:
-                pre_mb_idx = i - 2
-                if pre_mb_idx < main_var.client_offload_mb_num:
-                    server_fwd_timestamps[i][0] = max(
-                        head_activation_send_timestamps[i][1] + time_const.delay_time_avg_ms,
-                        server_fwd_timestamps[i - 1][1],
-                        server_fwd_timestamps[pre_mb_idx][1] + server_acti_off_time_per_mb,
-                    )
+        for rk in range(main_var.server_world_size):
+            if rk == 0:
+                if i == 0:
+                    server_ranks_fwd_timestamps[rk][0][0] = head_activation_send_timestamps[0][1]
                 else:
-                    server_fwd_timestamps[i][0] = max(
-                        head_activation_send_timestamps[i][1] + time_const.delay_time_avg_ms, server_fwd_timestamps[i - 1][1]
-                    )
-        server_fwd_timestamps[i][1] = server_fwd_timestamps[i][0] + server_fwd_time_per_mb * (
-            1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
-        )
-        if i == micro_batch_num - 1 and micro_batch_num == main_var.client_offload_mb_num:
-            server_fwd_timestamps[i][1] += server_acti_off_time_per_mb
-    # step4 : do server activation send
+                    if i > 1:
+                        pre_mb_idx = i - 2
+                        if pre_mb_idx < main_var.client_offload_mb_num:
+                            server_ranks_fwd_timestamps[rk][i][0] = max(
+                                head_activation_send_timestamps[i][1],
+                                server_ranks_fwd_timestamps[rk][i - 1][1],
+                                server_ranks_fwd_timestamps[rk][pre_mb_idx][1] + server_acti_off_time_per_mb,
+                            )
+                        else:
+                            server_ranks_fwd_timestamps[rk][i][0] = max(
+                                head_activation_send_timestamps[i][1], server_ranks_fwd_timestamps[rk][i - 1][1]
+                            )
+                    else:
+                        server_ranks_fwd_timestamps[rk][i][0] = max(head_activation_send_timestamps[i][1], server_ranks_fwd_timestamps[rk][i - 1][1])
+                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb * (
+                    1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
+                )
+            else:
+                if i == 0:
+                    server_ranks_fwd_timestamps[rk][0][0] = server_ranks_fwd_timestamps[rk - 1][0][1]
+                else:
+                    if i > 1:
+                        pre_mb_idx = i - 2
+                        if pre_mb_idx < main_var.client_offload_mb_num:
+                            server_ranks_fwd_timestamps[rk][i][0] = max(
+                                server_ranks_fwd_timestamps[rk][i - 1][1],
+                                server_ranks_fwd_timestamps[rk][pre_mb_idx][1] + server_acti_off_time_per_mb,
+                                server_ranks_fwd_timestamps[rk - 1][i][1],
+                            )
+                        else:
+                            server_ranks_fwd_timestamps[rk][i][0] = max(
+                                server_ranks_fwd_timestamps[rk][i - 1][1], server_ranks_fwd_timestamps[rk - 1][i][1]
+                            )
+                    else:
+                        server_ranks_fwd_timestamps[rk][i][0] = max(
+                            server_ranks_fwd_timestamps[rk - 1][i][1], server_ranks_fwd_timestamps[rk][i - 1][1]
+                        )
+                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb * (
+                    1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
+                )
+
+            # if i == micro_batch_num - 1 and micro_batch_num == main_var.client_offload_mb_num:
+            #     server_ranks_fwd_timestamps[rk][i][1] += server_acti_off_time_per_mb
+
+    # step4 : do server last rank activation send
     for i in range(micro_batch_num):
         if i == 0:
-            server_activation_send_timestamps[0][0] = server_fwd_timestamps[0][1]
+            server_activation_send_timestamps[0][0] = server_ranks_fwd_timestamps[-1][0][1]
         else:
-            server_activation_send_timestamps[i][0] = max(server_fwd_timestamps[i][1], server_activation_send_timestamps[i - 1][1])
+            server_activation_send_timestamps[i][0] = max(server_ranks_fwd_timestamps[-1][i][1], server_activation_send_timestamps[i - 1][1])
         server_activation_send_timestamps[i][1] = server_activation_send_timestamps[i][0] + server_fwd_send_time * (
             1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
         )
@@ -144,10 +178,10 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             tail_fwd_timestamps[0][0] = max(
                 head_fwd_timestamps[-1][1] + head_offload_time,
                 head_fwd_timestamps[-1][1] + tail_reload_time,
-                server_activation_send_timestamps[0][1] + time_const.delay_time_avg_ms,
+                server_activation_send_timestamps[0][1],
             ) + (head_acti_reload_time_per_mb if main_var.client_offload_mb_num > 0 else 0)
         else:
-            tail_fwd_timestamps[i][0] = max(tail_bwd_timestamps[i - 1][1], server_activation_send_timestamps[i][1] + time_const.delay_time_avg_ms)
+            tail_fwd_timestamps[i][0] = max(tail_bwd_timestamps[i - 1][1], server_activation_send_timestamps[i][1])
         tail_fwd_timestamps[i][1] = tail_fwd_timestamps[i][0] + tail_fwd_time_per_mb * (
             1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
         )
@@ -168,32 +202,55 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
 
     # step7 : do server bwd
     for i in range(micro_batch_num):
-        if i == 0:
-            server_bwd_timestamps[0][0] = (
-                max(server_fwd_timestamps[-1][1], tail_gradient_send_timestamps[0][1] + time_const.delay_time_avg_ms) + server_acti_reload_time_per_mb
-            )
-        else:
-            if i < main_var.server_offload_mb_num:
-                server_bwd_timestamps[i][0] = max(
-                    server_bwd_timestamps[i - 1][1],
-                    server_bwd_timestamps[i - 1][0] + server_acti_reload_time_per_mb,
-                    tail_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms,
+        for rk in range(main_var.server_world_size - 1, -1, -1):
+            if rk == main_var.server_world_size - 1:
+                if i == 0:
+                    server_ranks_bwd_timestamps[rk][0][0] = (
+                        max(server_ranks_fwd_timestamps[rk][-1][1], tail_gradient_send_timestamps[0][1], server_fwd_send_time[-1][1])
+                        + server_acti_reload_time_per_mb
+                    )
+                else:
+                    if i < main_var.server_offload_mb_num:
+                        server_ranks_bwd_timestamps[rk][i][0] = max(
+                            server_ranks_bwd_timestamps[rk][i - 1][1],
+                            server_ranks_bwd_timestamps[rk][i - 1][0] + server_acti_reload_time_per_mb,
+                            tail_gradient_send_timestamps[i][1],
+                        )
+                    else:
+                        server_ranks_bwd_timestamps[rk][i][0] = max(
+                            server_ranks_bwd_timestamps[rk][i - 1][1],
+                            tail_gradient_send_timestamps[i][1],
+                        )
+
+                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb * (
+                    1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
             else:
-                server_bwd_timestamps[i][0] = max(
-                    server_bwd_timestamps[i - 1][1],
-                    tail_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms,
+                if i == 0:
+                    server_ranks_bwd_timestamps[rk][0][0] = server_ranks_bwd_timestamps[rk + 1][0][1] + (
+                        server_acti_reload_time_per_mb if main_var.server_offload_mb_num > 0 else 0
+                    )
+                else:
+                    if i < main_var.server_offload_mb_num:
+                        server_ranks_bwd_timestamps[rk][i][0] = max(
+                            server_ranks_bwd_timestamps[rk][i - 1][1],
+                            server_ranks_bwd_timestamps[rk][i - 1][0] + server_acti_reload_time_per_mb,
+                            server_ranks_bwd_timestamps[rk + 1][i][1],
+                        )
+                    else:
+                        server_ranks_bwd_timestamps[rk][i][0] = max(
+                            server_ranks_bwd_timestamps[rk][i - 1][1], server_ranks_bwd_timestamps[rk + 1][i][1]
+                        )
+                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb * (
+                    1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
 
-        server_bwd_timestamps[i][1] = server_bwd_timestamps[i][0] + server_bwd_time_per_mb * (
-            1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
-        )
     # step8 : do server grad send to head
     for i in range(micro_batch_num):
         if i == 0:
-            server_gradient_send_timestamps[0][0] = max(server_activation_send_timestamps[-1][1], server_bwd_timestamps[0][1])
+            server_gradient_send_timestamps[0][0] = max(server_activation_send_timestamps[-1][1], server_ranks_bwd_timestamps[0][0][1])
         else:
-            server_gradient_send_timestamps[i][0] = max(server_gradient_send_timestamps[i - 1][1], server_bwd_timestamps[i][1])
+            server_gradient_send_timestamps[i][0] = max(server_gradient_send_timestamps[i - 1][1], server_ranks_bwd_timestamps[0][i][1])
         server_gradient_send_timestamps[i][1] = server_gradient_send_timestamps[i][0] + server_bwd_send_time * (
             1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
         )
@@ -209,7 +266,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             head_bwd_timestamps[0][0] = max(
                 tail_bwd_timestamps[-1][1] + tail_offload_time,
                 tail_bwd_timestamps[-1][1] + head_reload_time,
-                server_gradient_send_timestamps[0][1] + time_const.delay_time_avg_ms,
+                server_gradient_send_timestamps[0][1],
             ) + (head_acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0)
             head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + head_bwd_time_per_mb * (
                 1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
@@ -218,30 +275,34 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             head_bwd_timestamps[i][0] = max(
                 head_bwd_timestamps[i - 1][0] + head_acti_reload_time_per_mb,
                 head_bwd_timestamps[i - 1][1],
-                server_gradient_send_timestamps[i][1] + time_const.delay_time_avg_ms,
+                server_gradient_send_timestamps[i][1],
             )
             head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + max(
                 head_bwd_time_per_mb, head_acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0
             )
     # print(head_fwd_timestamps)
     if save_gantt:
-        gantt_data = [
-            {
-                "mini_batch_idx": i,
-                "train_time_duration_ms": head_bwd_timestamps[i][1] - head_fwd_timestamps[i][0],
-                "head_fwd_timestamp": head_fwd_timestamps[i],
-                "head_fwd_send_timestamp": head_activation_send_timestamps[i],
-                "server_fwd_timestamp": server_fwd_timestamps[i],
-                "server_fwd_send_timestamp": server_activation_send_timestamps[i],
-                "tail_fwd_timestamp": tail_fwd_timestamps[i],
-                "tail_bwd_timestamp": tail_bwd_timestamps[i],
-                "tail_bwd_send_timestamp": tail_gradient_send_timestamps[i],
-                "server_bwd_timestamp": server_bwd_timestamps[i],
-                "server_bwd_send_timestamp": server_gradient_send_timestamps[i],
-                "head_bwd_timestamp": head_bwd_timestamps[i],
-            }
-            for i in range(micro_batch_num)
-        ]
+        gantt_data = [[GanttChartData(mini_batch_idx=i) for i in range(micro_batch_num)] for _ in range(main_var.server_world_size + 1)]
+        # gantt_data[0] is client data
+        # gantt_data[1:main_var.server_world_size+1] is server data
+        client_data = gantt_data[0]
+        for i in range(micro_batch_num):
+            client_data[i].train_time_duration_ms = head_bwd_timestamps[i][1] - head_fwd_timestamps[i][0]
+            client_data[i].head_fwd_timestamp = head_fwd_timestamps[i]
+            client_data[i].head_fwd_send_timestamp = head_activation_send_timestamps[i]
+            client_data[i].tail_fwd_timestamp = tail_fwd_timestamps[i]
+            client_data[i].tail_bwd_timestamp = tail_bwd_timestamps[i]
+            client_data[i].tail_bwd_send_timestamp = tail_gradient_send_timestamps[i]
+            client_data[i].head_bwd_timestamp = head_bwd_timestamps[i]
+        server_data = gantt_data[1:]
+        for rk in range(main_var.server_world_size):
+            for i in range(micro_batch_num):
+                if rk == 0:
+                    server_data[rk][i].server_bwd_send_timestamp = server_gradient_send_timestamps[i]
+                if rk == main_var.server_world_size - 1:
+                    server_data[rk][i].server_fwd_send_timestamp = server_activation_send_timestamps[i]
+                server_data[rk][i].server_fwd_timestamp = server_ranks_fwd_timestamps[rk][i]
+                server_data[rk][i].server_bwd_timestamp = server_ranks_bwd_timestamps[rk][i]
         save_dir = f'log/img/simulated/{model_name}'
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -249,7 +310,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             f'{save_dir}/sp_{split_point}_b_{max_batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}'
             f'{f"_coa_{main_var.client_offload_mb_num}_cos_{main_var.client_offload_model_state_sp_num}_soa_{main_var.server_offload_mb_num}"}.png'
         )
-        plot_gantt_grouped(gantt_data, fp, align=False)
+        plot_grouped_gantt(gantt_data, fp, align=False)
     # calculate objective function
     # calculate batch train time ,unit:ms
     batch_train_time = head_bwd_timestamps[-1][1] - head_fwd_timestamps[0][0]
@@ -271,9 +332,10 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     # calculate server idle rate
     server_compute_time = 0  # unit : ms
     server_idle_rate = 100
-    for i in range(micro_batch_num):
-        server_compute_time += server_fwd_timestamps[i][1] - server_fwd_timestamps[i][0] + server_bwd_timestamps[i][1] - server_bwd_timestamps[i][0]
-        server_idle_rate = 100 - (server_compute_time / batch_train_time) * 100
+    # TODO : calculate server idle rate
+    # for i in range(micro_batch_num):
+    #     server_compute_time += server_fwd_timestamps[i][1] - server_fwd_timestamps[i][0] + server_bwd_timestamps[i][1] - server_bwd_timestamps[i][0]
+    #     server_idle_rate = 100 - (server_compute_time / batch_train_time) * 100
     # calculate client send rate
     client_send_time = 0  # unit : ms
     for i in range(micro_batch_num):

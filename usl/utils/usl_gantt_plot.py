@@ -12,11 +12,15 @@ class GanttChartData:
     head_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_fwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    server_fwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_fwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    tail_fwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     tail_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    head_bwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     server_bwd_send_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
+    server_bwd_recv_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     head_bwd_timestamp: List[float] = field(default_factory=lambda: [None] * 2)
     # 新增 Offload / Reload 时间字段，防止绘图时报错
     head_m_offload_ts: List[float] = field(default_factory=lambda: [None] * 2)
@@ -216,6 +220,7 @@ def plot_grouped_gantt(
     行顺序：
         Client Compute
         Client Send
+        Client Recv (debug only,optional)
         Server-rank0 Compute
         Server-rank1 Compute
         ...
@@ -257,6 +262,10 @@ def plot_grouped_gantt(
         "head_fwd_send_timestamp",
         "tail_bwd_send_timestamp",
     ]
+    # CLIENT_RECV_KEYS = [
+    #     "head_bwd_recv_timestamp",
+    #     "tail_fwd_recv_timestamp",
+    # ]
     SERVER_COMPUTE_KEYS = [
         "server_fwd_timestamp",
         "server_bwd_timestamp",
@@ -266,8 +275,8 @@ def plot_grouped_gantt(
         "server_bwd_send_timestamp",
     ]
 
+    # PLOT_KEYS = CLIENT_COMPUTE_KEYS + CLIENT_SEND_KEYS+CLIENT_RECV_KEYS + SERVER_COMPUTE_KEYS + SERVER_SEND_KEYS
     PLOT_KEYS = CLIENT_COMPUTE_KEYS + CLIENT_SEND_KEYS + SERVER_COMPUTE_KEYS + SERVER_SEND_KEYS
-
     all_times = []
     for aligned in aligned_list:
         for k in PLOT_KEYS:
@@ -301,6 +310,7 @@ def plot_grouped_gantt(
     rows = []
     rows.append(("Client Compute", "client_compute", None))
     rows.append(("Client Send", "client_send", None))
+    # rows.append(("Client Recv", "client_recv", None))
     for r in server_ranks:
         rows.append((f"Server-rank{r-1} Compute", "server_compute", r))
     rows.append(("Server Send", "server_send", None))
@@ -330,6 +340,8 @@ def plot_grouped_gantt(
                 keys = CLIENT_COMPUTE_KEYS
             elif row_type == "client_send":
                 keys = CLIENT_SEND_KEYS
+            # elif row_type == "client_recv":
+            #     keys = CLIENT_RECV_KEYS
             elif row_type == "server_compute":
                 keys = SERVER_COMPUTE_KEYS
             elif row_type == "server_send":

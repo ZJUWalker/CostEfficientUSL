@@ -570,7 +570,9 @@ class _ServerPipelineStageBase(ABC):
             self._recv_meta(communicator, place)
 
     def _recv_meta(self, communicator: SocketCommunicator, place_queue: Queue):
+        s = time.time()
         payload = communicator.receive()
+        e = time.time()
         if payload is None:
             print(f"Rank {self.group_rank} receive None (peer closed?)")
             return None
@@ -583,6 +585,12 @@ class _ServerPipelineStageBase(ABC):
         # print(
         #     f"Rank {self.group_rank} receive payload,is activation: {payload.is_activation}, mb_idx: {payload.mb_idx},tensor: {payload.tensor.shape}"
         # )
+        if payload.is_activation:
+            self.profile_data[payload.mb_idx].server_fwd_recv_timestamp[0] = s
+            self.profile_data[payload.mb_idx].server_fwd_recv_timestamp[1] = e
+        else:
+            self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[0] = s
+            self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[1] = e
         payload.tensor = payload.tensor.to(self.device).requires_grad_(True)
         if payload.attention_mask is not None:
             payload.attention_mask = payload.attention_mask.to(self.device)

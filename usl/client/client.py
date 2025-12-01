@@ -537,7 +537,9 @@ class Client:
         self._check_comm(self.communicator_rank_0)
         while not self.stop_event.is_set():
             try:
+                s = time.time()
                 data: Optional[Dict | Payload] = self.communicator_rank_0.receive()
+                e = time.time()
             except Exception as e:
                 break
             if data is None:
@@ -547,9 +549,9 @@ class Client:
                 try:
                     if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
                         print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
-                    else:
-                        # print(f'get profile data: {data},stop training')
-                        self._save_profile_res(data)
+                    # else:
+                    # print(f'get profile data: {data},stop training')
+                    self._save_profile_res(data)
                 except Exception as e:
                     print(f"error when save profile data: {e}")
                 finally:
@@ -557,6 +559,8 @@ class Client:
                     break
             # print(f'rank 0 recv payload: {data.mb_idx}, {data.is_activation}')
             assert not data.is_activation, "rank n recv data should be gradient"
+            self.profile_data[data.mb_idx].head_bwd_recv_timestamp[0] = s
+            self.profile_data[data.mb_idx].head_bwd_recv_timestamp[1] = e
             data.tensor = data.tensor.pin_memory()
             self.gradient_from_server_queue.put(data)
             time.sleep(0.001)  # 避免频繁发送
@@ -568,7 +572,9 @@ class Client:
         self._check_comm(self.communicator_rank_n)
         while not self.stop_event.is_set():
             try:
+                s = time.time()
                 data: Optional[Dict | Payload] = self.communicator_rank_n.receive()
+                e = time.time()
             except Exception as e:
                 print(f"server rank n recv error: {e}")
                 break
@@ -577,6 +583,8 @@ class Client:
                 break
             # print(f'rank n recv payload: {data.mb_idx}, {data.is_activation}')
             assert data.is_activation, "rank 0 recv data should be activation"
+            self.profile_data[data.mb_idx].tail_fwd_recv_timestamp[0] = s
+            self.profile_data[data.mb_idx].tail_fwd_recv_timestamp[1] = e
             data.tensor = data.tensor.pin_memory()
             self.activation_from_server_queue.put(data)
             time.sleep(0.001)  # 避免频繁发送
@@ -625,7 +633,12 @@ class Client:
         mb_tail_bwd_times_client = []
         fwd_send_time_client = []
         bwd_send_time_client = []
-        for client_item in self.profile_data:
+        # print(server_profile_gantt_data[0])
+        for mb_idx, client_item in enumerate(self.profile_data, 0):
+            client_item.head_fwd_send_timestamp[1] = server_profile_gantt_data[0][mb_idx].server_fwd_recv_timestamp[1]
+            # server rank 0 recv activation end time
+            client_item.tail_bwd_send_timestamp[1] = server_profile_gantt_data[-1][mb_idx].server_bwd_recv_timestamp[1]
+            # server rank 0 recv gradient end time
             mb_head_fwd_times_client.append(client_item.head_fwd_timestamp[1] - client_item.head_fwd_timestamp[0])
             mb_head_bwd_times_client.append(client_item.head_bwd_timestamp[1] - client_item.head_bwd_timestamp[0])
             mb_tail_fwd_times_client.append(client_item.tail_fwd_timestamp[1] - client_item.tail_fwd_timestamp[0])
@@ -678,12 +691,15 @@ class Client:
             fwd_send_time_curr_rank = []
             bwd_send_time_curr_rank = []
             rank_data_dict = server_data_list[rank]
-            for server_item in server_profile_gantt_data[rank]:
+            for mb_idx, server_item in enumerate(server_profile_gantt_data[rank]):
                 mb_fwd_times_curr_rank.append(server_item.server_fwd_timestamp[1] - server_item.server_fwd_timestamp[0])
                 mb_bwd_times_curr_rank.append(server_item.server_bwd_timestamp[1] - server_item.server_bwd_timestamp[0])
+                # ignore the nccl transfer time,only consider the socket time between server and client
                 if rank == len(server_profile_gantt_data) - 1:
+                    server_item.server_fwd_send_timestamp[1] = self.profile_data[mb_idx].tail_fwd_recv_timestamp[1]
                     fwd_send_time_curr_rank.append(server_item.server_fwd_send_timestamp[1] - server_item.server_fwd_send_timestamp[0])
-                elif rank == 0:
+                if rank == 0:
+                    server_item.server_bwd_send_timestamp[1] = self.profile_data[mb_idx].head_bwd_recv_timestamp[1]
                     bwd_send_time_curr_rank.append(server_item.server_bwd_send_timestamp[1] - server_item.server_bwd_send_timestamp[0])
             rank_data_dict['mb_fwd_time_avg'] = avg_value(mb_fwd_times_curr_rank)
             rank_data_dict['mb_bwd_time_avg'] = avg_value(mb_bwd_times_curr_rank)

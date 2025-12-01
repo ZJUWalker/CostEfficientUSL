@@ -13,6 +13,7 @@ class MainVariable:
     total_batch_num: int = 1000  # total batch need to be trained per epoch
     batch_size: int = 8  # batch size per batch
     split_point: int = 4
+    server_world_size: int = 1
     client_offload_mb_num: int = 0
     server_offload_mb_num: int = 0
     client_offload_model_state_sp_num: int = 0
@@ -53,7 +54,7 @@ class TimeConstant:
     head_model_offload_time_increment_per_sp: float = 0.0
     tail_model_offload_time_increment_per_sp: float = 0.0
     # idle time between two compute and communication
-    delay_time_avg_ms: float = 30.0
+    delay_time_avg_ms: float = 0.0
     # gradient offload and reload time
     head_activation_send_time: float = 0
     tail_gradient_send_time: float = 0
