@@ -261,6 +261,6 @@ def run_profile(
     for key in keys:
         time_var.__dict__[key] = round(time_var.__dict__[key], 2)
         if time_var.__dict__[key] < 0:
-            print(f'warning: negative time value for key: {key},please check the profiling results.')
+            print(f'warning: negative time or memory value for key: {key}, please check the profiling results.')
 
     return mem_var, time_var

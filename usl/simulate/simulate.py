@@ -24,8 +24,12 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     assert split_point > 0, "split_point should be greater than 0"
     head_fwd_time_per_mb = time_const.base_head_fwd_time_per_mb + (split_point - base_split_point) * time_const.head_fwd_time_increment_per_sp
     head_bwd_time_per_mb = time_const.base_head_bwd_time_per_mb + (split_point - base_split_point) * time_const.head_bwd_time_increment_per_sp
-    server_fwd_time_per_mb = time_const.base_server_fwd_time_per_mb + (split_point - base_split_point) * time_const.server_fwd_time_increment_per_sp
-    server_bwd_time_per_mb = time_const.base_server_bwd_time_per_mb + (split_point - base_split_point) * time_const.server_bwd_time_increment_per_sp
+    server_fwd_time_per_mb_per_rank = (
+        time_const.base_server_fwd_time_per_mb + (split_point - base_split_point) * time_const.server_fwd_time_increment_per_sp
+    ) / main_var.server_world_size
+    server_bwd_time_per_mb_per_rank = (
+        time_const.base_server_bwd_time_per_mb + (split_point - base_split_point) * time_const.server_bwd_time_increment_per_sp
+    ) / main_var.server_world_size  # TODO: 可能不能整除，层数不能均匀分配
     tail_fwd_time_per_mb = time_const.base_tail_fwd_time_per_mb + (split_point - base_split_point) * time_const.tail_fwd_time_increment_per_sp
     tail_bwd_time_per_mb = time_const.base_tail_bwd_time_per_mb + (split_point - base_split_point) * time_const.tail_bwd_time_increment_per_sp
     head_offload_time = (
@@ -133,7 +137,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                             )
                     else:
                         server_ranks_fwd_timestamps[rk][i][0] = max(head_activation_send_timestamps[i][1], server_ranks_fwd_timestamps[rk][i - 1][1])
-                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb * (
+                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb_per_rank * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
             else:
@@ -156,7 +160,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                         server_ranks_fwd_timestamps[rk][i][0] = max(
                             server_ranks_fwd_timestamps[rk - 1][i][1], server_ranks_fwd_timestamps[rk][i - 1][1]
                         )
-                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb * (
+                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb_per_rank * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
 
@@ -222,7 +226,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                             tail_gradient_send_timestamps[i][1],
                         )
 
-                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb * (
+                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb_per_rank * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
             else:
@@ -241,7 +245,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                         server_ranks_bwd_timestamps[rk][i][0] = max(
                             server_ranks_bwd_timestamps[rk][i - 1][1], server_ranks_bwd_timestamps[rk + 1][i][1]
                         )
-                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb * (
+                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb_per_rank * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
 
