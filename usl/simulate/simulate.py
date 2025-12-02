@@ -210,7 +210,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             if rk == main_var.server_world_size - 1:
                 if i == 0:
                     server_ranks_bwd_timestamps[rk][0][0] = (
-                        max(server_ranks_fwd_timestamps[rk][-1][1], tail_gradient_send_timestamps[0][1], server_fwd_send_time[-1][1])
+                        max(server_ranks_fwd_timestamps[rk][-1][1], tail_gradient_send_timestamps[0][1], server_activation_send_timestamps[-1][1])
                         + server_acti_reload_time_per_mb
                     )
                 else:
@@ -552,10 +552,10 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Simulate memory and time profiling with dynamic parameters.')
 
     # Defining the command-line arguments
-    # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b
+    # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b qwen/qwen3-14b
     parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The number of layers in the model.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The maximum split point for the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
@@ -570,7 +570,8 @@ def parse_arguments():
 if __name__ == "__main__":
     args = parse_arguments()
     model_name = args.model
-    lora = args.lora
+    # lora = args.lora
+    lora = True  # always use lora
     mbps = args.mbps
     max_batch_size = args.max_batch_size
     profile_dir = args.profile_dir

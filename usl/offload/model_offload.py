@@ -130,11 +130,17 @@ class ModelParamOffload:
 
     def _release_gpu_memory(self):
         # Release model parameters and optimizer states from GPU
+        print(f'before release GPU memory, GPU memory usage: {torch.cuda.memory_allocated()/1024/1024} MB')
+        offload_byte = 0
         for idx in self.model_param_on_gpu.keys():
             if idx in self.except_tensor_idx_list:
                 continue
+            offload_byte += self.model_param_on_gpu[idx].numel() * self.model_param_on_gpu[idx].element_size()
             self.model_param_on_gpu[idx].data = torch.empty(0)
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
+        print(
+            f'after release GPU memory, GPU memory usage: {torch.cuda.memory_allocated()/1024/1024} MB,total M bytes offloaded: {offload_byte/1024/1024}'
+        )
 
     # reload model parameters and optimizer states from CPU to GPU
     def reload(self, async_reload=False):

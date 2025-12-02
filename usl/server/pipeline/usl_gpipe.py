@@ -146,6 +146,7 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
             'server_fwd_send_time': 0,
             'server_bwd_time': 0,
             'server_bwd_send_time': 0,
+            'offload_activation_mb_num': self.offload_activation_mb_num,
             "server_offload_time_durations": self.activation_offload_handler.offload_time_durations if self.offload_activation else 0,
             "server_reload_time_durations": self.activation_offload_handler.reload_time_durations if self.offload_activation else 0,
             "file_suffix": f'soa_{self.offload_activation_mb_num}' if self.offload_activation else '',

@@ -456,6 +456,7 @@ class Client:
         head_activation.backward(grad_to_head)
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_bwd_timestamp[1] = time.time()
+        print(f'do backward for mb idx {mb_idx}')
         if self.curr_step_idx > 0:
             self.head_bwd_time += self.profile_data[mb_idx].head_bwd_timestamp[1] - self.profile_data[mb_idx].head_bwd_timestamp[0]
         # remove not needed tensors to save memory
@@ -551,7 +552,8 @@ class Client:
                         print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
                     # else:
                     # print(f'get profile data: {data},stop training')
-                    self._save_profile_res(data)
+                    # self._save_profile_res(data)
+                    self.server_profile_res = data
                 except Exception as e:
                     print(f"error when save profile data: {e}")
                 finally:
@@ -591,18 +593,16 @@ class Client:
         print("server rank n send thread exit")
 
     @torch.no_grad()
-    def _save_profile_res(self, server_profile_res: Dict[str, Any]):
+    def _save_profile_res(self):
+        server_profile_res = self.server_profile_res
         batch_train_time_ms = 0
         local_compute_time_ms = 0
         server_compute_time_ms = 0
         # server_profile_gantt_data: List[GanttChartData] = server_profile_res.get('profile', [])
         server_profile_gantt_data: List[List[GanttChartData]] = server_profile_res.get('profile', [])  # multi rank profile
-        # server_fwd_time = server_profile_res.get('server_fwd_time', 0)
-        # server_fwd_send_time = server_profile_res.get('server_fwd_send_time', 0)
-        # server_bwd_time = server_profile_res.get('server_bwd_time', 0)
-        # server_bwd_send_time = server_profile_res.get('server_bwd_send_time', 0)
         server_offload_time_durations = server_profile_res.get('server_offload_time_durations', [])
         server_reload_time_durations = server_profile_res.get('server_reload_time_durations', [])
+        server_offload_activation_mb_num = server_profile_res.get('offload_activation_mb_num', 0)
         server_policy_str = server_profile_res.get('file_suffix', '')
         if server_policy_str:
             server_policy_str = f"_{server_policy_str}"
@@ -732,7 +732,8 @@ class Client:
             "offload_activation": self.client_args.offload_activation,
             "head_model_size": self.head_model_param_mem_alloc,
             "offload_model_state_sp_num": self.client_args.offload_model_state_sp_num,
-            "offload_activation_mb_num": self.client_args.offload_activation_mb_num,
+            "client_offload_activation_mb_num": self.client_args.offload_activation_mb_num,
+            "server_offload_activation_mb_num": server_offload_activation_mb_num,
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
             "batch_train_time_ms": batch_train_time_ms,
@@ -873,8 +874,8 @@ class Client:
                     if len(input_ids) != self.client_args.batch_size:
                         print(f"batch_idx -> {batch_idx}, len(input_ids) -> {len(input_ids)}")
                         continue
-                    if len(input_ids[1]) != self.client_args.max_seq_len:
-                        continue
+                    # if len(input_ids[1]) != self.client_args.max_seq_len:
+                    #     continue
                     # global_batch_idx += 1
                     self.train_large_batch_overlapped_accum(batch, self.curr_step_idx)
                     self.curr_step_idx += 1
@@ -883,7 +884,7 @@ class Client:
                     if self.curr_step_idx == self.client_args.step:
                         # if global_batch_idx == self.client_args.step:
                         print(f"client finished training and need reduce profile data")
-                        self.activation_to_server_queue.put({"stop": True})
+                        # self.activation_to_server_queue.put({"stop": True})
                         break
         # self.stop_event.set()
         # wait for send/recv to finish
@@ -895,4 +896,5 @@ class Client:
         self.communicator_rank_n.close()
         self.main_executor.shutdown(wait=True)
         end_time = time.time()
+        self._save_profile_res()
         self.logger.info(f"[Client Finished] epoch time: {end_time - start_time:.2f} s")

@@ -51,24 +51,6 @@ def run_profile(
     split_points = [base_sp, base_sp + 1]
     prof_res = {}
     print('Memory profile finished.')
-    # Iterate over split_points and offload_values dynamically
-    # for sp in split_points:
-    #     prof_res[sp] = {}
-    #     for offload in OFFLOAD_VALUES:
-    #         prof_res[sp][offload] = {}
-    #         # Generate the file name dynamically based on the parameters
-    #         offload_str = f"_coa_{base_bs}_soa_{base_bs}" if offload == '-OA' else f"_cos_{sp}" if offload == '-OS' else ""
-    #         file_name = f"sp_{sp}_b_{base_bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{offload_str}.json"
-    #         file_path = os.path.join(profile_dir, model, file_name)
-    #         # Read and process the file
-    #         try:
-    #             with open(file_path, 'r') as f:
-    #                 data: dict = json.load(f)
-    #             # Store the parsed data
-    #             prof_res[sp][offload] = data
-    #         except FileNotFoundError:
-    #             print(f"File {file_path} not found. Skipping.")
-    #             continue
     combinations = [
         # sp,coa,cos,soa
         (base_sp, base_bs, 0, 0, 0),  # 什么都不做
@@ -85,7 +67,7 @@ def run_profile(
         offload_str += f"_cos_{cos}" if cos > 0 else ""
         offload_str += f"_mps_{mps_gpu}" if mps_gpu != 100 else ""
         offload_str += f"_soa_{soa}" if soa > 0 else ""
-        file_path = f"{profile_dir}/{model}/sp_{sp}_b_{bs}_mb_1_s_512_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{offload_str}.json"
+        file_path = f"{profile_dir}/{model}/sp_{sp}_b_{bs}_mb_1_s_512_ws_4_mbps_{mbps}_pipedream_wc{'_lora' if lora else '' }{offload_str}.json"
         return file_path
 
     for comb in combinations:
@@ -210,35 +192,29 @@ def run_profile(
     )  # param+os
     time_var.tail_model_offload_time_increment_per_sp = time_var.head_model_offload_time_increment_per_sp
     # head activation offload time
-    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
-    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
-    time_var.base_head_activation_offload_time_per_mb = sum(base_activation_offload_time_ms) / len(base_activation_offload_time_ms)
-    time_var.head_activation_offload_time_increment_per_sp = sum(base_1_activation_offload_time_ms) / len(base_1_activation_offload_time_ms) - sum(
-        base_activation_offload_time_ms
-    ) / len(base_activation_offload_time_ms)
-    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_reload_time_ms'][:-1]
-    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_reload_time_ms'][:-1]
-    time_var.base_head_activation_reload_time_per_mb = sum(base_activation_reload_time_ms) / len(base_activation_reload_time_ms)
-    time_var.head_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
-        base_activation_reload_time_ms
-    ) / len(base_activation_reload_time_ms)
+    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms']
+    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms']
+    # base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
+    # base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms'][:-1]
+    time_var.base_head_activation_offload_time_per_mb = base_activation_offload_time_ms
+    # time_var.head_activation_offload_time_increment_per_sp = sum(base_1_activation_offload_time_ms) / len(base_1_activation_offload_time_ms) - sum(
+    #     base_activation_offload_time_ms
+    # ) / len(base_activation_offload_time_ms)
+    time_var.head_activation_offload_time_increment_per_sp = base_1_activation_offload_time_ms - base_activation_offload_time_ms
+    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_reload_time_ms']
+    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_reload_time_ms']
+    time_var.base_head_activation_reload_time_per_mb = base_activation_reload_time_ms
+    time_var.head_activation_reload_time_increment_per_sp = base_1_activation_reload_time_ms - base_activation_reload_time_ms
     # server activation offload time
-    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
-    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['server_activation_offload_time_ms'][:-1]
-    time_var.base_server_activation_offload_time_per_mb = sum(base_activation_offload_time_ms) / len(base_activation_offload_time_ms)
-    time_var.server_activation_offload_time_increment_per_sp = sum(base_1_activation_offload_time_ms) / len(base_1_activation_offload_time_ms) - sum(
-        base_activation_offload_time_ms
-    ) / len(base_activation_offload_time_ms)
-    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
-    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['server_activation_reload_time_ms'][:-1]
-    time_var.base_server_activation_reload_time_per_mb = sum(base_activation_reload_time_ms) / len(base_activation_reload_time_ms)
-    time_var.server_activation_reload_time_increment_per_sp = sum(base_1_activation_reload_time_ms) / len(base_1_activation_reload_time_ms) - sum(
-        base_activation_reload_time_ms
-    ) / len(base_activation_reload_time_ms)
-    # delay time
-    time_var.delay_time_avg_ms = (
-        prof_res[(base_sp, base_bs, 0, 0, 0)]['delay_time_avg_ms'] + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['delay_time_avg_ms']
-    ) / 2
+    base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_activation_offload_time_ms']
+    base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['server_activation_offload_time_ms']
+    time_var.base_server_activation_offload_time_per_mb = base_activation_offload_time_ms
+    time_var.server_activation_offload_time_increment_per_sp = base_1_activation_offload_time_ms - base_activation_offload_time_ms
+    base_activation_reload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_activation_reload_time_ms']
+    base_1_activation_reload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['server_activation_reload_time_ms']
+    time_var.base_server_activation_reload_time_per_mb = base_activation_reload_time_ms
+    time_var.server_activation_reload_time_increment_per_sp = base_1_activation_reload_time_ms - base_activation_reload_time_ms
+
     # network time
     time_var.head_activation_send_time = (
         prof_res[(base_sp, base_bs, 0, 0, 0)]['head_fwd_send_time_avg_ms']
@@ -257,10 +233,12 @@ def run_profile(
         + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_bwd_send_time_avg_ms']
     ) / 2
     # round all values to 2 decimal places
-    keys = time_var.__dict__.keys()
-    for key in keys:
+    for key in time_var.__dict__.keys():
         time_var.__dict__[key] = round(time_var.__dict__[key], 2)
         if time_var.__dict__[key] < 0:
-            print(f'warning: negative time or memory value for key: {key}, please check the profiling results.')
-
+            print(f'warning: negative time value for key: {key},value: {time_var.__dict__[key]}, please check the profiling results.')
+    for k in mem_var.__dict__.keys():
+        mem_var.__dict__[k] = round(mem_var.__dict__[k], 2)
+        if mem_var.__dict__[k] < 0:
+            print(f'warning: negative memory value for key: {k},value: {mem_var.__dict__[k]}, please check the profiling results.')
     return mem_var, time_var
