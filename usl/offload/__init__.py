@@ -1,4 +1,5 @@
 from .model_offload import ModelParamOffload
+from .model_offload_hook import AsyncParamOffloadHandler
 from .optimizer_offload import OptimizerStateOffload
 from .activation_offload import (
     AsyncDoubleBufferGroupOffloadHandler,
@@ -16,4 +17,5 @@ __all__ = [
     'CpuOffloadHookWithOffloadHandler',
     'CpuOffloadSavedTensorHook',
     'OffloadHandler',
+    'AsyncParamOffloadHandler',
 ]

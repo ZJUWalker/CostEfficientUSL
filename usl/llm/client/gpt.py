@@ -275,7 +275,7 @@ class GPT2ClientTail(PreTrainedModel):
 
     def forward(
         self,
-        hidden_status_from_server: torch.Tensor,
+        hidden_states: torch.Tensor,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -284,7 +284,6 @@ class GPT2ClientTail(PreTrainedModel):
     ):
         if head_mask is None:
             head_mask = [None] * self.config.n_layer
-        hidden_states = hidden_status_from_server
         for i in range(len(self.layers)):
             block = self.layers[i]
             outputs = block(

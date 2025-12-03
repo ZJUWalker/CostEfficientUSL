@@ -96,14 +96,13 @@ class GPT2Server(PreTrainedModel):
 
     def forward(
         self,
-        hidden_status_from_head: torch.Tensor,
+        hidden_states: torch.Tensor,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         **kwargs,
     ):
         if head_mask is None:
             head_mask = [None] * self.config.n_layer
-        hidden_states = hidden_status_from_head
         for i in range(len(self.layers)):
             block = self.layers[i]
             outputs = block(

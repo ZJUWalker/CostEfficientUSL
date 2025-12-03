@@ -92,7 +92,7 @@ def load_client(
             r=8,
             lora_alpha=32,
             lora_dropout=0.1,
-            target_modules=["q_proj", "k_proj", "v_proj"],
+            target_modules=["q_proj", "k_proj", "v_proj"] if not 'gpt' in model_name.lower() else ['c_attn', 'c_proj'],
         )
         head = get_peft_model(head, lora_config)
         tail = get_peft_model(tail, lora_config)

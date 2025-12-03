@@ -3,8 +3,12 @@ import torch.nn as nn
 from typing import List, Dict, Tuple
 import time
 import sys
+from typing_extensions import deprecated
 
 
+# @deprecated(
+#     'This class is deprecated and will be removed in the future.Please use `usl/offload/model_offload_hook.py::ModelParamOffloadHook` instead.'
+# )
 class ModelParamOffload:
 
     def __init__(
@@ -12,7 +16,7 @@ class ModelParamOffload:
         base_model: nn.Module,
         offload_threshold: int = 0,
         # offload_ratio: float = 1.0,
-        offload_layer_num: int = 4,
+        offload_layer_num: int = 10,
         device="cuda",
         load_stream=None,
         offload_stream=None,
@@ -121,6 +125,7 @@ class ModelParamOffload:
             elapsed_time = self.start_offload_event.elapsed_time(self.offload_event)  # kernel time in ms
             self.offload_timestamp[1] = self.offload_timestamp[0] + elapsed_time / 1000  # time in seconds
             self._release_gpu_memory()
+        self.check_model_param_device()
         return self.offload_timestamp
 
     def offload_finished(self):
@@ -137,8 +142,9 @@ class ModelParamOffload:
             if idx in self.except_tensor_idx_list:
                 continue
             offload_byte += self.model_param_on_gpu[idx].numel() * self.model_param_on_gpu[idx].element_size()
-            self.model_param_on_gpu[idx].data = torch.empty(0)
-        torch.cuda.empty_cache()
+            # self.model_param_on_gpu[idx].data = torch.empty(0, device=self.device)
+            self.model_param_on_gpu[idx].data = torch.empty(0, device='cpu')
+        # torch.cuda.empty_cache()
         print(
             f'after release GPU memory, GPU memory usage: {torch.cuda.memory_allocated()/1024/1024} MB,total M bytes offloaded: {offload_byte/1024/1024}'
         )
@@ -175,3 +181,17 @@ class ModelParamOffload:
             elapsed_time = self.start_reload_event.elapsed_time(self.reload_event)  # kernel time in ms
             self.reload_timestamp[1] = self.reload_timestamp[0] + elapsed_time / 1000  # time in seconds
         return self.reload_timestamp
+
+    def check_model_param_device(self):
+        print("--- Checking Parameter Devices ---")
+        cuda_count = 0
+        cpu_count = 0
+        for name, param in self.base_model.named_parameters():
+            if param.device.type == 'cuda':
+                cuda_count += 1
+            else:
+                cpu_count += 1
+            # 打印前几个看看
+            # if cuda_count < 100 and param.device.type == 'cuda':
+            #     print(f"CUDA: {name}")
+        print(f"Total: {cuda_count} on CUDA, {cpu_count} on CPU")
