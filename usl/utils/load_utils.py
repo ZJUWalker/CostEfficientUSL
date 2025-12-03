@@ -171,8 +171,6 @@ def manual_model_split(model: nn.Module, stage_index: int, num_stages: int, devi
 
     注意：这个函数是原地修改 model 的，所以每个 rank 应该有自己的一份 model。
     """
-    # 先确保模型在对应 device 上（避免后面参数在 CPU / CUDA 混合）
-    model.to(device)
 
     total_layers = len(model.layers)
     if total_layers % num_stages != 0:
@@ -207,17 +205,7 @@ def manual_model_split(model: nn.Module, stage_index: int, num_stages: int, devi
     # 此时 model.layers 的长度应该是 end - start
     assert len(model.layers) == end - start, f"Stage {stage_index}: layers count mismatch, expect {end - start}, got {len(model.layers)}"
 
-    # Qwen3Server 里没有 tok_embeddings / norm / output 这种 head/tail，
-    # 所以不需要像你示例里那样额外 del 这些模块。
-    # rotary_emb 是所有层共用的，只保留一个没问题。
-
-    # # 包装成 PipelineStage（按你示例里的方式）
-    # stage = PipelineStage(
-    #     model,
-    #     stage_index,
-    #     num_stages,
-    #     device,
-    # )
+    model.to(device)
     return model
 
 

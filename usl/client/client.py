@@ -456,7 +456,7 @@ class Client:
         head_activation.backward(grad_to_head)
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_bwd_timestamp[1] = time.time()
-        print(f'do backward for mb idx {mb_idx}')
+        # print(f'do backward for mb idx {mb_idx}')
         if self.curr_step_idx > 0:
             self.head_bwd_time += self.profile_data[mb_idx].head_bwd_timestamp[1] - self.profile_data[mb_idx].head_bwd_timestamp[0]
         # remove not needed tensors to save memory

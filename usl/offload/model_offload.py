@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import List, Dict, Tuple
 import time
+import sys
 
 
 class ModelParamOffload:
@@ -154,7 +155,7 @@ class ModelParamOffload:
         with torch.cuda.stream(stream):
             # Reload model parameters from CPU to GPU
             for idx, tensor in self.model_param_on_cpu.items():
-                assert tensor.is_cpu and tensor.is_pinned, 'model_param_on_cpu should be on CPU DRAM and pinned'
+                assert tensor.is_cpu, 'model_param_on_cpu should be on CPU DRAM'
                 t_gpu = torch.empty_like(tensor, device=self.device)  # no pin_memory on GPU
                 t_gpu.data.copy_(tensor.data, non_blocking=True)
                 self.model_param_on_gpu[idx].data = t_gpu.data

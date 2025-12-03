@@ -227,7 +227,7 @@ class ServerPipelineScheduleSingle(_ServerPipelineSchedule):
 
         res = {
             'profile': profile_data,
-            'max_mem_alloc': round(self._stage.max_cuda_memory_allocated_during_fwd / 1024**2, 4),
+            'max_mem_alloc': round(self._stage.max_cuda_memory_allocated / 1024**2, 4),
             'server_fwd_time': 0,
             'server_fwd_send_time': 0,
             'server_bwd_time': 0,

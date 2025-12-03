@@ -142,8 +142,7 @@ class _ServerPipelineStageBase(ABC):
         self._recv_executor = ThreadPoolExecutor(max_workers=1)
         # ----- Profile and Metrics ----
         self.profile_data: List[GanttChartData] = None  # init along with self.chunks later
-        self.max_cuda_memory_allocated_during_fwd = 0
-        self.max_cuda_memory_allocated_during_bwd = 0
+        self.max_cuda_memory_allocated = 0
 
     @property
     def has_backward(self) -> bool:
@@ -770,7 +769,8 @@ class _ServerPipelineStageBase(ABC):
             map_debug_info(output),
         )
         self._validate_fwd_outputs(output_tuple)
-        self.max_cuda_memory_allocated_during_fwd = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated_during_fwd)
+        self.max_cuda_memory_allocated = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated)
+        torch.cuda.reset_peak_memory_stats()
         # We return the original user-provied output, not normalized to tuple.
         # See [Note: pipeline model output type]
         return output
@@ -874,7 +874,8 @@ class _ServerPipelineStageBase(ABC):
             # this should be detached to release autograd graph context and free memory earlier
             for t in stage_output:
                 t.detach_()
-        self.max_cuda_memory_allocated_during_bwd = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated_during_bwd)
+        self.max_cuda_memory_allocated = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated)
+        torch.cuda.reset_peak_memory_stats()
         logger.debug("%s Backwarded chunk %s", self.log_prefix, bwd_chunk_id)
 
     @deprecated('This method is not used in Gpipe and 1F1B schedule.')
