@@ -13,9 +13,17 @@ import pandas as pd
 from dataclasses import dataclass
 
 
-def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, save_gantt: bool = False) -> SimulateResult:
+def _simulate_train_time(
+    main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, curr_obj: Objective, save_gantt: bool = False
+) -> SimulateResult:
     # simulate the batch training time
-    # print(main_var)
+    assert (
+        curr_obj.min_gpu_num_required > 0
+    ), "min_gpu_num_required should be greater than 0,must do memory simulation first, see method _simulate_memory_usage"
+    gpu_num_required = curr_obj.min_gpu_num_required
+    layers_per_gpu_list = curr_obj.layers_num_per_gpu
+    total_layer_num = sum(layers_per_gpu_list)
+    # ------------------------get meta time variables to simulate the batch training time ----------
     random_jitter_bound = 1  # random jitter bound for the batch size
     micro_batch_num = (main_var.batch_size + mem_const.micro_batch_size - 1) // mem_const.micro_batch_size
     split_point = main_var.split_point
@@ -24,12 +32,19 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     assert split_point > 0, "split_point should be greater than 0"
     head_fwd_time_per_mb = time_const.base_head_fwd_time_per_mb + (split_point - base_split_point) * time_const.head_fwd_time_increment_per_sp
     head_bwd_time_per_mb = time_const.base_head_bwd_time_per_mb + (split_point - base_split_point) * time_const.head_bwd_time_increment_per_sp
-    server_fwd_time_per_mb_per_rank = (
-        time_const.base_server_fwd_time_per_mb + (split_point - base_split_point) * time_const.server_fwd_time_increment_per_sp
-    ) / main_var.server_world_size
-    server_bwd_time_per_mb_per_rank = (
-        time_const.base_server_bwd_time_per_mb + (split_point - base_split_point) * time_const.server_bwd_time_increment_per_sp
-    ) / main_var.server_world_size  # TODO: 可能不能整除，层数不能均匀分配
+    server_fwd_time_per_mb_per_rank = [
+        (time_const.base_server_fwd_time_per_mb + (split_point - base_split_point) * time_const.server_fwd_time_increment_per_sp)
+        / total_layer_num
+        * layer_num
+        for layer_num in layers_per_gpu_list
+    ]
+    print(server_fwd_time_per_mb_per_rank)
+    server_bwd_time_per_mb_per_rank = [
+        (time_const.base_server_bwd_time_per_mb + (split_point - base_split_point) * time_const.server_bwd_time_increment_per_sp)
+        / total_layer_num
+        * layer_num
+        for layer_num in layers_per_gpu_list
+    ]
     tail_fwd_time_per_mb = time_const.base_tail_fwd_time_per_mb + (split_point - base_split_point) * time_const.tail_fwd_time_increment_per_sp
     tail_bwd_time_per_mb = time_const.base_tail_bwd_time_per_mb + (split_point - base_split_point) * time_const.tail_bwd_time_increment_per_sp
     head_offload_time = (
@@ -50,14 +65,24 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         time_const.base_head_activation_reload_time_per_mb
         + (split_point - base_split_point) * time_const.head_activation_reload_time_increment_per_sp
     )
-    server_acti_off_time_per_mb = (
-        time_const.base_server_activation_offload_time_per_mb
-        + (split_point - base_split_point) * time_const.server_activation_offload_time_increment_per_sp
-    )
-    server_acti_reload_time_per_mb = (
-        time_const.base_server_activation_reload_time_per_mb
-        + (split_point - base_split_point) * time_const.server_activation_reload_time_increment_per_sp
-    )
+    server_acti_off_time_per_mb_per_rank = [
+        (
+            time_const.base_server_activation_offload_time_per_mb
+            + (split_point - base_split_point) * time_const.server_activation_offload_time_increment_per_sp
+        )
+        / total_layer_num
+        * layer_num
+        for layer_num in layers_per_gpu_list
+    ]
+    server_acti_reload_time_per_mb_per_rank = [
+        (
+            time_const.base_server_activation_reload_time_per_mb
+            + (split_point - base_split_point) * time_const.server_activation_reload_time_increment_per_sp
+        )
+        / total_layer_num
+        * layer_num
+        for layer_num in layers_per_gpu_list
+    ]
     head_fwd_send_time = time_const.head_activation_send_time
     server_fwd_send_time = time_const.server_activation_send_time
     tail_bwd_send_time = time_const.tail_gradient_send_time
@@ -75,10 +100,10 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
     # server_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     server_activation_offload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     server_activation_reload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    server_ranks_fwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
-    server_ranks_bwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
-    server_ranks_activation_offload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
-    server_ranks_activation_reload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(main_var.server_world_size)]
+    server_ranks_fwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(gpu_num_required)]
+    server_ranks_bwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(gpu_num_required)]
+    server_ranks_activation_offload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(gpu_num_required)]
+    server_ranks_activation_reload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(gpu_num_required)]
     tail_offload_timestamp = [0, 0]
     head_reload_timestamp = [0, 0]
     tail_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
@@ -118,7 +143,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         )
     # step3 : do server ranks fwd
     for i in range(micro_batch_num):
-        for rk in range(main_var.server_world_size):
+        for rk in range(gpu_num_required):
             if rk == 0:
                 if i == 0:
                     server_ranks_fwd_timestamps[rk][0][0] = head_activation_send_timestamps[0][1]
@@ -129,7 +154,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                             server_ranks_fwd_timestamps[rk][i][0] = max(
                                 head_activation_send_timestamps[i][1],
                                 server_ranks_fwd_timestamps[rk][i - 1][1],
-                                server_ranks_fwd_timestamps[rk][pre_mb_idx][1] + server_acti_off_time_per_mb,
+                                server_ranks_fwd_timestamps[rk][pre_mb_idx][1] + server_acti_off_time_per_mb_per_rank[rk],
                             )
                         else:
                             server_ranks_fwd_timestamps[rk][i][0] = max(
@@ -137,7 +162,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                             )
                     else:
                         server_ranks_fwd_timestamps[rk][i][0] = max(head_activation_send_timestamps[i][1], server_ranks_fwd_timestamps[rk][i - 1][1])
-                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb_per_rank * (
+                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb_per_rank[rk] * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
             else:
@@ -149,7 +174,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                         if pre_mb_idx < main_var.client_offload_mb_num:
                             server_ranks_fwd_timestamps[rk][i][0] = max(
                                 server_ranks_fwd_timestamps[rk][i - 1][1],
-                                server_ranks_fwd_timestamps[rk][pre_mb_idx][1] + server_acti_off_time_per_mb,
+                                server_ranks_fwd_timestamps[rk][pre_mb_idx][1] + server_acti_off_time_per_mb_per_rank[rk],
                                 server_ranks_fwd_timestamps[rk - 1][i][1],
                             )
                         else:
@@ -160,7 +185,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                         server_ranks_fwd_timestamps[rk][i][0] = max(
                             server_ranks_fwd_timestamps[rk - 1][i][1], server_ranks_fwd_timestamps[rk][i - 1][1]
                         )
-                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb_per_rank * (
+                server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb_per_rank[rk] * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
 
@@ -206,18 +231,17 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
 
     # step7 : do server bwd
     for i in range(micro_batch_num):
-        for rk in range(main_var.server_world_size - 1, -1, -1):
-            if rk == main_var.server_world_size - 1:
+        for rk in range(gpu_num_required - 1, -1, -1):
+            if rk == gpu_num_required - 1:
                 if i == 0:
-                    server_ranks_bwd_timestamps[rk][0][0] = (
-                        max(server_ranks_fwd_timestamps[rk][-1][1], tail_gradient_send_timestamps[0][1], server_activation_send_timestamps[-1][1])
-                        + server_acti_reload_time_per_mb
-                    )
+                    server_ranks_bwd_timestamps[rk][0][0] = max(
+                        server_ranks_fwd_timestamps[rk][-1][1], tail_gradient_send_timestamps[0][1], server_activation_send_timestamps[-1][1]
+                    ) + (server_acti_reload_time_per_mb_per_rank[rk] if main_var.server_offload_mb_num > 0 else 0)
                 else:
                     if i < main_var.server_offload_mb_num:
                         server_ranks_bwd_timestamps[rk][i][0] = max(
                             server_ranks_bwd_timestamps[rk][i - 1][1],
-                            server_ranks_bwd_timestamps[rk][i - 1][0] + server_acti_reload_time_per_mb,
+                            server_ranks_bwd_timestamps[rk][i - 1][0] + server_acti_reload_time_per_mb_per_rank[rk],
                             tail_gradient_send_timestamps[i][1],
                         )
                     else:
@@ -226,26 +250,26 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
                             tail_gradient_send_timestamps[i][1],
                         )
 
-                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb_per_rank * (
+                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb_per_rank[rk] * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
             else:
                 if i == 0:
                     server_ranks_bwd_timestamps[rk][0][0] = server_ranks_bwd_timestamps[rk + 1][0][1] + (
-                        server_acti_reload_time_per_mb if main_var.server_offload_mb_num > 0 else 0
+                        server_acti_reload_time_per_mb_per_rank[rk] if main_var.server_offload_mb_num > 0 else 0
                     )
                 else:
                     if i < main_var.server_offload_mb_num:
                         server_ranks_bwd_timestamps[rk][i][0] = max(
                             server_ranks_bwd_timestamps[rk][i - 1][1],
-                            server_ranks_bwd_timestamps[rk][i - 1][0] + server_acti_reload_time_per_mb,
+                            server_ranks_bwd_timestamps[rk][i - 1][0] + server_acti_reload_time_per_mb_per_rank[rk],
                             server_ranks_bwd_timestamps[rk + 1][i][1],
                         )
                     else:
                         server_ranks_bwd_timestamps[rk][i][0] = max(
                             server_ranks_bwd_timestamps[rk][i - 1][1], server_ranks_bwd_timestamps[rk + 1][i][1]
                         )
-                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb_per_rank * (
+                server_ranks_bwd_timestamps[rk][i][1] = server_ranks_bwd_timestamps[rk][i][0] + server_bwd_time_per_mb_per_rank[rk] * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
 
@@ -286,9 +310,9 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             )
     # print(head_fwd_timestamps)
     if save_gantt:
-        gantt_data = [[GanttChartData(mini_batch_idx=i) for i in range(micro_batch_num)] for _ in range(main_var.server_world_size + 1)]
+        gantt_data = [[GanttChartData(mini_batch_idx=i) for i in range(micro_batch_num)] for _ in range(gpu_num_required + 1)]
         # gantt_data[0] is client data
-        # gantt_data[1:main_var.server_world_size+1] is server data
+        # gantt_data[1:gpu_num_required+1] is server data
         client_data = gantt_data[0]
         for i in range(micro_batch_num):
             client_data[i].train_time_duration_ms = head_bwd_timestamps[i][1] - head_fwd_timestamps[i][0]
@@ -299,11 +323,11 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             client_data[i].tail_bwd_send_timestamp = tail_gradient_send_timestamps[i]
             client_data[i].head_bwd_timestamp = head_bwd_timestamps[i]
         server_data = gantt_data[1:]
-        for rk in range(main_var.server_world_size):
+        for rk in range(gpu_num_required):
             for i in range(micro_batch_num):
                 if rk == 0:
                     server_data[rk][i].server_bwd_send_timestamp = server_gradient_send_timestamps[i]
-                if rk == main_var.server_world_size - 1:
+                if rk == gpu_num_required - 1:
                     server_data[rk][i].server_fwd_send_timestamp = server_activation_send_timestamps[i]
                 server_data[rk][i].server_fwd_timestamp = server_ranks_fwd_timestamps[rk][i]
                 server_data[rk][i].server_bwd_timestamp = server_ranks_bwd_timestamps[rk][i]
@@ -311,7 +335,7 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
         fp = (
-            f'{save_dir}/sp_{split_point}_b_{max_batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}'
+            f'{save_dir}/sp_{split_point}_b_{main_var.batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}'
             f'{f"_coa_{main_var.client_offload_mb_num}_cos_{main_var.client_offload_model_state_sp_num}_soa_{main_var.server_offload_mb_num}"}.png'
         )
         plot_grouped_gantt(gantt_data, fp, align=False)
@@ -360,20 +384,14 @@ def _simulate_train_time(main_var: MainVariable, time_const: TimeConstant, mem_c
             - server_gradient_send_timestamps[i][0]
         )
     server_send_rate = server_send_time / (batch_train_time) * 100
-    return SimulateResult(
-        main_variable=main_var,
-        time_const=time_const,
-        objective=Objective(
-            client_idle_rate=round(client_idle_rate, 2),
-            server_idle_rate=round(server_idle_rate, 2),
-            client_send_rate=round(client_send_rate, 2),
-            server_send_rate=round(server_send_rate, 2),
-            client_peak_mem_alloc=0,
-            server_peak_mem_alloc=0,
-            batch_train_time=round(batch_train_time, 2),
-            epoch_train_time=round(batch_train_time * main_var.total_batch_num, 2),
-        ),
-    )
+    curr_obj.client_idle_rate = round(client_idle_rate, 2)
+    curr_obj.server_idle_rate = round(server_idle_rate, 2)
+    curr_obj.client_send_rate = round(client_send_rate, 2)
+    curr_obj.server_send_rate = round(server_send_rate, 2)
+    curr_obj.batch_train_time = round(batch_train_time, 2)
+    curr_obj.epoch_train_time = round(batch_train_time * main_var.total_batch_num / 1000 / 3600, 2)  # ms -> hours
+    curr_obj.server_cost_per_epoch = round(curr_obj.min_gpu_num_required * curr_obj.epoch_train_time * main_var.gpu_rent_cost_per_hour, 2)
+    return SimulateResult(main_variable=main_var, time_const=time_const, objective=curr_obj)
 
 
 def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstant) -> SimulateResult:
@@ -413,18 +431,39 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         + (server_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_server_if_oa
     )
 
-    return SimulateResult(objective=Objective(client_peak_mem_alloc=client_peak_mem_alloc, server_peak_mem_alloc=server_peak_mem_alloc))
+    server_total_layer_num = (max_split_point - split_point) * 2
+    mem_required_per_layer = server_peak_mem_alloc / server_total_layer_num
+    max_layers_per_gpu = math.floor(main_var.gpu_max_capacity * 0.9 * 1024 / mem_required_per_layer)
+    # 0.9 is a safety factor to avoid over-provisioning
+    min_gpu_num_required = math.ceil(server_total_layer_num / max_layers_per_gpu)
+    # detail layers_num_per_gpu and mem_alloc_per_gpu
+    layers_num_per_gpu = [server_total_layer_num // min_gpu_num_required] * min_gpu_num_required
+    i = 0
+    while sum(layers_num_per_gpu) < server_total_layer_num:
+        layers_num_per_gpu[i] += 1
+        i = (i + 1) % min_gpu_num_required
+    mem_alloc_per_gpu = [mem_required_per_layer * layers_num for layers_num in layers_num_per_gpu]
+    return SimulateResult(
+        objective=Objective(
+            client_peak_mem_alloc=client_peak_mem_alloc,
+            server_peak_mem_alloc=server_peak_mem_alloc,
+            min_gpu_num_required=min_gpu_num_required,
+            mem_alloc_per_layer=mem_required_per_layer,
+            layers_num_per_gpu=layers_num_per_gpu,
+            mem_alloc_per_gpu=mem_alloc_per_gpu,
+        )
+    )
 
 
 def simulate(main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, save_gantt: bool = False) -> SimulateResult:
     simulate_mem_result = _simulate_peak_mem_alloc(main_var, mem_const)
-    simulate_result = _simulate_train_time(main_var, time_const, mem_const, save_gantt)
+    simulate_result = _simulate_train_time(main_var, time_const, mem_const, simulate_mem_result.objective, save_gantt)
     # copy memory result to simulate_result
-    simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
-    simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
-    simulate_result.objective.server_cost = round(
-        simulate_result.objective.server_peak_mem_alloc * simulate_result.objective.epoch_train_time / 10**6, 2
-    )
+    # simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
+    # simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
+    # simulate_result.objective.server_cost_per_epoch = round(
+    #     simulate_result.objective.server_peak_mem_alloc * simulate_result.objective.epoch_train_time / 10**6, 2
+    # )
     return simulate_result
 
 
@@ -516,10 +555,10 @@ def do_optimize(
                 break
             if best_strategy is None and sim_res.objective.client_peak_mem_alloc < max_client_mem_mb * 0.85:  # 0.95 is for safety
                 best_strategy = sim_res
-                min_cost = best_strategy.objective.server_cost
+                min_cost = best_strategy.objective.server_cost_per_epoch
                 min_epoch_train_time = best_strategy.objective.epoch_train_time
             # time_sim_res = _simulate_train_time(var, time_res, mem_res, save_gantt=False)
-            server_cost = sim_res.objective.server_cost
+            server_cost = sim_res.objective.server_cost_per_epoch
             epoch_train_time = sim_res.objective.epoch_train_time
             # 维护单目标最优（若仍想保留）
             if server_cost < min_cost:
@@ -555,7 +594,7 @@ def parse_arguments():
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b qwen/qwen3-14b
     parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
-    parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The maximum split point for the model.')
+    # parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The maximum split point for the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
@@ -575,7 +614,7 @@ if __name__ == "__main__":
     mbps = args.mbps
     max_batch_size = args.max_batch_size
     profile_dir = args.profile_dir
-    max_split_point = args.max_split_point
+    # max_split_point = args.max_split_point
     dataset_size = args.dataset_size
     max_client_mem_mb = args.max_client_mem_gb * 1024
     save_gantt = args.save_gantt
@@ -594,8 +633,8 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in [1, 2, 3, 4, 5, 6, 7]:
-        for bs in [4, 8, 12, 16, 24, 32]:
+    for sp in range(4, 5):
+        for bs in [4, 8]:
             var = MainVariable(
                 total_batch_num=1000,
                 batch_size=bs,
@@ -605,16 +644,17 @@ if __name__ == "__main__":
                 client_offload_model_state_sp_num=0,
                 lora=lora,
             )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+            sim_res = simulate(var, time_res, mem_res, save_gantt=True)
             all_data.append(
                 {
                     'split_point': var.split_point,
                     'batch_size': var.batch_size,
                     # 'offload_mb_num': var.client_offload_mb_num,
                     # 'offload_ms_sp_num': var.client_offload_model_state_sp_num,
-                    'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
-                    'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
+                    # 'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
+                    # 'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
                     # 'batch_time': round(sim_res.objective.batch_train_time, 2),
+                    **sim_res.objective.__dict__,
                 }
             )
     df = pd.DataFrame(all_data)

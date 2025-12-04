@@ -13,17 +13,18 @@ class MainVariable:
     total_batch_num: int = 1000  # total batch need to be trained per epoch
     batch_size: int = 8  # batch size per batch
     split_point: int = 4
-    server_world_size: int = 1
+    gpu_max_capacity: int = 48  # unit:GB
+    gpu_rent_cost_per_hour: float = 0.0  # unit:USD/hour
     client_offload_mb_num: int = 0
     server_offload_mb_num: int = 0
     client_offload_model_state_sp_num: int = 0
-    lora: bool = False
+    lora: bool = True  # our experiment only use lora ft for now,but also support non-lora ft
 
 
 @dataclass
 class TimeConstant:
     """
-    TimeConstant contains the time cost of different components in the system.
+    TimeConstant contains the time cost of different components in the system.All of time unit is in millisecond.
     """
 
     rate_mbps: float = 1000  # mbps limit
@@ -68,7 +69,7 @@ class MemoryConstant:
     MemoryConstant contains the memory usage of different components in the system.
     """
 
-    max_split_point: int = 8
+    max_split_point: int = 18  # max split point of the model,(qwen3-4b->18, qwen3-8b->18, qwen3-14b->20, qwen3-32b->36),auto set
     micro_batch_size: int = 1
     max_seq_len: int = 512
     baseline_split_point: int = 1
@@ -83,7 +84,7 @@ class MemoryConstant:
     mem_increment_per_sp_mb_server: float = 0.0
     base_model_state_mem_alloc_client: float = 0
     base_model_state_mem_alloc_except_blocks: float = 0
-    model_mem_increment_per_sp_client: float = 1728.1601  # unit:MB，如果做卸载，每加一个sp，最大显存分配减少的量
+    model_mem_increment_per_sp_client: float = 0  # unit:MB，如果做卸载，每加一个sp，最大显存分配减少的量
 
 
 @dataclass
@@ -94,14 +95,17 @@ class Objective:
 
     client_peak_mem_alloc: float = 0.0  # unit:MB
     server_peak_mem_alloc: float = 0.0
-    batch_train_time: float = 0.0
-    server_cost: float = 0.0
-    epoch_train_time: float = 0.0
+    batch_train_time: float = 0.0  # unit:ms
+    server_cost_per_epoch: float = 0.0  # unit:USD/epoch
+    min_gpu_num_required: int = 0
+    layers_num_per_gpu: list = field(default_factory=lambda: [])  # for debug
+    mem_alloc_per_gpu: list = field(default_factory=lambda: [])  # for debug
+    mem_alloc_per_layer: float = 0.0  # unit:MB for each layer
+    epoch_train_time: float = 0.0  # unit:hour
     client_idle_rate: float = 0.0  # unit:%
     server_idle_rate: float = 0.0
     client_send_rate: float = 0.0
     server_send_rate: float = 0.0
-
     pass
 
 
