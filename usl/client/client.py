@@ -17,7 +17,13 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from usl.offload import ModelParamOffload, OptimizerStateOffload, CpuOffloadHookWithOffloadHandler, AsyncDoubleBufferGroupOffloadHandler
+from usl.offload import (
+    AsyncModelParamOffloadHandler,
+    ModelParamOffload,
+    OptimizerStateOffload,
+    CpuOffloadHookWithOffloadHandler,
+    AsyncDoubleBufferGroupOffloadHandler,
+)
 from usl.server.single_server import PipelineMode
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_grouped_gantt
@@ -113,6 +119,7 @@ class Client:
             self.tail_model = tail_model.to("cpu")  # 初始化状态：把tail_model放在cpu中
         else:
             self.tail_model = tail_model.to(self.client_device)  # 初始化状态：把tail_model放在cuda中
+        # self.tail_model = tail_model.to(self.client_device)
         if self.client_args.split_point == 0 and self.client_args.use_lora:
             # if use lora but no block, all the param don't need to be updated
             for n, p in self.head_model.named_parameters():
@@ -166,34 +173,34 @@ class Client:
         # ----Parameter Efficient Offloading
         if self.client_args.offload_model_state:
             # do not offload embedding layer,because it will be used in both head and tail models (shared with lm_head)
-            embed_layer = self.head_model.get_input_embeddings()
-            except_tensor_idx_list = [id(p) for p in embed_layer.parameters()]
-            self.head_m_mgr = ModelParamOffload(
+            # embed_layer = self.head_model.get_input_embeddings()
+            # except_tensor_idx_list = [id(p) for p in embed_layer.parameters()]
+            self.head_model_manager = AsyncModelParamOffloadHandler(
                 self.head_model,
-                offload_layer_num=self.client_args.offload_model_state_sp_num,
+                # offload_layer_num=self.client_args.offload_model_state_sp_num,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
-                except_tensor_idx_list=except_tensor_idx_list,
+                # except_tensor_idx_list=except_tensor_idx_list,
             )
-            self.tail_m_mgr = ModelParamOffload(
+            self.tail_model_manager = ModelParamOffload(
                 self.tail_model,
-                offload_layer_num=self.client_args.offload_model_state_sp_num,
+                # offload_layer_num=self.client_args.offload_model_state_sp_num,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
-                except_tensor_idx_list=except_tensor_idx_list,
+                except_tensor_idx_list=[id(p) for p in self.tail_model.lm_head.parameters()],
             )
-            self.head_os_mgr = OptimizerStateOffload(
+            self.head_os_manager = OptimizerStateOffload(
                 self.optimizer_head,
-                offload_until_param_id=self.head_m_mgr.offload_until_param_id,
+                offload_until_param_id=-1,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
             )
-            self.tail_os_mgr = OptimizerStateOffload(
+            self.tail_os_manager = OptimizerStateOffload(
                 self.optimizer_tail,
-                offload_until_param_id=self.tail_m_mgr.offload_until_param_id,
+                offload_until_param_id=-1,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,
@@ -252,7 +259,6 @@ class Client:
         return _check_mem_usage(info, self.client_device)
 
     @torch.no_grad()
-    # @timeit()
     def _to_cpu_payload(
         self,
         output: Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor]]],
@@ -366,7 +372,10 @@ class Client:
     ):
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_fwd_timestamp[0] = time.time()
-        with self.activation_offload_ctx if mb_idx < self.client_args.offload_activation_mb_num else nullcontext():
+        with (
+            self.activation_offload_ctx if mb_idx < self.client_args.offload_activation_mb_num else nullcontext(),
+            self.head_model_manager if self.offload_model_state else nullcontext(),
+        ):
             head_outs = self.head_model.forward(x, m)
             torch.cuda.current_stream().synchronize()
             self.profile_data[mb_idx].head_fwd_timestamp[1] = time.time()

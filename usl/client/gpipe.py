@@ -40,16 +40,16 @@ class GPipeClientTrainer(Client):
         # do offload and reload
         if self.offload_model_state:
             # reload tail model and optimizer
-            self.tail_m_mgr.reload(True)
-            self.tail_os_mgr.reload(True)
+            self.tail_model_manager.reload(True)
+            self.tail_os_manager.reload(True)
             # offload head model and optimizer
-            self.head_m_mgr.offload(True)
-            self.head_os_mgr.offload(True)
+            self.head_model_manager.offload(True)
+            self.head_os_manager.offload(True)
             # wait for offload ,releasing GPU memory
-            self.head_m_mgr.wait_offload()
-            self.head_os_mgr.wait_offload()
+            self.head_model_manager.wait_offload()
+            self.head_os_manager.wait_offload()
             # wait for reload,
-            self.tail_m_mgr.wait_reload()
+            self.tail_model_manager.wait_reload()
         batch_loss = 0
         # tail fwd
         no_tail_fwd_mb_list = [False] * grad_accum_steps
@@ -106,19 +106,19 @@ class GPipeClientTrainer(Client):
         # tail step
         if self.offload_model_state:
             # wait for tail optimizer reload,or else it will cause error when step
-            self.tail_os_mgr.wait_reload()
+            self.tail_os_manager.wait_reload()
         self.optimizer_tail.step()
         self.optimizer_tail.zero_grad(set_to_none=True)
         # head bwd
         # offload tail model and optimizer
         if self.offload_model_state:
-            self.head_m_mgr.reload(True)
-            self.head_os_mgr.reload(True)
-            self.tail_m_mgr.offload(True)
-            self.tail_os_mgr.offload(True)
-            self.head_m_mgr.wait_reload()
-            self.tail_m_mgr.wait_offload()
-            self.tail_os_mgr.wait_offload()
+            self.head_model_manager.reload(True)
+            self.head_os_manager.reload(True)
+            self.tail_model_manager.offload(True)
+            self.tail_os_manager.offload(True)
+            self.head_model_manager.wait_reload()
+            self.tail_model_manager.wait_offload()
+            self.tail_os_manager.wait_offload()
         if self.offload_activation:
             self.activation_offload_handler.start_bwd()
         no_head_bwd_mb_list = [False] * grad_accum_steps
@@ -136,7 +136,7 @@ class GPipeClientTrainer(Client):
                 break
             pass
         if self.offload_model_state:
-            self.head_os_mgr.wait_reload()
+            self.head_os_manager.wait_reload()
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
         self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)

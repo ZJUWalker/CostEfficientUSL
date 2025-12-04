@@ -6,9 +6,11 @@ import sys
 from typing_extensions import deprecated
 
 
-# @deprecated(
-#     'This class is deprecated and will be removed in the future.Please use `usl/offload/model_offload_hook.py::ModelParamOffloadHook` instead.'
-# )
+"""
+ this is a hook to offload model parameters to device when model params are not captured by autograd.
+"""
+
+
 class ModelParamOffload:
 
     def __init__(
@@ -16,7 +18,7 @@ class ModelParamOffload:
         base_model: nn.Module,
         offload_threshold: int = 0,
         # offload_ratio: float = 1.0,
-        offload_layer_num: int = 10,
+        offload_layer_num: int = 1000,
         device="cuda",
         load_stream=None,
         offload_stream=None,
@@ -125,7 +127,7 @@ class ModelParamOffload:
             elapsed_time = self.start_offload_event.elapsed_time(self.offload_event)  # kernel time in ms
             self.offload_timestamp[1] = self.offload_timestamp[0] + elapsed_time / 1000  # time in seconds
             self._release_gpu_memory()
-        self.check_model_param_device()
+        # self.check_model_param_device()
         return self.offload_timestamp
 
     def offload_finished(self):
@@ -136,7 +138,7 @@ class ModelParamOffload:
 
     def _release_gpu_memory(self):
         # Release model parameters and optimizer states from GPU
-        print(f'before release GPU memory, GPU memory usage: {torch.cuda.memory_allocated()/1024/1024} MB')
+        # print(f'before release GPU memory, GPU memory usage: {torch.cuda.memory_allocated()/1024/1024} MB')
         offload_byte = 0
         for idx in self.model_param_on_gpu.keys():
             if idx in self.except_tensor_idx_list:
@@ -145,9 +147,9 @@ class ModelParamOffload:
             # self.model_param_on_gpu[idx].data = torch.empty(0, device=self.device)
             self.model_param_on_gpu[idx].data = torch.empty(0, device='cpu')
         # torch.cuda.empty_cache()
-        print(
-            f'after release GPU memory, GPU memory usage: {torch.cuda.memory_allocated()/1024/1024} MB,total M bytes offloaded: {offload_byte/1024/1024}'
-        )
+        # print(
+        #     f'after release GPU memory, GPU memory usage: {torch.cuda.memory_allocated()/1024/1024} MB,total M bytes offloaded: {offload_byte/1024/1024}'
+        # )
 
     # reload model parameters and optimizer states from CPU to GPU
     def reload(self, async_reload=False):

@@ -81,7 +81,12 @@ class ParamState:
         self.reloaded = True
 
 
-class AsyncParamOffloadHandler(CpuOffloadSavedTensorHook):
+"""
+ this is a hook to offload model parameters to device when model params are captured by autograd.
+"""
+
+
+class AsyncModelParamOffloadHandler(CpuOffloadSavedTensorHook):
 
     def __init__(
         self,
@@ -195,8 +200,12 @@ class AsyncParamOffloadHandler(CpuOffloadSavedTensorHook):
         end_offload = time.time()
         self.offloaded_tensor_buffers.clear()  # release the memory of offloaded tensors
         self.offload_timestamp[1] = end_offload
+        return self.offload_timestamp
 
     def reload(self, async_reload=False):
+        if len(self.tensor_tag_to_state) == 0:
+            self.model.to(self.device)  # the fisrt time of reload, we need to move the model to device
+            return
         for tensor_label, state in self.tensor_tag_to_state.items():
             tensor_type, _ = tensor_label
             if tensor_type == self.offload_tensor_type:
@@ -222,6 +231,7 @@ class AsyncParamOffloadHandler(CpuOffloadSavedTensorHook):
         self.reload_event.synchronize()
         end_reload = time.time()
         self.reload_timestamp[1] = end_reload
+        return self.reload_timestamp
 
     def on_save_for_backward(self, tensor: torch.Tensor):
         return self.tensor_push(tensor)

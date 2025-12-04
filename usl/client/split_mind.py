@@ -105,22 +105,23 @@ class SplitMindClientTrainer(Client):
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
         self.is_head_fwd_done.set(True)
+        # self._check_mem_usage('after head fwd')
         # do offload and reload
         if self.offload_model_state:
             # print('offload and reload')
             # reload tail model and optimizer
-            self.tail_m_mgr.reload(True)
-            self.tail_os_mgr.reload(True)
+            self.tail_model_manager.reload(True)
+            self.tail_os_manager.reload(True)
             # offload head model and optimizer
-            self.head_m_mgr.offload(True)
-            self.head_os_mgr.offload(True)
+            self.head_model_manager.offload(True)
+            self.head_os_manager.offload(True)
             # wait for offload ,releasing GPU memory
-            self.head_model_offload_timestamp = self.head_m_mgr.wait_offload()
-            print('head model offload finished')
-            self.head_optimizer_offload_timestamp = self.head_os_mgr.wait_offload()
+            self.head_model_offload_timestamp = self.head_model_manager.wait_offload()
+            # print('head model offload finished')
+            self.head_optimizer_offload_timestamp = self.head_os_manager.wait_offload()
             # wait for reload,
-            self.tail_model_reload_timestamp = self.tail_m_mgr.wait_reload()
-            print('tail model reload finished')
+            self.tail_model_reload_timestamp = self.tail_model_manager.wait_reload()
+            # print('tail model reload finished')
         batch_loss = 0
         no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
         no_head_bwd_mb_list = [False] * grad_accum_steps
@@ -153,19 +154,21 @@ class SplitMindClientTrainer(Client):
         if self.offload_model_state:
             # wait for tail optimizer reload,or else it will cause error when step
             # self.tail_os_mgr.wait_reload()
-            self.tail_optimizer_reload_timestamp = self.tail_os_mgr.wait_reload()
+            self.tail_optimizer_reload_timestamp = self.tail_os_manager.wait_reload()
         self.optimizer_tail.step()
         self.optimizer_tail.zero_grad(set_to_none=True)
+        # self._check_mem_usage('after tail step')
         if self.offload_model_state:
-            self.head_m_mgr.reload(True)
-            self.head_os_mgr.reload(True)
-            self.tail_m_mgr.offload(True)
-            self.tail_os_mgr.offload(True)
-            self.head_model_reload_timestamp = self.head_m_mgr.wait_reload()
-            print('head model reload finished')
-            self.tail_model_offload_timestamp = self.tail_m_mgr.wait_offload()
-            print('tail model offload finished')
-            self.tail_optimizer_offload_timestamp = self.tail_os_mgr.wait_offload()
+            self.head_model_manager.reload(True)
+            self.head_os_manager.reload(True)
+            self.tail_model_manager.offload(True)
+            self.tail_os_manager.offload(True)
+            self.head_model_reload_timestamp = self.head_model_manager.wait_reload()
+            # print('head model reload finished')
+            self.tail_model_offload_timestamp = self.tail_model_manager.wait_offload()
+            # print('tail model offload finished')
+            self.tail_optimizer_offload_timestamp = self.tail_os_manager.wait_offload()
+        # self._check_mem_usage('after tail step and offload/reload')
         # 4. Head backward
         if self.offload_activation:
             self.activation_offload_handler.start_bwd()
@@ -186,13 +189,15 @@ class SplitMindClientTrainer(Client):
         # 5. Head model step
         if self.offload_model_state:
             # self.head_os_mgr.wait_reload()
-            self.head_optimizer_reload_timestamp = self.head_os_mgr.wait_reload()
+            self.head_optimizer_reload_timestamp = self.head_os_manager.wait_reload()
         self.optimizer_head.step()
         self.optimizer_head.zero_grad(set_to_none=True)
 
         # 6. Reset status
         self.is_head_fwd_done.set(False)
         self.head_fwd_send_count.set(0)
+        if self.offload_model_state:
+            self.head_model_manager.update_param_ptr()
         # 7. Memory tracking
         self.client_max_mem_alloc_mb = max(self.client_max_mem_alloc_mb, torch.cuda.max_memory_allocated(self.client_device) / 1024**2)
         torch.cuda.reset_peak_memory_stats(self.client_device)

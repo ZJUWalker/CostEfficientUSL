@@ -24,6 +24,7 @@ from typing_extensions import deprecated
 # -------------------------------
 # Single, non-inheritance server
 # -------------------------------
+@deprecated("This class is deprecated and will be removed in the future. Please use the pipeline mode and set `world_size = 1 ` instead.")
 class SingleServer:
     """A self-contained server (no inheritance) that:
     - Accepts a single client over sockets via SocketCommunicator
