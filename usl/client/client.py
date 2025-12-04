@@ -23,6 +23,7 @@ from usl.offload import (
     OptimizerStateOffload,
     CpuOffloadHookWithOffloadHandler,
     AsyncDoubleBufferGroupOffloadHandler,
+    HybridOffloadContext,
 )
 from usl.server.single_server import PipelineMode
 from usl.socket import SocketCommunicator, Payload
@@ -361,6 +362,51 @@ class Client:
         grad_accum_steps = (total_bs + micro_bs - 1) // micro_bs
         return micro_bs, grad_accum_steps
 
+    def _get_context(self, mb_idx: int):
+        # 1. 实例化两个 Handler（注意：不要直接把它们当 Context 用，只把它们作为普通的逻辑对象）
+        # 假设 self.head_model_manager 是 AsyncModelParamOffloadHandler 的实例
+        # 假设 self.activation_offload_handler 是 AsyncDoubleBufferGroupOffloadHandler 的实例
+
+        # 2. 创建混合 Hook
+        # 注意：你需要确保 activation_offload_ctx 内部包裹的那个 handler 实例被传进来
+        # 如果 self.activation_offload_ctx 是 CpuOffloadHookWithOffloadHandler，
+        # 你需要取它的 .offload_handler 属性
+        act_handler = self.activation_offload_ctx.offload_handler
+
+        # 创建混合 Context
+        hybrid_ctx = HybridOffloadContext(model_handler=self.head_model_manager, activation_handler=act_handler)
+
+        # 3. 使用混合 Context
+        # 注意逻辑判断：如果只需要其中一个开启，你需要做简单的条件分支
+        use_act_offload = mb_idx < self.client_args.offload_activation_mb_num
+        use_model_offload = self.offload_model_state
+
+        ctx_to_use = nullcontext()
+
+        if use_act_offload and use_model_offload:
+            # 两个都开启，使用混合 Hook
+            ctx_to_use = hybrid_ctx
+        elif use_model_offload:
+            # 只开启模型卸载，使用原来的模型 Hook
+            ctx_to_use = self.head_model_manager
+        elif use_act_offload:
+            # 只开启激活卸载，使用原来的激活 Hook
+            ctx_to_use = self.activation_offload_ctx
+
+        return ctx_to_use
+
+        # with ctx_to_use:
+        #     head_outs = self.head_model.forward(x, m)
+
+        # # 4. 【非常重要】手动触发 Event 同步
+        # # 因为 HybridHook 只是分发了 tensor_push/pop，它不会自动调用 handler 的 step/commit 函数。
+        # # 你必须确保在 loop 中依然调用了两个 handler 的 commit 方法。
+
+        # if use_act_offload:
+        #     act_handler.on_minibatch_commit_forward()
+
+        # # Model Handler 的同步逻辑通常是在 offload() 调用时触发的，保持原样即可
+
     def _head_fwd_micro(
         self,
         group_id: str,
@@ -372,10 +418,7 @@ class Client:
     ):
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_fwd_timestamp[0] = time.time()
-        with (
-            self.activation_offload_ctx if mb_idx < self.client_args.offload_activation_mb_num else nullcontext(),
-            self.head_model_manager if self.offload_model_state else nullcontext(),
-        ):
+        with self._get_context(mb_idx):
             head_outs = self.head_model.forward(x, m)
             torch.cuda.current_stream().synchronize()
             self.profile_data[mb_idx].head_fwd_timestamp[1] = time.time()

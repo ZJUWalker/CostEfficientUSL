@@ -334,6 +334,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.offload_start_timestamp[mb_to_offload] = time.time()
         self.d2h_stream.record_event(self.d2h_start_events[mb_to_offload])
         # print('record d2h start event for mb_idx', mb_to_offload)
+        print(f'offload count:{len(self.tensor_tag_to_state)} for mb idx {mb_to_offload}')
         with torch.cuda.stream(self.d2h_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 mb_idx, _ = tensor_tag
@@ -441,12 +442,3 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             self.reload_time_durations[self.current_mb_idx] = self.h2d_start_events[self.current_mb_idx].elapsed_time(
                 self.h2d_finish_events[self.current_mb_idx]
             )
-            # print(f'elapsed time for reloading mb_idx {self.current_mb_idx}: {self.offload_time_durations[self.current_mb_idx]}')
-
-        # if self.current_mb_idx == self.num_minibatch - 1:
-        #     last_idx = self.num_minibatch - 1
-        #     torch.cuda.synchronize(self.h2d_stream)  # 等待所有 reload 事件完成
-        #     self.reload_time_durations[last_idx] = \
-        #         self.h2d_start_events[last_idx].elapsed_time(self.h2d_finish_events[last_idx])
-        #     print(f"[Finalize] elapsed time for reloading mb_idx {last_idx}: "
-        #         f"{self.reload_time_durations[last_idx]:.3f} ms")

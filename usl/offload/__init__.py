@@ -8,6 +8,7 @@ from .activation_offload import (
     CpuOffloadSavedTensorHook,
     OffloadHandler,
 )
+from .tensor_offload import HybridOffloadContext
 
 __all__ = [
     'ModelParamOffload',
@@ -18,4 +19,5 @@ __all__ = [
     'CpuOffloadSavedTensorHook',
     'OffloadHandler',
     'AsyncModelParamOffloadHandler',
+    'HybridOffloadContext',
 ]

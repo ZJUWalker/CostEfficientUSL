@@ -172,6 +172,7 @@ class AsyncModelParamOffloadHandler(CpuOffloadSavedTensorHook):
         self.start_offload_event.synchronize()
         self.offload_timestamp[0] = time.time()
         # print('record d2h start event for mb_idx', mb_to_offload)
+        print(f'model offload tensor state count: {len(self.tensor_tag_to_state)}')
         with torch.cuda.stream(self.offload_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 tensor_type, _ = tensor_tag
