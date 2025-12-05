@@ -85,6 +85,8 @@ class MemoryConstant:
     base_model_state_mem_alloc_client: float = 0
     base_model_state_mem_alloc_except_blocks: float = 0
     model_mem_increment_per_sp_client: float = 0  # unit:MB，如果做卸载，每加一个sp，最大显存分配减少的量
+    nccl_buffer_per_rank_per_mb: float = 10.0  # unit:MB for each rank (about 30-300MB)
+    nccl_base_buffer_size: float = 80.0  # unit:MB for each rank,base nccl buffer size
 
 
 @dataclass

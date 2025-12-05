@@ -38,7 +38,7 @@ def _simulate_train_time(
         * layer_num
         for layer_num in layers_per_gpu_list
     ]
-    print(server_fwd_time_per_mb_per_rank)
+    # print(server_fwd_time_per_mb_per_rank)
     server_bwd_time_per_mb_per_rank = [
         (time_const.base_server_bwd_time_per_mb + (split_point - base_split_point) * time_const.server_bwd_time_increment_per_sp)
         / total_layer_num
@@ -413,8 +413,8 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         + (batch_size - base_mb_num) * split_point * memory_const.mem_increment_per_sp_mb_client
         # 因为模型切分层和batch size增加，激活量引起的显存开销
         - (split_point * (max(0, client_offload_mb_num - 1)) * memory_const.mem_increment_per_sp_mb_client)  # 因激活量卸载，显存开销减少
-        + (client_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_client_if_oa
-        # - (memory_const.base_model_state_mem_alloc_client - os_offload_sp_num * memory_const.model_mem_increment_per_sp_client)
+        + client_offload_mb_num * memory_const.mem_increment_per_mb_client_if_oa
+        # + (client_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_client_if_oa # 12/5
     )
     if os_offload_sp_num > 0:
         client_peak_mem_alloc -= (
@@ -428,14 +428,29 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         - (max_split_point - split_point)
         * (max(0, server_offload_mb_num - (2 if main_var.lora else 3)))
         * memory_const.mem_increment_per_sp_mb_server
-        + (server_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_server_if_oa
+        + server_offload_mb_num * memory_const.mem_increment_per_mb_server_if_oa
+        # + (server_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_server_if_oa
     )
 
-    server_total_layer_num = (max_split_point - split_point) * 2
-    mem_required_per_layer = server_peak_mem_alloc / server_total_layer_num
-    max_layers_per_gpu = math.floor(main_var.gpu_max_capacity * 0.9 * 1024 / mem_required_per_layer)
-    # 0.9 is a safety factor to avoid over-provisioning
-    min_gpu_num_required = math.ceil(server_total_layer_num / max_layers_per_gpu)
+    # calculate min_gpu_num_required and mem_alloc_per_gpu
+    safe_factor = 0.95  # 安全系数，防止超配
+    for i in range(1, 9):
+        min_gpu_num_required = i
+        # add nccl buffer
+        server_peak_mem_alloc_tmp = server_peak_mem_alloc + (
+            memory_const.nccl_base_buffer_size + memory_const.nccl_buffer_per_rank_per_mb * main_var.batch_size
+        ) * (min_gpu_num_required - 1)
+        if server_peak_mem_alloc_tmp > min_gpu_num_required * main_var.gpu_max_capacity * 1024 * safe_factor:
+            continue
+        else:
+            server_peak_mem_alloc = server_peak_mem_alloc_tmp
+            server_total_layer_num = (max_split_point - split_point) * 2
+            mem_required_per_layer = server_peak_mem_alloc / server_total_layer_num
+            # max_layers_per_gpu = math.floor(main_var.gpu_max_capacity * safe_factor * 1024 / mem_required_per_layer)
+            # 0.9 is a safety factor to avoid over-provisioning
+            # min_gpu_num_required = math.ceil(server_total_layer_num / max_layers_per_gpu)
+            break
+
     # detail layers_num_per_gpu and mem_alloc_per_gpu
     layers_num_per_gpu = [server_total_layer_num // min_gpu_num_required] * min_gpu_num_required
     i = 0
@@ -633,24 +648,24 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in range(2, 4):
+    for sp in range(2, 6):
         for bs in [4, 8, 16, 32]:
             var = MainVariable(
                 total_batch_num=1000,
                 batch_size=bs,
                 split_point=sp,
-                client_offload_mb_num=0,
-                server_offload_mb_num=0,
+                client_offload_mb_num=bs,
+                server_offload_mb_num=bs,
                 client_offload_model_state_sp_num=0,
                 lora=lora,
             )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=True)
+            sim_res = simulate(var, time_res, mem_res, save_gantt=False)
             all_data.append(
                 {
                     'split_point': var.split_point,
                     'batch_size': var.batch_size,
-                    # 'offload_mb_num': var.client_offload_mb_num,
-                    # 'offload_ms_sp_num': var.client_offload_model_state_sp_num,
+                    'offload_mb_num': var.client_offload_mb_num,
+                    'offload_ms_sp_num': var.client_offload_model_state_sp_num,
                     # 'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
                     # 'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
                     # 'batch_time': round(sim_res.objective.batch_train_time, 2),
@@ -659,7 +674,7 @@ if __name__ == "__main__":
             )
     df = pd.DataFrame(all_data)
     df = df.round(2)
-    df.to_csv('tmp.csv', index=False)
+    df.to_csv(f'tmp_{model_name.split("/")[-1]}.csv', index=False)
     # print(time_res)
     # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
     # do

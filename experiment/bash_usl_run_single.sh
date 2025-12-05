@@ -5,10 +5,10 @@ STEP=2
 PMODE=pdwc
 MODEL_NAME=qwen/qwen3-8b
 PORT=9000
-WORLD_SIZE=1
+WORLD_SIZE=4
 PROFILE='' #   '--prof' or '' 
 LORA='--lora' # '--lora' or ''
-CLIENT_OFFLOAD='-OA -OS' # '--client_offload' or ''
+CLIENT_OFFLOAD='' # '--client_offload' or ''
 SERVER_OFFLOAD='' # '--server_offload' or ''
 
 if [ "$PMODE" = "naive" ]; then

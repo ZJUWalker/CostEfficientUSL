@@ -25,6 +25,20 @@ def _get_layer_num(dir='data/models', model_name='gpt2-large') -> AutoConfig:
         raise ValueError(f"Failed to get layer number from config {config}")
 
 
+def _get_hidden_size(dir='data/models', model_name='gpt2-large') -> AutoConfig:
+    fp = os.path.join(dir, model_name, 'config.json')
+    try:
+        config = AutoConfig.from_pretrained(fp)
+    except:
+        raise ValueError(f"Failed to load config from {fp}")
+    if hasattr(config, 'hidden_size'):
+        return config.hidden_size
+    elif hasattr(config, 'n_embd'):
+        return config.n_embd
+    else:
+        raise ValueError(f"Failed to get hidden size from config {config}")
+
+
 def run_profile(
     model: str, mbps: float, lora: bool, base_bs=4, base_sp=2, mps_gpu=100, profile_dir: str = 'log/profile/sim_profile'
 ) -> Tuple[MemoryConstant, TimeConstant]:
@@ -43,6 +57,7 @@ def run_profile(
     """
     try:
         layer_num = _get_layer_num(model_name=model)
+        hidden_size = _get_hidden_size(model_name=model)
     except ValueError as e:
         print(e)
         return None, None
@@ -135,6 +150,7 @@ def run_profile(
         - (prof_res[(base_sp, base_bs, 0, 0, 0)]['client_max_mem_alloc_mb'] - prof_res[(base_sp, base_bs, 0, base_sp, 0)]['client_max_mem_alloc_mb'])
     )  # checked ,but some loss
     mem_var.base_model_state_mem_alloc_except_blocks = mem_var.base_model_state_mem_alloc_client - base_sp * mem_var.model_mem_increment_per_sp_client
+    mem_var.nccl_buffer_per_rank_per_mb = 2 * hidden_size * 4 * 512 / 1024 / 1024  # two sequence input activation size
     # TimeVariable calculations
     time_var = TimeConstant(rate_mbps=mbps)
     # base time

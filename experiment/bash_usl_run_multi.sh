@@ -5,9 +5,9 @@
 # 例如: SPLIT_POINTS=(4 8 16)
 
 SPLIT_POINTS=(4)
-BATCH_SIZES=(4 8 16 32)
+BATCH_SIZES=(4)
 MODEL_NAMES=("qwen/qwen3-8b")
-WORLD_SIZES=(1 2 4)
+WORLD_SIZES=(2 3 4)
 
 # Offload 选项可能包含空格，建议用双引号括起来
 # 例如: CLIENT_OFFLOAD_OPTS=("" "-OA" "-OS" "-OA -OS")

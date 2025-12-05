@@ -367,17 +367,14 @@ class Client:
         use_model_offload = self.offload_model_state
         if not use_act_offload and not use_model_offload:
             return nullcontext()
-        act_handler = self.activation_offload_ctx.offload_handler
-
-        # 创建混合 Context
-        hybrid_ctx = HybridOffloadContext(model_handler=self.head_model_manager, activation_handler=act_handler)
-
         # 3. 使用混合 Context
         # 注意逻辑判断：如果只需要其中一个开启，你需要做简单的条件分支
 
         ctx_to_use = nullcontext()
 
         if use_act_offload and use_model_offload:
+            # 创建混合 Context
+            hybrid_ctx = HybridOffloadContext(model_handler=self.head_model_manager, activation_handler=self.activation_offload_ctx.offload_handler)
             # 两个都开启，使用混合 Hook
             ctx_to_use = hybrid_ctx
         elif use_model_offload:
