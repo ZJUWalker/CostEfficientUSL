@@ -442,7 +442,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
     while sum(layers_num_per_gpu) < server_total_layer_num:
         layers_num_per_gpu[i] += 1
         i = (i + 1) % min_gpu_num_required
-    mem_alloc_per_gpu = [mem_required_per_layer * layers_num for layers_num in layers_num_per_gpu]
+    mem_alloc_per_gpu = [round(mem_required_per_layer * layers_num, 2) for layers_num in layers_num_per_gpu]
     return SimulateResult(
         objective=Objective(
             client_peak_mem_alloc=client_peak_mem_alloc,
@@ -633,8 +633,8 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in range(4, 5):
-        for bs in [4, 8]:
+    for sp in range(2, 4):
+        for bs in [4, 8, 16, 32]:
             var = MainVariable(
                 total_batch_num=1000,
                 batch_size=bs,

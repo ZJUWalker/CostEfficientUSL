@@ -11,7 +11,9 @@ import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 
 
-def run_pipeline(rank: int, scheduler: ServerPipelineScheduleSingle, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5, profile=False):
+def run_pipeline(
+    rank: int, world_size: int, scheduler: ServerPipelineScheduleSingle, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5, profile=False
+):
     stage = scheduler._stage
     # schedule = ServerScheduleGPipe(stage, mb_num)  # don't need loss_fn
     print(f"Rank {rank} start {scheduler.__class__.__name__} training...,num_microbatches={mb_num},is first={stage.is_first},is last={stage.is_last}")
@@ -39,7 +41,8 @@ def run_pipeline(rank: int, scheduler: ServerPipelineScheduleSingle, optimizer: 
             if profile and rank == 0:
                 print(f"prof step")
                 prof.step()
-    dist.barrier()
+    if world_size > 1:
+        dist.barrier()
     scheduler.send_profile_res()
     pass
 
@@ -87,7 +90,7 @@ def run(rank, world_size, server_args: ServerArgs):
         scheduler = ServerSchedule1F1B(stage, mb_num)  # don't need loss_fn
     else:
         raise NotImplementedError('other pipeline methods are not implemeneted yet')
-    run_pipeline(rank, scheduler, optimizer, mb_num, step=server_args.step, profile=server_args.prof)
+    run_pipeline(rank, world_size, scheduler, optimizer, mb_num, step=server_args.step, profile=server_args.prof)
     dist.destroy_process_group()
 
 

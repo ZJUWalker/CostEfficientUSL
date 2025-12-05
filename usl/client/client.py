@@ -363,14 +363,10 @@ class Client:
         return micro_bs, grad_accum_steps
 
     def _get_context(self, mb_idx: int):
-        # 1. 实例化两个 Handler（注意：不要直接把它们当 Context 用，只把它们作为普通的逻辑对象）
-        # 假设 self.head_model_manager 是 AsyncModelParamOffloadHandler 的实例
-        # 假设 self.activation_offload_handler 是 AsyncDoubleBufferGroupOffloadHandler 的实例
-
-        # 2. 创建混合 Hook
-        # 注意：你需要确保 activation_offload_ctx 内部包裹的那个 handler 实例被传进来
-        # 如果 self.activation_offload_ctx 是 CpuOffloadHookWithOffloadHandler，
-        # 你需要取它的 .offload_handler 属性
+        use_act_offload = mb_idx < self.client_args.offload_activation_mb_num
+        use_model_offload = self.offload_model_state
+        if not use_act_offload and not use_model_offload:
+            return nullcontext()
         act_handler = self.activation_offload_ctx.offload_handler
 
         # 创建混合 Context
@@ -378,8 +374,6 @@ class Client:
 
         # 3. 使用混合 Context
         # 注意逻辑判断：如果只需要其中一个开启，你需要做简单的条件分支
-        use_act_offload = mb_idx < self.client_args.offload_activation_mb_num
-        use_model_offload = self.offload_model_state
 
         ctx_to_use = nullcontext()
 
@@ -655,6 +649,8 @@ class Client:
         server_offload_time_durations = server_profile_res.get('server_offload_time_durations', [])
         server_reload_time_durations = server_profile_res.get('server_reload_time_durations', [])
         server_offload_activation_mb_num = server_profile_res.get('offload_activation_mb_num', 0)
+        max_mem_alloc_per_rank = server_profile_res.get('max_mem_alloc_per_rank', 0)
+        server_total_mem_alloc = server_profile_res.get('total_mem_alloc', 0)
         server_policy_str = server_profile_res.get('file_suffix', '')
         if server_policy_str:
             server_policy_str = f"_{server_policy_str}"
@@ -788,6 +784,8 @@ class Client:
             "server_offload_activation_mb_num": server_offload_activation_mb_num,
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
             "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
+            "server_total_mem_alloc_mb": round(server_total_mem_alloc, 4),
+            "server_mem_alloc_per_rank": max_mem_alloc_per_rank,
             "batch_train_time_ms": batch_train_time_ms,
             "GPU_rent_cost": round(self.client_args.server_world_size * batch_train_time_ms * server_profile_res.get("max_mem_alloc", 0) / 1e6, 6),
             "head_fwd_time_avg_ms": avg_value(mb_head_fwd_times_client),

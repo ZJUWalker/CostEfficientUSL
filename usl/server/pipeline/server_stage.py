@@ -528,18 +528,23 @@ class _ServerPipelineStageBase(ABC):
         print(f"Rank {group_rank} try to send profile data")
 
         # 只有 dst rank(这里就是 group_rank == 0) 需要提供 list，其他都必须是 None
-        profile_list = [None] * group_size if self.is_first else None
+        profile_list: List[Dict[str, Optional[List[GanttChartData] | Any]]] = [None] * group_size if self.is_first else None
+        send_obj = {'profile': profile_data, **appendix}
 
         dist.gather_object(
-            obj=profile_data,
+            obj=send_obj,
             object_gather_list=profile_list,
             dst=0,
             group=group,
         )
 
         if self.is_first:
-            profile_list[0] = profile_data
-            final_profile = {'profile': profile_list, **appendix}
+            profile_list[0] = send_obj
+            mem_alloc_per_rank = [round(pf.get('max_mem_alloc', 0), 2) for pf in profile_list]
+            total_mem_alloc = sum(mem_alloc_per_rank)
+            appendix["max_mem_alloc_per_rank"] = mem_alloc_per_rank
+            appendix['total_mem_alloc'] = total_mem_alloc
+            final_profile = {'profile': [pf['profile'] for pf in profile_list], **appendix}
             # print(f"rank {group_rank} send final profile data: {final_profile}")
             self.communicator_rank_0.send(final_profile)
 
