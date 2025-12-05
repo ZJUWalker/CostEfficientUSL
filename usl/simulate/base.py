@@ -10,11 +10,11 @@ class MainVariable:
     MainVariable contains the variables needed to simulate the system.
     """
 
-    total_batch_num: int = 1000  # total batch need to be trained per epoch
+    total_sample_count: int = 10000  # total sample count need to be trained per epoch
     batch_size: int = 8  # batch size per batch
     split_point: int = 4
     gpu_max_capacity: int = 48  # unit:GB
-    gpu_rent_cost_per_hour: float = 0.0  # unit:USD/hour
+    gpu_rent_cost_per_hour: float = 1.0  # unit:USD/hour
     client_offload_mb_num: int = 0
     server_offload_mb_num: int = 0
     client_offload_model_state_sp_num: int = 0

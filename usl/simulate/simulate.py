@@ -388,9 +388,11 @@ def _simulate_train_time(
     curr_obj.server_idle_rate = round(server_idle_rate, 2)
     curr_obj.client_send_rate = round(client_send_rate, 2)
     curr_obj.server_send_rate = round(server_send_rate, 2)
-    curr_obj.batch_train_time = round(batch_train_time, 2)
-    curr_obj.epoch_train_time = round(batch_train_time * main_var.total_batch_num / 1000 / 3600, 2)  # ms -> hours
-    curr_obj.server_cost_per_epoch = round(curr_obj.min_gpu_num_required * curr_obj.epoch_train_time * main_var.gpu_rent_cost_per_hour, 2)
+    curr_obj.batch_train_time = round(batch_train_time, 4)
+    curr_obj.epoch_train_time = round(batch_train_time * main_var.total_sample_count / main_var.batch_size / 1000 / 3600, 4)  # ms -> hours
+    curr_obj.server_cost_per_epoch = round(
+        curr_obj.min_gpu_num_required * curr_obj.epoch_train_time * main_var.gpu_rent_cost_per_hour * 100, 4
+    )  # 美分
     return SimulateResult(main_variable=main_var, time_const=time_const, objective=curr_obj)
 
 
@@ -404,7 +406,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
     client_offload_mb_num = main_var.client_offload_mb_num
     server_offload_mb_num = main_var.server_offload_mb_num
     os_offload_sp_num = main_var.client_offload_model_state_sp_num
-    assert split_point >= 1, "split_point should be greater than or equal to 1"
+    assert split_point >= 1 and split_point < max_split_point, "split_point should be greater than or equal to 1 and less than max_split_point"
     assert batch_size >= 4, "batch size should be greater than or equal to 4"
     assert client_offload_mb_num >= 0 and server_offload_mb_num >= 0, "client_offload_mb_num and server_offload_mb_num should be greater than 0"
     client_peak_mem_alloc = (
@@ -554,7 +556,7 @@ def do_optimize(
             #             break
             #         for s_omb in range(bs, 2, -1):
             var = MainVariable(
-                total_batch_num=(dataset_size + bs - 1) // bs,
+                total_sample_count=dataset_size,
                 batch_size=bs,
                 split_point=sp,
                 client_offload_mb_num=bs,
@@ -608,14 +610,14 @@ def parse_arguments():
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b qwen/qwen3-14b
     parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     # parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The maximum split point for the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
     parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
     parser.add_argument('--mbps', type=int, default=230, help='The mbps value for the simulation.')
     parser.add_argument('--mps_gpu', type=int, default=100, help='The max percentage of GPU active threads used for the simulation.')
-    parser.add_argument('--max_batch_size', '-BS', type=int, default=32, help='The max batch size for the simulation.')
+    parser.add_argument('--max_batch_size', '-BS', type=int, default=64, help='The max batch size for the simulation.')
     parser.add_argument('--profile_dir', type=str, default='log/profile/sim_profile', help='The profile directory for storing results.')
     parser.add_argument('--save_gantt', action='store_true', help='Whether to save gantt chart or not.')
     return parser.parse_args()
@@ -648,15 +650,15 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in range(2, 6):
-        for bs in [4, 8, 16, 32]:
+    for sp in range(1, 16):  # 按照模型层数的一半去设
+        for bs in range(8, max_batch_size + 1, 2):
             var = MainVariable(
-                total_batch_num=1000,
+                total_sample_count=10000,
                 batch_size=bs,
                 split_point=sp,
                 client_offload_mb_num=bs,
                 server_offload_mb_num=bs,
-                client_offload_model_state_sp_num=0,
+                client_offload_model_state_sp_num=sp,
                 lora=lora,
             )
             sim_res = simulate(var, time_res, mem_res, save_gantt=False)
@@ -664,16 +666,11 @@ if __name__ == "__main__":
                 {
                     'split_point': var.split_point,
                     'batch_size': var.batch_size,
-                    'offload_mb_num': var.client_offload_mb_num,
-                    'offload_ms_sp_num': var.client_offload_model_state_sp_num,
-                    # 'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
-                    # 'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
-                    # 'batch_time': round(sim_res.objective.batch_train_time, 2),
                     **sim_res.objective.__dict__,
                 }
             )
     df = pd.DataFrame(all_data)
-    df = df.round(2)
+    df = df.round(2).sort_values(by=['server_cost_per_epoch'])
     df.to_csv(f'tmp_{model_name.split("/")[-1]}.csv', index=False)
     # print(time_res)
     # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
