@@ -670,7 +670,11 @@ if __name__ == "__main__":
                 }
             )
     df = pd.DataFrame(all_data)
-    df = df.round(2).sort_values(by=['server_cost_per_epoch'])
+    df = (
+        df.where(df['client_peak_mem_alloc'] <= max_client_mem_mb * 0.95).sort_values(
+            by=['client_peak_mem_alloc', 'server_cost_per_epoch'], ascending=[False, True]
+        )
+    ).round(2)
     df.to_csv(f'tmp_{model_name.split("/")[-1]}.csv', index=False)
     # print(time_res)
     # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
