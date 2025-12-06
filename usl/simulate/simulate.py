@@ -14,7 +14,12 @@ from dataclasses import dataclass
 
 
 def _simulate_train_time(
-    main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, curr_obj: Objective, save_gantt: bool = False
+    main_var: MainVariable,
+    time_const: TimeConstant,
+    mem_const: MemoryConstant,
+    curr_obj: Objective,
+    save_gantt: bool = False,
+    save_sim_res: bool = False,
 ) -> SimulateResult:
     # simulate the batch training time
     assert (
@@ -48,14 +53,12 @@ def _simulate_train_time(
     tail_fwd_time_per_mb = time_const.base_tail_fwd_time_per_mb + (split_point - base_split_point) * time_const.tail_fwd_time_increment_per_sp
     tail_bwd_time_per_mb = time_const.base_tail_bwd_time_per_mb + (split_point - base_split_point) * time_const.tail_bwd_time_increment_per_sp
     head_offload_time = (
-        time_const.base_head_model_state_offload_time
-        + (split_point - ms_offload_sp_num - base_split_point) * time_const.head_model_offload_time_increment_per_sp
-    ) * main_var.client_offload_model_state_sp_num
+        time_const.base_head_model_state_offload_time + (ms_offload_sp_num - base_split_point) * time_const.head_model_offload_time_increment_per_sp
+    )
     head_reload_time = head_offload_time
     tail_offload_time = (
-        time_const.base_tail_model_state_offload_time
-        + (split_point - ms_offload_sp_num - base_split_point) * time_const.tail_model_offload_time_increment_per_sp
-    ) * main_var.client_offload_model_state_sp_num
+        time_const.base_tail_model_state_offload_time + (ms_offload_sp_num - base_split_point) * time_const.tail_model_offload_time_increment_per_sp
+    )
     tail_reload_time = tail_offload_time
     head_acti_off_time_per_mb = (
         time_const.base_head_activation_offload_time_per_mb
@@ -309,7 +312,7 @@ def _simulate_train_time(
                 head_bwd_time_per_mb, head_acti_reload_time_per_mb if i < main_var.client_offload_mb_num else 0
             )
     # print(head_fwd_timestamps)
-    if save_gantt:
+    if save_gantt or save_sim_res:
         gantt_data = [[GanttChartData(mini_batch_idx=i) for i in range(micro_batch_num)] for _ in range(gpu_num_required + 1)]
         # gantt_data[0] is client data
         # gantt_data[1:gpu_num_required+1] is server data
@@ -331,14 +334,53 @@ def _simulate_train_time(
                     server_data[rk][i].server_fwd_send_timestamp = server_activation_send_timestamps[i]
                 server_data[rk][i].server_fwd_timestamp = server_ranks_fwd_timestamps[rk][i]
                 server_data[rk][i].server_bwd_timestamp = server_ranks_bwd_timestamps[rk][i]
-        save_dir = f'log/img/simulated/{model_name}'
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        fp = (
-            f'{save_dir}/sp_{split_point}_b_{main_var.batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}'
-            f'{f"_coa_{main_var.client_offload_mb_num}_cos_{main_var.client_offload_model_state_sp_num}_soa_{main_var.server_offload_mb_num}"}.png'
-        )
-        plot_grouped_gantt(gantt_data, fp, align=False)
+        if save_gantt:
+            save_dir = f'log/img/simulated/{model_name}'
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            fp = (
+                f'{save_dir}/sp_{split_point}_b_{main_var.batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}'
+                f'{f"_coa_{main_var.client_offload_mb_num}_cos_{main_var.client_offload_model_state_sp_num}_soa_{main_var.server_offload_mb_num}"}.png'
+            )
+            plot_grouped_gantt(gantt_data, fp, align=False)
+        if save_sim_res:
+            gantt_data_dict = {
+                "model_name": model_name,
+                "layer_num": total_layer_num,
+                "split_point": split_point,
+                "micro_batch_size": mem_const.micro_batch_size,
+                "micro_batch_num": micro_batch_num,
+                "max_batch_size": max_batch_size,
+                "server_world_size": gpu_num_required,
+                "random_jitter_bound": random_jitter_bound,
+                "head_fwd_time_per_mb": head_fwd_time_per_mb,
+                "head_bwd_time_per_mb": head_bwd_time_per_mb,
+                "server_fwd_time_per_mb_per_rank": server_fwd_time_per_mb_per_rank,
+                "server_bwd_time_per_mb_per_rank": server_bwd_time_per_mb_per_rank,
+                "tail_fwd_time_per_mb": tail_fwd_time_per_mb,
+                "tail_bwd_time_per_mb": tail_bwd_time_per_mb,
+                "head_offload_time": head_offload_time,
+                "head_reload_time": head_reload_time,
+                "tail_offload_time": tail_offload_time,
+                "tail_reload_time": tail_reload_time,
+                "head_acti_off_time_per_mb": head_acti_off_time_per_mb,
+                "head_acti_reload_time_per_mb": head_acti_reload_time_per_mb,
+                "server_acti_reload_time_per_mb_per_rank": server_acti_reload_time_per_mb_per_rank,
+                "server_acti_off_time_per_mb_per_rank": server_acti_off_time_per_mb_per_rank,
+                "head_fwd_send_time": head_fwd_send_time,
+                "tail_bwd_send_time": tail_bwd_send_time,
+                "server_fwd_send_time": server_fwd_send_time,
+                "server_bwd_send_time": server_bwd_send_time,
+            }
+            save_dir = f'log/profile/time_sim_res/{model_name}'
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            fp = (
+                f'{save_dir}/sp_{split_point}_b_{main_var.batch_size}_mb_{mem_const.micro_batch_size}_s_{mem_const.max_seq_len}_mbps_{mbps}_pipedream_wc{"_lora" if lora else ""}'
+                f'{f"_coa_{main_var.client_offload_mb_num}_cos_{main_var.client_offload_model_state_sp_num}_soa_{main_var.server_offload_mb_num}"}.json'
+            )
+            with open(fp, "w") as f:
+                json.dump(gantt_data_dict, f, indent=4)
     # calculate objective function
     # calculate batch train time ,unit:ms
     batch_train_time = head_bwd_timestamps[-1][1] - head_fwd_timestamps[0][0]
@@ -472,9 +514,11 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
     )
 
 
-def simulate(main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, save_gantt: bool = False) -> SimulateResult:
+def simulate(
+    main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, save_gantt: bool = False, save_time_res: bool = False
+) -> SimulateResult:
     simulate_mem_result = _simulate_peak_mem_alloc(main_var, mem_const)
-    simulate_result = _simulate_train_time(main_var, time_const, mem_const, simulate_mem_result.objective, save_gantt)
+    simulate_result = _simulate_train_time(main_var, time_const, mem_const, simulate_mem_result.objective, save_gantt, save_time_res)
     # copy memory result to simulate_result
     # simulate_result.objective.client_peak_mem_alloc = simulate_mem_result.objective.client_peak_mem_alloc
     # simulate_result.objective.server_peak_mem_alloc = simulate_mem_result.objective.server_peak_mem_alloc
@@ -650,8 +694,8 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in range(1, 16):  # 按照模型层数的一半去设
-        for bs in range(8, max_batch_size + 1, 2):
+    for sp in [2, 3, 4]:  # 按照模型层数的一半去设
+        for bs in [8, 16, 32, 64]:
             var = MainVariable(
                 total_sample_count=10000,
                 batch_size=bs,
@@ -661,7 +705,7 @@ if __name__ == "__main__":
                 client_offload_model_state_sp_num=sp,
                 lora=lora,
             )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=False)
+            sim_res = simulate(var, time_res, mem_res, save_gantt=False, save_time_res=True)
             all_data.append(
                 {
                     'split_point': var.split_point,

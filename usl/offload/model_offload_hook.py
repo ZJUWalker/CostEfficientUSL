@@ -172,7 +172,7 @@ class AsyncModelParamOffloadHandler(CpuOffloadSavedTensorHook):
         self.start_offload_event.synchronize()
         self.offload_timestamp[0] = time.time()
         # print('record d2h start event for mb_idx', mb_to_offload)
-        print(f'model offload tensor state count: {len(self.tensor_tag_to_state)}')
+        # print(f'model offload tensor state count: {len(self.tensor_tag_to_state)}')
         with torch.cuda.stream(self.offload_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 tensor_type, _ = tensor_tag
@@ -198,12 +198,17 @@ class AsyncModelParamOffloadHandler(CpuOffloadSavedTensorHook):
     def wait_offload(self):
         self.compute_stream.wait_event(self.offload_event)
         self.offload_event.synchronize()
-        end_offload = time.time()
+        offload_time = self.start_offload_event.elapsed_time(self.offload_event)
+        # end_offload = time.time()
         self.offloaded_tensor_buffers.clear()  # release the memory of offloaded tensors
-        self.offload_timestamp[1] = end_offload
+        self.offload_timestamp[1] = self.offload_timestamp[0] + offload_time / 1000
         return self.offload_timestamp
 
     def reload(self, async_reload=False):
+        self.load_stream.wait_stream(self.compute_stream)
+        self.load_stream.record_event(self.start_reload_event)
+        self.start_reload_event.synchronize()
+        self.reload_timestamp[0] = time.time()
         if len(self.tensor_tag_to_state) == 0:
             self.model.to(self.device)  # the fisrt time of reload, we need to move the model to device
             return
@@ -230,8 +235,9 @@ class AsyncModelParamOffloadHandler(CpuOffloadSavedTensorHook):
     def wait_reload(self):
         self.compute_stream.wait_event(self.reload_event)
         self.reload_event.synchronize()
-        end_reload = time.time()
-        self.reload_timestamp[1] = end_reload
+        # end_reload = time.time()
+        reload_time = self.start_reload_event.elapsed_time(self.reload_event)
+        self.reload_timestamp[1] = self.reload_timestamp[0] + reload_time / 1000
         return self.reload_timestamp
 
     def on_save_for_backward(self, tensor: torch.Tensor):

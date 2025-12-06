@@ -120,12 +120,12 @@ STAGE_COLOR = {
     "server_bwd_timestamp": ("(S)Server Bwd", "#7f7f7f"),  # 灰色
     "server_bwd_send_timestamp": ("(S)Server Bwd Send", "#bcbd22"),  # 黄绿色
     "head_bwd_timestamp": ("(C)Head Bwd", "#17becf"),  # 青色
-    "head_m_offload_ts": ("(C)Head M Offload", HEAD_OFFLOAD_COLOR),
-    "tail_m_offload_ts": ("(C)Tail M Offload", TAIL_OFFLOAD_COLOR),
-    "head_optimizer_offload_ts": ("(C)Head Opt Offload", HEAD_OFFLOAD_COLOR),
-    "tail_optimizer_offload_ts": ("(C)Tail Opt Offload", TAIL_OFFLOAD_COLOR),
-    "head_m_reload_ts": ("(C)Head M Reload", HEAD_RELOAD_COLOR),
-    "tail_m_reload_ts": ("(C)Tail M Reload", TAIL_RELOAD_COLOR),
+    # "head_m_offload_ts": ("(C)Head M Offload", HEAD_OFFLOAD_COLOR),
+    # "tail_m_offload_ts": ("(C)Tail M Offload", TAIL_OFFLOAD_COLOR),
+    # "head_optimizer_offload_ts": ("(C)Head Opt Offload", HEAD_OFFLOAD_COLOR),
+    # "tail_optimizer_offload_ts": ("(C)Tail Opt Offload", TAIL_OFFLOAD_COLOR),
+    # "head_m_reload_ts": ("(C)Head M Reload", HEAD_RELOAD_COLOR),
+    # "tail_m_reload_ts": ("(C)Tail M Reload", TAIL_RELOAD_COLOR),
     "head_optimizer_reload_ts": ("(C)Head Opt Reload", HEAD_RELOAD_COLOR),
     "tail_optimizer_reload_ts": ("(C)Tail Opt Reload", TAIL_RELOAD_COLOR),
 }

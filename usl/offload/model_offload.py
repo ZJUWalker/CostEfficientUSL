@@ -67,30 +67,81 @@ class ModelParamOffload:
         if tensor_idx in self.except_tensor_idx_list:
             self.except_tensor_idx_list.remove(tensor_idx)
 
+    # def _init_param_dict(self):
+    #     curr_count = 0
+    #     curr_layer_idx = 0
+    #     for name, param in self.base_model.named_parameters():
+    #         if (
+    #             id(param) in self.except_tensor_idx_list
+    #             or param.numel() * param.element_size() < self.offload_threshold
+    #             # or curr_count >= self.max_offload_param_count
+    #             or self.offload_layer_num == 0  # no offloading
+    #             or curr_layer_idx > self.offload_layer_num
+    #         ):
+    #             param.data = param.data.cuda(self.device)  # pin on GPU
+    #         else:
+    #             if f'h.{curr_layer_idx}' in name or f'layers.{curr_layer_idx}' in name:
+    #                 curr_layer_idx += 1
+    #                 if curr_layer_idx > self.offload_layer_num:
+    #                     self.offload_until_param_id = id(param)
+    #                     param.data = param.data.cuda(self.device)
+    #                     continue
+    #                 # print(name)
+    #             curr_count += param.numel()
+    #             self.model_param_on_cpu[id(param)] = param
+    #             self.model_param_on_gpu[id(param)] = param  # use the same tensor for both on CPU and GPU,temporary
+    #     # print(f'offload {curr_count} parameters to CPU, {len(self.model_param_on_cpu)} parameters')
+
     def _init_param_dict(self):
         curr_count = 0
         curr_layer_idx = 0
+
+        # 清空 cpu 字典，防止有残留
+        self.model_param_on_cpu = {}
+
         for name, param in self.base_model.named_parameters():
+            p_id = id(param)
+
+            # --- 原有的过滤逻辑保持不变 ---
             if (
-                id(param) in self.except_tensor_idx_list
+                p_id in self.except_tensor_idx_list
                 or param.numel() * param.element_size() < self.offload_threshold
-                # or curr_count >= self.max_offload_param_count
-                or self.offload_layer_num == 0  # no offloading
+                or self.offload_layer_num == 0
                 or curr_layer_idx > self.offload_layer_num
             ):
-                param.data = param.data.cuda(self.device)  # pin on GPU
-            else:
-                if f'h.{curr_layer_idx}' in name or f'layers.{curr_layer_idx}' in name:
-                    curr_layer_idx += 1
-                    if curr_layer_idx > self.offload_layer_num:
-                        self.offload_until_param_id = id(param)
-                        param.data = param.data.cuda(self.device)
-                        continue
-                    # print(name)
-                curr_count += param.numel()
-                self.model_param_on_cpu[id(param)] = param
-                self.model_param_on_gpu[id(param)] = param  # use the same tensor for both on CPU and GPU,temporary
-        print(f'offload {curr_count} parameters to CPU, {len(self.model_param_on_cpu)} parameters')
+
+                param.data = param.data.cuda(self.device)
+                continue
+
+            # --- 层级计数逻辑保持不变 ---
+            if f'h.{curr_layer_idx}' in name or f'layers.{curr_layer_idx}' in name:
+                curr_layer_idx += 1
+                if curr_layer_idx > self.offload_layer_num:
+                    self.offload_until_param_id = p_id
+                    param.data = param.data.cuda(self.device)
+                    continue
+
+            curr_count += param.numel()
+
+            # ==========================================================
+            # 【核心修复点】在这里分配独立的 CPU Pinned Memory
+            # ==========================================================
+            # 错误写法 (导致你报错的原因):
+            # self.model_param_on_cpu[p_id] = param
+
+            # 正确写法:
+            self.model_param_on_cpu[p_id] = torch.empty(
+                param.size(), dtype=param.dtype, layout=param.layout, device='cpu', pin_memory=True  # 必须开启
+            )
+            self.model_param_on_cpu[p_id].copy_(param.data, non_blocking=False)
+
+            # 记录 GPU 参数引用
+            self.model_param_on_gpu[p_id] = param
+
+            # 可选：初始化时先把参数 copy 到 CPU 一份，防止第一次 Offload 前数据不一致
+            # self.model_param_on_cpu[p_id].copy_(param.data, non_blocking=True)
+
+        print(f"Initialized Offload Buffers. Total Params Offloaded: {curr_count/1e9:.2f} B")
 
     # offload model parameters and optimizer states from GPU to CPU
     def offload(self, async_offload=False):
@@ -103,11 +154,23 @@ class ModelParamOffload:
         # ----------------------------------------------------
         with torch.cuda.stream(stream):
             # Offload model parameters to CPU
+            # assert len(self.model_param_on_gpu) == len(self.model_param_on_cpu), 'param count not match'
+            # for idx, tensor in self.model_param_on_gpu.items():
+            #     assert tensor.is_cuda, 'model_param_on_gpu should be on GPU'
+            #     t_cpu = torch.empty_like(tensor, device="cpu", pin_memory=True)
+            #     t_cpu.data.copy_(tensor.data, non_blocking=True)
+            #     self.model_param_on_cpu[id(tensor)] = t_cpu
+
             for idx, tensor in self.model_param_on_gpu.items():
-                assert tensor.is_cuda, 'model_param_on_gpu should be on GPU'
-                t_cpu = torch.empty_like(tensor, device="cpu", pin_memory=True)
-                t_cpu.data.copy_(tensor.data, non_blocking=True)
-                self.model_param_on_cpu[id(tensor)] = t_cpu
+                # 1. 安全获取预分配的 CPU buffer
+                if idx not in self.model_param_on_cpu:
+                    print(f"Error: {idx} not in model_param_on_cpu")
+                    continue
+                t_cpu = self.model_param_on_cpu[idx]
+
+                # 2. 这里的 tensor 是 GPU Parameter
+                # 直接拷贝，利用已经分配好的 t_cpu 内存
+                t_cpu.copy_(tensor.data, non_blocking=True)
 
             if async_offload:
                 # record offload event

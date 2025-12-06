@@ -334,7 +334,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.offload_start_timestamp[mb_to_offload] = time.time()
         self.d2h_stream.record_event(self.d2h_start_events[mb_to_offload])
         # print('record d2h start event for mb_idx', mb_to_offload)
-        print(f'offload count:{len(self.tensor_tag_to_state)} for mb idx {mb_to_offload}')
+        # print(f'offload count:{len(self.tensor_tag_to_state)} for mb idx {mb_to_offload}')
         with torch.cuda.stream(self.d2h_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 mb_idx, _ = tensor_tag
