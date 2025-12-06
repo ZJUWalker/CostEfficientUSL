@@ -32,20 +32,21 @@ def _simulate_train_time(
     random_jitter_bound = 1  # random jitter bound for the batch size
     micro_batch_num = (main_var.batch_size + mem_const.micro_batch_size - 1) // mem_const.micro_batch_size
     split_point = main_var.split_point
+    max_split_point = mem_const.max_split_point
     base_split_point = mem_const.baseline_split_point
     ms_offload_sp_num = main_var.client_offload_model_state_sp_num
     assert split_point > 0, "split_point should be greater than 0"
     head_fwd_time_per_mb = time_const.base_head_fwd_time_per_mb + (split_point - base_split_point) * time_const.head_fwd_time_increment_per_sp
     head_bwd_time_per_mb = time_const.base_head_bwd_time_per_mb + (split_point - base_split_point) * time_const.head_bwd_time_increment_per_sp
     server_fwd_time_per_mb_per_rank = [
-        (time_const.base_server_fwd_time_per_mb + (split_point - base_split_point) * time_const.server_fwd_time_increment_per_sp)
+        (time_const.base_server_fwd_time_per_mb + (max_split_point - split_point - base_split_point) * time_const.server_fwd_time_increment_per_sp)
         / total_layer_num
         * layer_num
         for layer_num in layers_per_gpu_list
     ]
     # print(server_fwd_time_per_mb_per_rank)
     server_bwd_time_per_mb_per_rank = [
-        (time_const.base_server_bwd_time_per_mb + (split_point - base_split_point) * time_const.server_bwd_time_increment_per_sp)
+        (time_const.base_server_bwd_time_per_mb + (max_split_point - split_point - base_split_point) * time_const.server_bwd_time_increment_per_sp)
         / total_layer_num
         * layer_num
         for layer_num in layers_per_gpu_list
@@ -86,10 +87,11 @@ def _simulate_train_time(
         * layer_num
         for layer_num in layers_per_gpu_list
     ]
-    head_fwd_send_time = time_const.head_activation_send_time
-    server_fwd_send_time = time_const.server_activation_send_time
-    tail_bwd_send_time = time_const.tail_gradient_send_time
-    server_bwd_send_time = time_const.server_gradient_send_time
+    network_delay_time = 10
+    head_fwd_send_time = time_const.head_activation_send_time + network_delay_time
+    server_fwd_send_time = time_const.server_activation_send_time + network_delay_time
+    tail_bwd_send_time = time_const.tail_gradient_send_time + network_delay_time
+    server_bwd_send_time = time_const.server_gradient_send_time + network_delay_time
 
     # use list to do scheduling, each element is a list of two elements, [start_time, end_time]
     head_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
@@ -654,10 +656,10 @@ def parse_arguments():
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b qwen/qwen3-14b
     parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
     # parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The maximum split point for the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
-    parser.add_argument('--dataset_size', '-DS', type=int, default=10000, help='The sample nums of dataset')
+    parser.add_argument('--dataset_size', '-DS', type=int, default=12460, help='The sample nums of dataset')
     parser.add_argument('--lora', action='store_true', help='Whether to use Lora or not.')
     parser.add_argument('--mbps', type=int, default=230, help='The mbps value for the simulation.')
     parser.add_argument('--mps_gpu', type=int, default=100, help='The max percentage of GPU active threads used for the simulation.')
@@ -694,8 +696,8 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in [2, 3, 4]:  # 按照模型层数的一半去设
-        for bs in [8, 16, 32, 64]:
+    for sp in [2, 4, 8]:  # 按照模型层数的一半去设
+        for bs in [4, 8]:
             var = MainVariable(
                 total_sample_count=10000,
                 batch_size=bs,
@@ -705,7 +707,7 @@ if __name__ == "__main__":
                 client_offload_model_state_sp_num=sp,
                 lora=lora,
             )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=False, save_time_res=True)
+            sim_res = simulate(var, time_res, mem_res, save_gantt=True, save_time_res=True)
             all_data.append(
                 {
                     'split_point': var.split_point,

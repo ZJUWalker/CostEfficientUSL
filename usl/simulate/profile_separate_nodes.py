@@ -39,6 +39,24 @@ def _get_hidden_size(dir='data/models', model_name='gpt2-large') -> AutoConfig:
         raise ValueError(f"Failed to get hidden size from config {config}")
 
 
+# trick. get model transfer time from model ,this is profile by real model but not simulate model
+def _get_transfer_time(model):
+
+    if 'qwen3-1.7b' in model:  # hidden size 2048
+        return (203, 160, 175, 150)
+    elif 'qwen3-4b' in model:  # hidden size 2560
+        return (240, 206, 215, 185)
+    elif 'qwen3-8b' in model:  # 4096
+        return (384, 330, 345, 300)
+    elif 'qwen3-14b' in model:  # 5120
+        return (480, 412, 430, 370)
+    elif 'qwen3-32b' in model:  # 5120
+        return (490, 422, 440, 380)
+    else:
+        return (0, 0, 0, 0)
+    pass
+
+
 def run_profile(
     model: str, mbps: float, lora: bool, base_bs=4, base_sp=2, mps_gpu=100, profile_dir: str = 'log/profile/sim_profile'
 ) -> Tuple[MemoryConstant, TimeConstant]:
@@ -193,20 +211,17 @@ def run_profile(
     time_var.base_head_model_state_offload_time = (
         prof_res[(base_sp, base_bs, 0, base_sp, 0)]['head_m_offload_time_ms'] + prof_res[(base_sp, base_bs, 0, base_sp, 0)]['head_os_offload_time_ms']
     )
-    time_var.base_tail_model_state_offload_time = min(
-        prof_res[(base_sp, base_bs, 0, base_sp, 0)]['tail_m_offload_time_ms']
-        + prof_res[(base_sp, base_bs, 0, base_sp, 0)]['tail_os_offload_time_ms'],
-        time_var.base_head_model_state_offload_time,
+    time_var.base_tail_model_state_offload_time = (
+        prof_res[(base_sp, base_bs, 0, base_sp, 0)]['tail_m_offload_time_ms'] + prof_res[(base_sp, base_bs, 0, base_sp, 0)]['tail_os_offload_time_ms']
     )
+
     # time_var.head_model_offload_time_increment_per_sp = (
     #     prof_res[(base_sp + 1, base_bs,0, base_sp + 1, 0)]['head_m_offload_time_ms']
     #     + prof_res[(base_sp + 1, base_bs,0, base_sp + 1, 0)]['head_os_offload_time_ms']
     #     - (prof_res[(base_sp, base_bs,0, base_sp, 0)]['head_m_offload_time_ms'] + prof_res[(base_sp, base_bs,0, base_sp, 0)]['head_os_offload_time_ms'])
     # )
-    time_var.head_model_offload_time_increment_per_sp = (
-        prof_res[(base_sp, base_bs, 0, base_sp, 0)]['head_m_offload_time_ms'] / base_sp * 3
-    )  # param+os
-    time_var.tail_model_offload_time_increment_per_sp = time_var.head_model_offload_time_increment_per_sp
+    time_var.head_model_offload_time_increment_per_sp = prof_res[(base_sp, base_bs, 0, base_sp, 0)]['head_m_offload_time_ms'] / base_sp  # param+os
+    time_var.tail_model_offload_time_increment_per_sp = prof_res[(base_sp, base_bs, 0, base_sp, 0)]['tail_m_offload_time_ms'] / base_sp  # param+os
     # head activation offload time
     base_activation_offload_time_ms = prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms']
     base_1_activation_offload_time_ms = prof_res[(base_sp + 1, base_bs, base_bs, 0, base_bs)]['activation_offload_time_ms']
@@ -232,22 +247,25 @@ def run_profile(
     time_var.server_activation_reload_time_increment_per_sp = base_1_activation_reload_time_ms - base_activation_reload_time_ms
 
     # network time
-    time_var.head_activation_send_time = (
-        prof_res[(base_sp, base_bs, 0, 0, 0)]['head_fwd_send_time_avg_ms']
-        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['head_fwd_send_time_avg_ms']
-    ) / 2
-    time_var.server_activation_send_time = (
-        prof_res[(base_sp, base_bs, 0, 0, 0)]['server_fwd_send_time_avg_ms']
-        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_fwd_send_time_avg_ms']
-    ) / 2
-    time_var.tail_gradient_send_time = (
-        prof_res[(base_sp, base_bs, 0, 0, 0)]['tail_bwd_send_time_avg_ms']
-        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['tail_bwd_send_time_avg_ms']
-    ) / 2
-    time_var.server_gradient_send_time = (
-        prof_res[(base_sp, base_bs, 0, 0, 0)]['server_bwd_send_time_avg_ms']
-        + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_bwd_send_time_avg_ms']
-    ) / 2
+    time_var.head_activation_send_time, time_var.server_activation_send_time, time_var.tail_gradient_send_time, time_var.server_gradient_send_time = (
+        _get_transfer_time(model)
+    )
+    # time_var.head_activation_send_time = (
+    #     prof_res[(base_sp, base_bs, 0, 0, 0)]['head_fwd_send_time_avg_ms']
+    #     + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['head_fwd_send_time_avg_ms']
+    # ) / 2
+    # time_var.server_activation_send_time = (
+    #     prof_res[(base_sp, base_bs, 0, 0, 0)]['server_fwd_send_time_avg_ms']
+    #     + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_fwd_send_time_avg_ms']
+    # ) / 2
+    # time_var.tail_gradient_send_time = (
+    #     prof_res[(base_sp, base_bs, 0, 0, 0)]['tail_bwd_send_time_avg_ms']
+    #     + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['tail_bwd_send_time_avg_ms']
+    # ) / 2
+    # time_var.server_gradient_send_time = (
+    #     prof_res[(base_sp, base_bs, 0, 0, 0)]['server_bwd_send_time_avg_ms']
+    #     + prof_res[(base_sp, base_bs, base_bs, 0, base_bs)]['server_bwd_send_time_avg_ms']
+    # ) / 2
     # round all values to 2 decimal places
     for key in time_var.__dict__.keys():
         time_var.__dict__[key] = round(time_var.__dict__[key], 2)
