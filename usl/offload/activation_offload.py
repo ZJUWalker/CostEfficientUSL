@@ -61,6 +61,9 @@ class TensorState:
     def create_prefetch_buffer(self) -> None:
         self.prefetch_buffer = torch.empty(self.cpu_backup.size(), dtype=self.cpu_backup.dtype, layout=self.cpu_backup.layout, device=self.device)
 
+    def clear_cpu_backup(self) -> None:
+        self.cpu_backup = None
+
     def reload(self) -> None:
         assert not self.reloaded and self.offloaded
         self.prefetch_buffer.copy_(self.cpu_backup, non_blocking=True)
@@ -442,3 +445,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             self.reload_time_durations[self.current_mb_idx] = self.h2d_start_events[self.current_mb_idx].elapsed_time(
                 self.h2d_finish_events[self.current_mb_idx]
             )
+            for tensor_label, state in self.tensor_tag_to_state.items():
+                mb_idx, _ = tensor_label
+                if mb_idx == self.current_mb_idx:
+                    if isinstance(state, TensorState):
+                        state.clear_cpu_backup()

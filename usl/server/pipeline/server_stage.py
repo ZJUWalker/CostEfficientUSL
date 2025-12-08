@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 import torch.fx as fx
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.fx.node import map_aggregate
@@ -604,7 +605,7 @@ class _ServerPipelineStageBase(ABC):
                     emb = emb.to(self.device)
         place_queue.put(payload)
 
-    def forward_maybe_with_nosync(self, mb_idx: int, *args, **kwargs):
+    def forward_maybe_with_nosync(self, mb_idx: int, use_ckpt: bool = False, *args, **kwargs):
         # If submod is wrapped with DDP, we use the `no_sync` context manager to
         # avoid gradient all-reduce per microbatch
         torch.cuda.current_stream().synchronize()
@@ -613,7 +614,10 @@ class _ServerPipelineStageBase(ABC):
             with self.submod.no_sync():  # type: ignore[operator]
                 out_val = self.submod(*args, **kwargs)
         else:
-            out_val = self.submod(*args, **kwargs)
+            if use_ckpt:
+                out_val = checkpoint(self.submod, *args, **kwargs)
+            else:
+                out_val = self.submod(*args, **kwargs)
         torch.cuda.current_stream().synchronize()
         e = time.time()
         self.profile_data[mb_idx].server_fwd_timestamp[0] = s
@@ -713,6 +717,7 @@ class _ServerPipelineStageBase(ABC):
     def forward_one_chunk(
         self,
         fwd_chunk_id: int,
+        use_ckpt: bool = False,
     ):
         """
         Perform forward pass on the stage with one microbatch.
@@ -742,7 +747,7 @@ class _ServerPipelineStageBase(ABC):
         # Compute forward
         # print(f"Rank {self.group_rank} try to fwd for chunk {fwd_chunk_id}")
         try:
-            output = self.forward_maybe_with_nosync(fwd_chunk_id, *composite_args, **composite_kwargs)
+            output = self.forward_maybe_with_nosync(fwd_chunk_id, use_ckpt, *composite_args, **composite_kwargs)
 
         except Exception as e:
             exc_msg = f"""

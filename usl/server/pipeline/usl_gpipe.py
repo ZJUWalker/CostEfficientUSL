@@ -6,7 +6,9 @@ from typing import (
     Union,
 )
 
+import psutil
 import torch
+from torch.utils.checkpoint import checkpoint
 import torch.distributed as dist
 from torch.profiler import record_function
 
@@ -19,6 +21,11 @@ if TYPE_CHECKING:
     from torch.distributed import Work
 
 logger = logging.getLogger(__name__)
+
+
+def _check_cpu_mem_usage_percent():
+    mem = psutil.virtual_memory()
+    return mem.percent
 
 
 class ServerScheduleGPipe(ServerPipelineScheduleSingle):
@@ -76,10 +83,16 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
                         work.wait()
 
                 if i < self.offload_activation_mb_num:
-                    with self.activation_offload_ctx:
-                        _ = self._stage.forward_one_chunk(i)
-                        # after ctx, the activation will be offloaded to CPU
-                        self.activation_offload_handler.on_minibatch_commit_forward()
+                    if _check_cpu_mem_usage_percent() > 90:
+                        print(f'do checkpoint for mb {i} due to cpu memory usage')
+                        # cpu memory usage is too high, skip offloading,use chechpoint instead
+                        _ = self._stage.forward_one_chunk(i, use_ckpt=True)
+                        pass
+                    else:
+                        with self.activation_offload_ctx:
+                            _ = self._stage.forward_one_chunk(i)
+                            # after ctx, the activation will be offloaded to CPU
+                    self.activation_offload_handler.on_minibatch_commit_forward()
                 else:
                     _ = self._stage.forward_one_chunk(i)
                 ops = self._stage.get_fwd_send_ops(i)
