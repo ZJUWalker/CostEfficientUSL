@@ -7,12 +7,14 @@ from usl.llm import (
     load_gpt_server_model,
     load_llama_server,
     load_qwen3_server,
+    load_gemma2_server,
     SplitModelConfig,
 )
 from usl.llm import (
     load_gpt_client_models,
     load_llama_client,
     load_qwen3_client,
+    load_gemma2_client,
     SplitModelConfig,
 )
 from usl.utils.dataset.base import get_client_dataloaders
@@ -84,6 +86,8 @@ def load_client(
         head, tail = load_llama_client(model, split_config)
     elif "qwen" in model_name.lower():
         head, tail = load_qwen3_client(model, split_config)
+    elif 'gemma' in model_name.lower():
+        head, tail = load_gemma2_client(model, split_config)
     else:
         raise ValueError(f"unsupported model card {model_name}")
     if use_lora:
@@ -145,6 +149,8 @@ def load_server_model(
         server = load_llama_server(model, split_config)
     elif "qwen" in model_name.lower():
         server = load_qwen3_server(model, split_config)
+    elif "gemma" in model_name.lower():
+        server = load_gemma2_server(model, split_config)
     else:
         raise ValueError(f"unsupported model card {model_name}")
 
