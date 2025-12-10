@@ -65,6 +65,7 @@ class ClientArgs:
         - Bool 类型为 False 不显示
         """
         parts = [
+            # f"sim",
             f"sp_{self.split_point}",
             f"b_{self.batch_size}",
             f"mb_{self.micro_batch_size}",
@@ -780,10 +781,13 @@ class Client:
             "client_offload_activation_mb_num": self.client_args.offload_activation_mb_num,
             "server_offload_activation_mb_num": server_offload_activation_mb_num,
             "client_max_mem_alloc_mb": round(self.client_max_mem_alloc_mb, 4),
+            "client_max_mem_alloc_GB": round(self.client_max_mem_alloc_mb / 1024, 4),
             "server_max_mem_alloc_mb": server_profile_res.get("max_mem_alloc", 0),
             "server_total_mem_alloc_mb": round(server_total_mem_alloc, 4),
+            "server_total_mem_alloc_GB": round(server_total_mem_alloc / 1024, 4),
             "server_mem_alloc_per_rank": max_mem_alloc_per_rank,
             "batch_train_time_ms": batch_train_time_ms,
+            "epoch_train_time_h": round((batch_train_time_ms * 12460) / (1000 * self.client_args.batch_size * 3600), 2),
             "GPU_rent_cost": round(self.client_args.server_world_size * batch_train_time_ms * server_profile_res.get("max_mem_alloc", 0) / 1e6, 6),
             "head_fwd_time_avg_ms": avg_value(mb_head_fwd_times_client),
             "head_bwd_time_avg_ms": avg_value(mb_head_bwd_times_client),

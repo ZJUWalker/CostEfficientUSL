@@ -480,7 +480,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
 
     # calculate min_gpu_num_required and mem_alloc_per_gpu
     safe_factor = 0.95  # 安全系数，防止超配
-    for i in range(1, 9):
+    for i in range(1, 30):
         min_gpu_num_required = i
         # add nccl buffer
         server_peak_mem_alloc_tmp = server_peak_mem_alloc + (
@@ -587,7 +587,9 @@ def do_optimize(
     EPS_TIME_RATIO = 0.005
     # 遍历所有可能的配置
     time_start = time.time()
+    # --------modify batch size----------------
     for bs in range(8, max_batch_size + 1, 2):
+        # for bs in [8]:
         print(f'searching batch size {bs},time stacked: {time.time() - time_start:.4f}s')
         skip_curr_bs = False
         for sp in range(1, max_split_point + 1):
@@ -654,9 +656,9 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Simulate memory and time profiling with dynamic parameters.')
 
     # Defining the command-line arguments
-    # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b qwen/qwen3-14b
+    # qwen/qwen3-4b qwen/qwen3-8b qwen/qwen3-14b qwen/qwen3-32b meta-llama/llama3-8b gemma/gemma2-9b
     parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
-    parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
+    parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     # parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The maximum split point for the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
     parser.add_argument('--dataset_size', '-DS', type=int, default=12460, help='The sample nums of dataset')
@@ -696,10 +698,12 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in [2, 4, 8]:  # 按照模型层数的一半去设
-        for bs in [4, 8]:
+    # for sp in [1, 2, 3, 4, 5, 6]:  # 按照模型层数的一半去设
+    for sp in range(1, 16):
+        # for bs in [8, 16, 32]:
+        for bs in range(8, max_batch_size + 1, 2):
             var = MainVariable(
-                total_sample_count=10000,
+                total_sample_count=12460,
                 batch_size=bs,
                 split_point=sp,
                 client_offload_mb_num=bs,
@@ -707,7 +711,7 @@ if __name__ == "__main__":
                 client_offload_model_state_sp_num=sp,
                 lora=lora,
             )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=True, save_time_res=True)
+            sim_res = simulate(var, time_res, mem_res, save_gantt=False, save_time_res=True)
             all_data.append(
                 {
                     'split_point': var.split_point,
@@ -718,10 +722,11 @@ if __name__ == "__main__":
     df = pd.DataFrame(all_data)
     df = (
         df.where(df['client_peak_mem_alloc'] <= max_client_mem_mb * 0.95).sort_values(
-            by=['client_peak_mem_alloc', 'server_cost_per_epoch'], ascending=[False, True]
+            by=['server_cost_per_epoch', 'client_peak_mem_alloc'], ascending=[True, False]
         )
     ).round(2)
-    df.to_csv(f'tmp_{model_name.split("/")[-1]}.csv', index=False)
+    # print(df[:10])
+    df.to_csv(f'tmp_{model_name.split("/")[-1]}.csv', index=False)  # _fixed_batch
     # print(time_res)
     # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
     # do
