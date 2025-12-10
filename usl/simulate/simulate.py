@@ -239,9 +239,9 @@ def _simulate_train_time(
         for rk in range(gpu_num_required - 1, -1, -1):
             if rk == gpu_num_required - 1:
                 if i == 0:
-                    server_ranks_bwd_timestamps[rk][0][0] = max(
-                        server_ranks_fwd_timestamps[rk][-1][1], tail_gradient_send_timestamps[0][1], server_activation_send_timestamps[-1][1]
-                    ) + (server_acti_reload_time_per_mb_per_rank[rk] if main_var.server_offload_mb_num > 0 else 0)
+                    server_ranks_bwd_timestamps[rk][0][0] = max(server_ranks_fwd_timestamps[rk][-1][1], tail_gradient_send_timestamps[0][1]) + (
+                        server_acti_reload_time_per_mb_per_rank[rk] if main_var.server_offload_mb_num > 0 else 0
+                    )
                 else:
                     if i < main_var.server_offload_mb_num:
                         server_ranks_bwd_timestamps[rk][i][0] = max(
@@ -707,7 +707,7 @@ if __name__ == "__main__":
                 client_offload_model_state_sp_num=sp,
                 lora=lora,
             )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=True, save_time_res=True)
+            sim_res = simulate(var, time_res, mem_res, save_gantt=True, save_time_res=False)
             all_data.append(
                 {
                     'split_point': var.split_point,
