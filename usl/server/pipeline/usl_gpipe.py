@@ -107,11 +107,11 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         # Wait for all forward sends to finish
         # This should not have performance impact because by the time the first
         # backward arrives all the forward sends should have been finished.
-        for work in fwd_sends_to_wait:
-            if isinstance(work, dist.Work):
-                work.wait()
-            elif isinstance(work, Future):
-                work.result()
+        # for work in fwd_sends_to_wait:
+        #     if isinstance(work, dist.Work):
+        #         work.wait()
+        #     elif isinstance(work, Future):
+        #         work.result()
 
         # No loss function, no need to run backward
         if not self._has_backward:
@@ -125,14 +125,14 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
         for i in range(self._n_microbatches):
             with record_function(f"Backward {i}"):
                 ops = self._stage.get_bwd_recv_ops(i)
+                if i < self.offload_activation_mb_num:
+                    self.activation_offload_handler.on_minibatch_commit_backward()
                 if isinstance(ops, Future):
                     ops.result()
                 else:
                     works = _sorted_batch_p2p(ops, desc="bwd_recv")
                     for work in works.values():
                         work.wait()
-                if i < self.offload_activation_mb_num:
-                    self.activation_offload_handler.on_minibatch_commit_backward()
                 self._stage.backward_one_chunk(i, last_backward=i == self._n_microbatches - 1)
                 ops = self._stage.get_bwd_send_ops(i)
                 if isinstance(ops, Future):
@@ -144,7 +144,11 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
             logger.debug("[%s] Backwarded microbatch %s", self._stage.stage_index, i)
 
         # Return losses if there is a container passed in
-
+        for work in fwd_sends_to_wait:
+            if isinstance(work, dist.Work):
+                work.wait()
+            elif isinstance(work, Future):
+                work.result()
         # Wait for all backward sends to finish
         for work in bwd_sends_to_wait:
             if isinstance(work, dist.Work):

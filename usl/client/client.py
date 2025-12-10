@@ -821,7 +821,7 @@ class Client:
             "client_data": client_data_dict,
             "server_ranks_data": server_data_list,
         }
-        # print(data_dict["client_max_mem_alloc_mb"], data_dict["server_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
+        print(data_dict["client_max_mem_alloc_mb"], data_dict["server_max_mem_alloc_mb"], data_dict["batch_train_time_ms"])
         # dt_save_dir = f"{self.client_args.save_dir}/{self.client_args.model}"
         dt_save_dir = os.path.join(self.client_args.save_dir, self.client_args.model)
         if not os.path.exists(dt_save_dir):
