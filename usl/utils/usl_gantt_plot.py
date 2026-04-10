@@ -160,12 +160,14 @@ def plot_gantt_per_batch(
     for aligned in aligned_list:
         for key in STAGE_COLOR:
             interval = aligned.get(key)
-            if interval and interval[0] is not None:
+            if interval and interval[0] is not None and interval[0] > 0:
                 all_times.extend(interval)
     if not all_times:
         print("没有有效的时间戳")
         return
 
+    min_time = min(all_times)
+    
     fig, ax = plt.subplots(figsize=(12, 6))
 
     for idx, aligned in enumerate(aligned_list):
@@ -173,10 +175,13 @@ def plot_gantt_per_batch(
 
         for key, (label, color) in STAGE_COLOR.items():
             interval = aligned.get(key)
-            if not interval or interval[0] is None or interval[1] is None:
+            if not interval or interval[0] is None or interval[1] is None or interval[0] <= 0:
                 continue
 
             start, end = interval
+            start -= min_time
+            end -= min_time
+            
             duration = end - start
             ax.barh(
                 y=idx,
@@ -283,7 +288,8 @@ def plot_grouped_gantt(
             v = aligned.get(k)
             if not v or len(v) < 2:
                 continue
-            if v[0] is None or v[1] is None:
+            # 过滤掉默认的 [0, 0]
+            if v[0] is None or v[1] is None or v[0] <= 0:
                 continue
             all_times.extend(v)
 
@@ -297,7 +303,8 @@ def plot_grouped_gantt(
         for k, v in aligned.items():
             if not isinstance(v, (list, tuple)) or len(v) != 2:
                 continue
-            aligned[k] = [t - min_time if isinstance(t, (int, float)) else None for t in v]
+            # 只对大于 0 的有效时间戳执行减法，原来是 0 的继续保留为 0
+            aligned[k] = [t - min_time if isinstance(t, (int, float)) and t > 0 else 0 for t in v]
 
     fig, ax = plt.subplots(figsize=(15, 4))
 

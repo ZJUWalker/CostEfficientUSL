@@ -41,6 +41,7 @@ def convert_pipeline_mode(pmode: str) -> str:
 class ServerArgs:
     port: int = 8000
     step: int = 5
+    epoch: int = 1
     use_lora: bool = False
     model: str = "meta-llama/llama3.2-1b"
     server_device: str = "cuda:0"
@@ -56,6 +57,7 @@ class ServerArgs:
     batch_size: int = 4
     world_size: int = 1
     prof: bool = False
+    use_qlora_comm: bool = False
 
     def effective_rate_limit(self) -> float:
         # Prefer the correctly spelled one if provided

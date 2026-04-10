@@ -48,6 +48,7 @@ class _ServerPipelineStageBase(ABC):
         dw_builder: Optional[Callable[[], Callable[..., None]]] = None,
         base_port: Optional[int] = 9000,
         mbps_limit: Optional[int] = 0,
+        use_qlora_comm: bool = False,
     ):
         """
         Args:
@@ -144,6 +145,11 @@ class _ServerPipelineStageBase(ABC):
         # ----- Profile and Metrics ----
         self.profile_data: List[GanttChartData] = None  # init along with self.chunks later
         self.max_cuda_memory_allocated = 0
+
+        self.use_qlora_comm = use_qlora_comm
+        if self.use_qlora_comm and (self.is_first or self.is_last):
+            from usl.utils.qlora_comm import QLoRACommQuantizer
+            self.quantizer = QLoRACommQuantizer(activation_bits=4, gradient_bits=8, block_size=64, use_double_quant=True)
 
     @property
     def has_backward(self) -> bool:
@@ -473,11 +479,32 @@ class _ServerPipelineStageBase(ABC):
         发送 socket 消息
         """
         start_time = time.time()
-        if tensor.is_cuda:
-            cpu_tensor = tensor.cpu().pin_memory()
+        # 只有 Last Stage 在发送前向激活值时才进行压缩
+        # 判断是否需要压缩：
+        # 1. Last Stage 向 Tail 发送前向激活值 (is_activation=True)
+        # 2. First Stage 向 Head 发送反向梯度 (is_activation=False)
+        should_compress = self.use_qlora_comm and (
+            (self.is_last and is_activation) or 
+            (self.is_first and not is_activation)
+        )
+        
+        if should_compress:
+            compress_mode = "activation" if is_activation else "gradient"
+            payload_data, aux_data = self.quantizer.compress(tensor, mode=compress_mode)
+            # 立即卸载到 CPU 防止阻塞 GPU 流水线
+            cpu_tensor = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in payload_data.items()}
+            aux_cpu = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in aux_data.items()}
+            is_compressed = True
+        else:
+            cpu_tensor = tensor.cpu().pin_memory() if tensor.is_cuda else tensor
+            aux_cpu = None
+            is_compressed = False
+        
         # send CPU payload to client
         payload = Payload(
             tensor=cpu_tensor,
+            aux=aux_cpu, 
+            is_compressed=is_compressed,
             is_activation=is_activation,
             phase='FWD' if is_activation else 'BWD',
             mb_idx=mb_idx,
@@ -575,35 +602,61 @@ class _ServerPipelineStageBase(ABC):
             self._recv_meta(communicator, place)
 
     def _recv_meta(self, communicator: SocketCommunicator, place_queue: Queue):
-        s = time.time()
-        payload = communicator.receive()
-        e = time.time()
-        if payload is None:
-            print(f"Rank {self.group_rank} receive None (peer closed?)")
-            return None
+        try:
+            s = time.time()
+            payload = communicator.receive()
+            e = time.time()
+            if payload is None:
+                print(f"Rank {self.group_rank} receive None (peer closed?)")
+                return None
 
-        if isinstance(payload, dict) and "stop" in payload:
-            print("Client requested stop")
-            # TODO: 标记 stop，或者放一个特殊消息进队列
-            return None
-        assert isinstance(payload, Payload), 'received payload is not a Payload object'
-        # print(
-        #     f"Rank {self.group_rank} receive payload,is activation: {payload.is_activation}, mb_idx: {payload.mb_idx},tensor: {payload.tensor.shape}"
-        # )
-        if payload.is_activation:
-            self.profile_data[payload.mb_idx].server_fwd_recv_timestamp[0] = s
-            self.profile_data[payload.mb_idx].server_fwd_recv_timestamp[1] = e
-        else:
-            self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[0] = s
-            self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[1] = e
-        payload.tensor = payload.tensor.to(self.device).requires_grad_(True)
-        if payload.attention_mask is not None:
-            payload.attention_mask = payload.attention_mask.to(self.device)
-        if payload.position_embeddings is not None:
-            for emb in payload.position_embeddings:
-                if emb is not None:
-                    emb = emb.to(self.device)
-        place_queue.put(payload)
+            if isinstance(payload, dict) and "stop" in payload:
+                print("Client requested stop")
+                # TODO: 标记 stop，或者放一个特殊消息进队列
+                return None
+            assert isinstance(payload, Payload), 'received payload is not a Payload object'
+            # print(
+            #     f"Rank {self.group_rank} receive payload,is activation: {payload.is_activation}, mb_idx: {payload.mb_idx},tensor: {payload.tensor.shape}"
+            # )
+        
+            if payload.is_activation:
+                self.profile_data[payload.mb_idx].server_fwd_recv_timestamp[0] = s
+                self.profile_data[payload.mb_idx].server_fwd_recv_timestamp[1] = e
+            else:
+                self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[0] = s
+                self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[1] = e
+        
+            # 只有 First Stage 在接收前向激活值时才进行解压
+            # if self.is_first and payload.is_activation and getattr(payload, "is_compressed", False) and self.use_qlora_comm:
+            #     payload.tensor = self.quantizer.decompress(payload.tensor, payload.aux)
+            #     payload.is_compressed = False
+            #     payload.aux = None
+            
+            # 统一拦截解压：
+            # 1. First Stage 接收 Head 传来的激活 (is_activation=True)
+            # 2. Last Stage 接收 Tail 传来的梯度 (is_activation=False)
+            if getattr(payload, "is_compressed", False) and self.use_qlora_comm:
+                decompress_mode = "activation" if payload.is_activation else "gradient"
+                payload.tensor = self.quantizer.decompress(payload.tensor, payload.aux, mode=decompress_mode)
+                
+                # 重置压缩状态，防止后续处理误判
+                payload.is_compressed = False
+                payload.aux = None
+        
+            payload.tensor = payload.tensor.to(self.device).requires_grad_(True)
+            if payload.attention_mask is not None:
+                payload.attention_mask = payload.attention_mask.to(self.device)
+            if payload.position_embeddings is not None:
+                for emb in payload.position_embeddings:
+                    if emb is not None:
+                        emb = emb.to(self.device)
+            place_queue.put(payload)
+        except Exception as e:
+            # 【Debug 关键代码】打印详细堆栈！
+            import traceback
+            traceback.print_exc()
+            print(f"[Server ERROR] _recv_meta crashed: {e}")
+            place_queue.put(None)  # 塞入一个 None 解除主线程的死锁
 
     def forward_maybe_with_nosync(self, mb_idx: int, use_ckpt: bool = False, *args, **kwargs):
         # If submod is wrapped with DDP, we use the `no_sync` context manager to
@@ -994,8 +1047,9 @@ class ServerPipelineStage(_ServerPipelineStageBase):
         dw_builder: Optional[Callable[[], Callable[..., None]]] = None,
         port: Optional[int] = 9000,
         mbps_limit: Optional[int] = 0,
+        use_qlora_comm: bool = False,
     ):
-        super().__init__(submodule, stage_index, num_stages, device, group, dw_builder, port, mbps_limit)
+        super().__init__(submodule, stage_index, num_stages, device, group, dw_builder, port, mbps_limit, use_qlora_comm)
         self.inputs: Optional[List[torch.Tensor]] = None
         self.inputs_meta: Optional[Tuple[torch.Tensor, ...]] = None
         # Note: inputs and submod should ideally be on meta device. We decided not to assert this (yet) becuase it

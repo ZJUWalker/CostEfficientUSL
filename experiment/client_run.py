@@ -32,7 +32,7 @@ def run_client(args: ClientArgs, profile=False):
     model_dir = os.path.join("data/models", model_name)
     split_point = args.split_point
     lora = args.use_lora
-    device = "cuda:5" if torch.cuda.is_available() else "cpu"
+    device = "cuda:1" if torch.cuda.is_available() else "cpu"
 
     log_dir = f"log/{args.model}/client"
     logger = create_logger(log_file_name=args.build_filename(ext="log").format(''), console_output=False, log_dir=log_dir)
@@ -77,8 +77,8 @@ def main():
     parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("-SL", "--max_seq_len", type=int, default=512, help="max sequence length")
-    parser.add_argument("-S", "--step", type=int, default=5)
-    parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
+    parser.add_argument("-S", "--step", type=int, default=20)
+    parser.add_argument("-DS", "--dataset", type=str, default="dialogsum")
     parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=4)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
@@ -95,6 +95,7 @@ def main():
     parser.add_argument("--save_dir", type=str, default="log/profile")
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     parser.add_argument('--server_world_size', '-WS', type=int, default=4)
+    parser.add_argument('--qloracomm', action='store_true', default=False, help='Whether to use QLoRA compression for communication.')
     args = parser.parse_args()
     profile = args.profile
     args = ClientArgs(
@@ -119,6 +120,7 @@ def main():
         pipeline_mode=convert_pipeline_mode(args.pmode),
         max_client_mem_mb=args.max_client_mem_gb * 1024,
         server_world_size=args.server_world_size,
+        use_qlora_comm=args.qloracomm,
     )
     # 只要看到offload_activation_mb_num大于0，就默认开启offload_activation
     # 如果offload_activation, 则offload_activation_mb_num=batch_size/micro_batch_size
