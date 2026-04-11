@@ -35,20 +35,11 @@ def _simulate_train_time(
 ):
     # use list to do scheduling, each element is a list of two elements, [start_time, end_time]
     head_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    head_activation_offload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    head_activation_reload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     head_offload_timestamp = [0, 0]
     tail_reload_timestamp = [0, 0]
     head_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    # 将服务端改成多卡
-    # server_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    # server_bwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    server_activation_offload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    server_activation_reload_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     server_ranks_fwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(server_world_size)]
     server_ranks_bwd_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(server_world_size)]
-    server_ranks_activation_offload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(server_world_size)]
-    server_ranks_activation_reload_timestamps = [[[0, 0] for _ in range(micro_batch_num)] for _ in range(server_world_size)]
     tail_offload_timestamp = [0, 0]
     head_reload_timestamp = [0, 0]
     tail_fwd_timestamps = [[0, 0] for _ in range(micro_batch_num)]
@@ -57,8 +48,6 @@ def _simulate_train_time(
     tail_gradient_send_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     server_activation_send_timestamps = [[0, 0] for _ in range(micro_batch_num)]
     server_gradient_send_timestamps = [[0, 0] for _ in range(micro_batch_num)]
-    # print(acti_reload_time_per_mb)
-    # time_const.delay_time_avg_ms = 40
     # do simulating
     # step1 : do head fwd and activation offload
     for i in range(micro_batch_num):
@@ -133,9 +122,6 @@ def _simulate_train_time(
                 server_ranks_fwd_timestamps[rk][i][1] = server_ranks_fwd_timestamps[rk][i][0] + server_fwd_time_per_mb * (
                     1 + random.randint(-random_jitter_bound, random_jitter_bound) * 0.01
                 )
-
-            # if i == micro_batch_num - 1 and micro_batch_num == client_offload_mb_num:
-            #     server_ranks_fwd_timestamps[rk][i][1] += server_acti_off_time_per_mb
 
     # step4 : do server last rank activation send
     for i in range(micro_batch_num):
@@ -253,6 +239,7 @@ def _simulate_train_time(
             head_bwd_timestamps[i][1] = head_bwd_timestamps[i][0] + max(
                 head_bwd_time_per_mb, head_acti_reload_time_per_mb if i < client_offload_mb_num else 0
             )
+    batch_train_time = head_bwd_timestamps[-1][1] - head_fwd_timestamps[0][0]
     # print(head_fwd_timestamps)
     gantt_data = [[GanttChartData(mini_batch_idx=i) for i in range(micro_batch_num)] for _ in range(server_world_size + 1)]
     # gantt_data[0] is client data

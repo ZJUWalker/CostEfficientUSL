@@ -77,7 +77,7 @@ class Qwen3Server(PreTrainedModel):
 
             hidden_states = layer_outputs[0]
 
-        return hidden_states
+        return hidden_states, attention_mask
 
 
 def load_qwen3_server(pretrained_model: Qwen3ForCausalLM, split_config: SplitModelConfig) -> Qwen3Server:

@@ -1,3 +1,4 @@
+import gc
 import os
 import torch
 import torch.distributed as dist
@@ -41,6 +42,7 @@ def run_pipeline(
             if profile and rank == 0:
                 print(f"prof step")
                 prof.step()
+            gc.collect()
     if world_size > 1:
         dist.barrier()
     scheduler.send_profile_res()
@@ -78,6 +80,8 @@ def run(rank, world_size, server_args: ServerArgs):
         ),
         mbps_limit=server_args.rate_limit_mbps,
         port=server_args.port,
+        jitter=server_args.jitter_range_ms,
+        quantize_bits=server_args.quantize_bits,
     )
     stage._init_p2p_neighbors()  # check connection
     # print(f"Rank {rank} model: {stage.submod}")
@@ -119,6 +123,8 @@ if __name__ == "__main__":
     parser.add_argument("-B", "--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--prof", action="store_true")
+    parser.add_argument("--jitter", type=int, default=0, help="jitter")
+    parser.add_argument("--quantize", type=int, default=-1, help="quantize bits")
     # parser.add_argument('--type', type=int, default=0)?
     parser.add_argument('--world_size', '-WS', type=int, default=4)
     args = parser.parse_args()
@@ -137,7 +143,9 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         world_size=args.world_size,
         micro_batch_size=args.micro_batch_size,
+        jitter_range_ms=args.jitter,
         prof=args.prof,
+        quantize_bits=args.quantize,
     )
     os.environ['WORLD_SIZE'] = str(args.world_size)
     world_size = int(os.environ['WORLD_SIZE'])

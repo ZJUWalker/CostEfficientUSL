@@ -49,12 +49,14 @@ class ServerArgs:
     learning_rate: float = 5e-4
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
     # NOTE: original had a typo 'rete_limit_mbps'. Kept for backward-compat, but also expose the correct name.
-    rate_limit_mbps: float = 10
+    rate_limit_mbps: float = 230
+    jitter_range_ms: int = 20
     offload_activation: bool = False
     offload_activation_mb_num: int = 0
     micro_batch_size: int = 1
     batch_size: int = 4
     world_size: int = 1
+    quantize_bits: int = -1
     prof: bool = False
 
     def effective_rate_limit(self) -> float:

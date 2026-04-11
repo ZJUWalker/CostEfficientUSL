@@ -69,13 +69,14 @@ def _to_aligned_ms(data_list: List[Dict]) -> List[Dict[str, List[Optional[int]]]
         for field_name, value in data.items():
             if isinstance(value, list):
                 for v in value:
-                    if v is not None:
+                    if v is not None and v != 0.0:
                         all_vals.append(v)
 
     if not all_vals:
         return []
 
     min_val = min(all_vals)
+    # print(f"全局最小值：{min_val}")
 
     aligned_list: List[Dict[str, List[Optional[int]]]] = []
     for data in data_list:
@@ -84,7 +85,7 @@ def _to_aligned_ms(data_list: List[Dict]) -> List[Dict[str, List[Optional[int]]]
             if isinstance(value, list):
                 new_list = []
                 for v in value:
-                    if v is None:
+                    if v is None or v == 0.0:
                         new_list.append(None)
                     else:
                         ms = int(round((v - min_val) * 1000, 2))

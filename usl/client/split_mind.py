@@ -1,5 +1,5 @@
 import logging
-from queue import Queue, Empty
+from queue import Empty
 import time
 from typing import Dict, Optional
 import torch
@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 from transformers import PreTrainedModel
 
 from usl.client.client import Client, ClientArgs
-from usl.socket import SocketCommunicator, Payload
+from usl.socket import Payload
 from usl.utils.thread_safe_utils import AtomicInt, AtomicBool
 
 

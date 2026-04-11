@@ -14,18 +14,18 @@ import torch.distributed as dist
 import torch.fx as fx
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-from torch._subclasses.fake_tensor import FakeTensor
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.fx.node import map_aggregate
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils._pytree import tree_map_only
 
-from torch.distributed.pipelining._backward import stage_backward, stage_backward_input, stage_backward_weight
+from torch.distributed.pipelining._backward import stage_backward_input, stage_backward_weight
 from torch.distributed.pipelining._debug import map_debug_info
 from torch.distributed.pipelining._utils import flatten_args, PipeInfo, validate_tensors_metadata
 from torch.distributed.pipelining.stage import _RecvInfo, _RootArgPlaceholder, InputInfo, _make_tensor_from_meta, _normalize_model_output_as_tuple
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData
+from usl.utils.quantize import quantize, dequantize
 from typing_extensions import deprecated
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,8 @@ class _ServerPipelineStageBase(ABC):
         dw_builder: Optional[Callable[[], Callable[..., None]]] = None,
         base_port: Optional[int] = 9000,
         mbps_limit: Optional[int] = 0,
+        jitter_ms: Optional[int] = 0,
+        quantize_bits: int = -1,
     ):
         """
         Args:
@@ -71,6 +73,7 @@ class _ServerPipelineStageBase(ABC):
         if stage_index >= num_stages:
             raise ValueError(f"Stage index {stage_index} is out of range of {num_stages}")
 
+        self.quantize_bits = quantize_bits
         self.submod = submodule
         self.stage_index = stage_index
         self.num_stages = num_stages
@@ -126,6 +129,7 @@ class _ServerPipelineStageBase(ABC):
                 port=self.base_port if self.is_first else self.base_port + 1,  # different port for each node
                 buffer_size=1024 * 4,  # 4KB
                 rate_limit_mbps=mbps_limit,
+                jitter_ms=jitter_ms,
             )
             self.act_from_client: Queue[Payload] = Queue()
             self.grad_to_client: Queue[Payload] = Queue()
@@ -136,6 +140,7 @@ class _ServerPipelineStageBase(ABC):
                 port=self.base_port,  # different port for each node
                 buffer_size=1024 * 4,  # 4KB
                 rate_limit_mbps=mbps_limit,
+                jitter_ms=jitter_ms,
             )
             self.act_to_client: Queue[Payload] = Queue()
             self.grad_from_client: Queue[Payload] = Queue()
@@ -474,10 +479,16 @@ class _ServerPipelineStageBase(ABC):
         """
         start_time = time.time()
         if tensor.is_cuda:
-            cpu_tensor = tensor.cpu().pin_memory()
+            if self.quantize_bits:
+                qt, scale = quantize(tensor, self.quantize_bits)
+                qt = qt.cpu().pin_memory()
+            else:
+                qt = tensor.cpu().pin_memory()
+                scale = None
         # send CPU payload to client
         payload = Payload(
-            tensor=cpu_tensor,
+            tensor=qt,
+            scale=scale,
             is_activation=is_activation,
             phase='FWD' if is_activation else 'BWD',
             mb_idx=mb_idx,
@@ -596,7 +607,11 @@ class _ServerPipelineStageBase(ABC):
         else:
             self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[0] = s
             self.profile_data[payload.mb_idx].server_bwd_recv_timestamp[1] = e
-        payload.tensor = payload.tensor.to(self.device).requires_grad_(True)
+        payload.tensor = payload.tensor.to(self.device)
+        if self.quantize_bits:
+            payload.tensor = dequantize(payload.tensor, payload.scale, self.quantize_bits)
+        if payload.is_activation:
+            payload.tensor = payload.tensor.requires_grad_(True)
         if payload.attention_mask is not None:
             payload.attention_mask = payload.attention_mask.to(self.device)
         if payload.position_embeddings is not None:
@@ -756,7 +771,8 @@ class _ServerPipelineStageBase(ABC):
             kwargs: {map_debug_info(composite_kwargs)}
             """
             raise RuntimeError(exc_msg) from e
-
+        # for o in output:
+        #     print(f"Rank {self.group_rank} output: {o.shape},require grad: {o.requires_grad}")
         # See [Note: pipeline model output type]
         output_tuple = _normalize_model_output_as_tuple(output)
 
@@ -994,20 +1010,23 @@ class ServerPipelineStage(_ServerPipelineStageBase):
         dw_builder: Optional[Callable[[], Callable[..., None]]] = None,
         port: Optional[int] = 9000,
         mbps_limit: Optional[int] = 0,
+        jitter: Optional[int] = 0,
+        quantize_bits: int = -1,
     ):
-        super().__init__(submodule, stage_index, num_stages, device, group, dw_builder, port, mbps_limit)
+        super().__init__(submodule, stage_index, num_stages, device, group, dw_builder, port, mbps_limit, jitter, quantize_bits)
         self.inputs: Optional[List[torch.Tensor]] = None
         self.inputs_meta: Optional[Tuple[torch.Tensor, ...]] = None
         # Note: inputs and submod should ideally be on meta device. We decided not to assert this (yet) becuase it
         # might be breaking for existing users.
         assert input_args is not None, "Must provide input_args for shape inference"
         # we assume that input_args contains only activation and attention mask(Optional)
-        if self.is_first:
-            self.inputs_meta = (input_args,) if isinstance(input_args, torch.Tensor) else input_args  # activation and attention mask
-        else:
-            self.inputs_meta = (input_args,) if isinstance(input_args, torch.Tensor) else (input_args[0],)  # only activaion
+        self.inputs_meta = (input_args,) if isinstance(input_args, torch.Tensor) else input_args  # activation and attention mask
+        # if self.is_first:
+        #     self.inputs_meta = (input_args,) if isinstance(input_args, torch.Tensor) else input_args  # activation and attention mask
+        # else:
+        #     self.inputs_meta = (input_args,) if isinstance(input_args, torch.Tensor) else (input_args[0],)  # only activaion
         if output_args is None:
-            output_args = (input_args,) if isinstance(input_args, torch.Tensor) else (input_args[0],)
+            output_args = (input_args,) if isinstance(input_args, torch.Tensor) else (input_args)  # activation and attention mask to the next stage
         output_args = tree_map_only(torch.Tensor, lambda x: x.to("meta"), output_args)
         assert output_args is not None, "If passing input_args, also pass output_args to override shape inference"
         self._configure_outputs_meta((output_args,) if isinstance(output_args, torch.Tensor) else output_args)
@@ -1220,3 +1239,114 @@ class ServerPipelineStage(_ServerPipelineStageBase):
             ops.append(dist.P2POp(dist.irecv, recv_tensor, self.next_rank, self.group))
 
         return True
+
+
+def stage_backward(
+    stage_output,
+    output_grads,
+    input_values,
+    outputs_with_grads_idxs: Optional[List[int]] = None,  # deprecated, not used
+) -> Tuple[Optional[torch.Tensor], ...]:
+    """
+    This is a helper function to:
+    1. compute the gradients for the stage inputs, and
+    2. accumulate gradients for the stage module's parameters.
+
+    Given the input value(s) and the corresponding gradient for the output
+    value(s), compute and accumulate gradients for all parameter values (leaves
+    in the autograd trace) as well as return a list of the gradients for the
+    input values
+    """
+    if outputs_with_grads_idxs is not None:
+        # Deprecated, not used in runtime calls, only exists in compiler
+        stage_output = [stage_output[i] for i in outputs_with_grads_idxs]
+        output_grads = [output_grads[i] for i in outputs_with_grads_idxs]
+
+    try:
+        # stage_output may be a composite datatype like dict. Extract all individual
+        # tensor values here
+        stage_output_tensors: List[torch.Tensor] = []
+        output_grad_tensors: List[Optional[torch.Tensor]] = []
+
+        def extract_tensors_with_grads(
+            output_val,
+            grad_val,
+            # Don't delete me- see [Note: ref cycle]
+            extract_tensors_with_grads,
+        ):
+            if isinstance(output_val, torch.Tensor):
+                if not output_val.requires_grad and output_val.grad_fn is None:
+                    return
+                assert isinstance(grad_val, (torch.Tensor, type(None))), f"Expected Tensor or None gradient but got {type(grad_val)}"
+                stage_output_tensors.append(output_val)
+                output_grad_tensors.append(grad_val)
+            elif isinstance(output_val, (tuple, list)):
+                if grad_val is None:
+                    return
+                assert isinstance(grad_val, (tuple, list)), f"grad_value expected to have type {type(output_val)} but got {type(grad_val)}"
+                # assert len(output_val) == len(grad_val)
+                grads_list = list(grad_val)
+                # 如果输出比梯度多，说明剩下的都是不需要梯度的（如 mask），补 None
+                if len(output_val) > len(grads_list):
+                    diff = len(output_val) - len(grads_list)
+                    grads_list.extend([None] * diff)
+                for ov, gv in zip(output_val, grad_val):
+                    extract_tensors_with_grads(
+                        ov,
+                        gv,
+                        extract_tensors_with_grads,
+                    )
+            elif isinstance(output_val, dict):
+                if grad_val is None:
+                    return
+                assert isinstance(grad_val, dict)
+                assert set(output_val.keys()) == set(grad_val.keys())
+                for k in output_val.keys():
+                    extract_tensors_with_grads(output_val[k], grad_val[k], extract_tensors_with_grads)
+            else:
+                # Output is a non-tensor type; just ignore it
+                pass
+
+        # Note: ref cycle
+        # break a ref cycle that would keep tensors alive until GC runs
+        # 1. extract_tensors_with_grads refers to a cell that holds refs to any vars defined in stage_backward
+        #    and used in extract_tensors_with_grads
+        # 2. extract_tensors_with_grads referred to both stage_output_tensors, output_grad_tensors,
+        #    and to itself (extract_tensors_with_grads) since it makes a recursive call
+        # 3. stage_output_tensors was kept alive by the above refcycle, and it holds activation tensors, which is bad
+        # fix -> explictly pass in the ref to the fn, so there is no gc cycle anymore
+        extract_tensors_with_grads(stage_output, output_grads, extract_tensors_with_grads)
+        # print(f'stage_output_tensors: {len(stage_output_tensors)}, output_grad_tensors: {len(output_grad_tensors)}')
+
+        torch.autograd.backward(stage_output_tensors, grad_tensors=output_grad_tensors)  # type: ignore[arg-type]
+
+        # Extract gradients wrt the input values
+        grad_inputs: List[Optional[torch.Tensor]] = []
+        for val in input_values:
+            if isinstance(val, torch.Tensor):
+                grad_inputs.append(val.grad if val.grad is not None else torch.zeros_like(val))
+
+        # Alternative impl: `torch.autograd.grad`.
+        # Note that `torch.autograd.grad` will not accumulate gradients into the
+        # model's parameters.
+        """
+        inputs_with_grad = []
+        for val in input_values:
+            if isinstance(val, torch.Tensor) and val.requires_grad:
+                inputs_with_grad.append(val)
+
+        grad_inputs = torch.autograd.grad(
+            stage_output_tensors, inputs_with_grad, output_grad_tensors,  # type: ignore[arg-type]
+        )
+        """
+
+    except Exception as e:
+        exc_msg = f"""
+        Failed to run stage backward:
+        Stage output: {map_debug_info(stage_output)}
+        Output gradient: {map_debug_info(output_grads)}
+        Input: {map_debug_info(input_values)}
+        """
+        raise RuntimeError(exc_msg) from e
+
+    return tuple(grad_inputs)

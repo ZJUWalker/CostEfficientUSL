@@ -29,6 +29,7 @@ from usl.server.single_server import PipelineMode
 from usl.socket import SocketCommunicator, Payload
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_grouped_gantt
 from usl.utils.tensor_utils import pad_inputs
+from usl.utils.quantize import quantize, dequantize
 from transformers import PreTrainedModel
 
 
@@ -56,6 +57,8 @@ class ClientArgs:
     pipeline_mode: PipelineMode = PipelineMode.GPIPE
     save_dir: str = 'log/profile'
     max_client_mem_mb: int = 12288  # 12GB
+    jitter_range_ms: int = 0  # 0-1000ms
+    quantize_bits: int = -1
 
     def build_filename(self, prefix: str = "", ext: str = "json") -> str:
         """
@@ -71,11 +74,13 @@ class ClientArgs:
             f"s_{self.max_seq_len}",
             f"ws_{self.server_world_size}",
             f"mbps_{self.rate_mbps}",
+            f"jt_{self.jitter_range_ms}",
             f"{self.pipeline_mode.value}",
         ]
 
         # 动态处理布尔字段
-
+        if self.quantize_bits > 0:
+            parts.append(f"quan_{self.quantize_bits}")
         if self.use_lora:
             parts.append("lora")
         if self.offload_activation:
@@ -138,7 +143,7 @@ class Client:
         self.lr = client_args.learning_rate  # ✅ 点操作符访问
         self.optimizer_head = torch.optim.Adam(self.head_model.parameters(), lr=self.lr)
         self.optimizer_tail = torch.optim.Adam(self.tail_model.parameters(), lr=self.lr)
-
+        self.quantize_bits = client_args.quantize_bits
         # ---- Metrics
         self.curr_step_idx = 0
         self.compute_time = 0
@@ -224,6 +229,7 @@ class Client:
             port=client_args.port,  # 比如连 rank0
             buffer_size=1024 * 4,
             rate_limit_mbps=client_args.rate_mbps,
+            jitter_ms=client_args.jitter_range_ms,
         )
         print(self.communicator_rank_0.conn)
 
@@ -233,6 +239,7 @@ class Client:
             port=client_args.port + 1,  # 比如连 rankN
             buffer_size=1024 * 4,
             rate_limit_mbps=client_args.rate_mbps,
+            jitter_ms=client_args.jitter_range_ms,
         )
         print(self.communicator_rank_n.conn)
 
@@ -281,13 +288,19 @@ class Client:
         if pos_gpu is not None:
             self.pin_on_gpu_tensors_idx.extend([t.data_ptr() for t in pos_gpu])
         # send essential tensors to server
-        act_cpu = output[0].clone().detach().cpu()
+        if self.quantize_bits:
+            q_head_out, scale = quantize(output[0], self.quantize_bits)
+            act_cpu = q_head_out.cpu()
+        else:
+            act_cpu = output[0].clone().detach().cpu()
+            scale = None
         attn_cpu = attn_gpu.detach().cpu() if attn_gpu is not None else None
         pos_cpu = tuple([t.cpu() for t in pos_gpu]) if pos_gpu is not None else None
         payload = Payload(
             tensor=act_cpu,
             is_activation=is_activation,
             phase=phase,
+            scale=scale,
             # —— 元信息 ——（server 将用 token 作为上下文 key）
             token=token,
             group_id=group_id,
@@ -437,7 +450,11 @@ class Client:
         mb_total = server_forward_output.mb_total
 
         activation_cpu: torch.Tensor = server_forward_output.tensor
-        activation_to_tail = activation_cpu.to(self.client_device, non_blocking=True).requires_grad_(True)
+        activation_to_tail = activation_cpu.to(self.client_device, non_blocking=True)
+        if self.quantize_bits > 0:
+            activation_to_tail = dequantize(activation_to_tail, server_forward_output.scale, n_bits=self.quantize_bits)
+        activation_to_tail = activation_to_tail.requires_grad_(True)
+        # 解析 server 传来的 token
         # tail forward
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].tail_fwd_timestamp[0] = time.time()
@@ -490,6 +507,8 @@ class Client:
         # load grad and activation
 
         grad_to_head = grad_cpu.to(self.client_device, non_blocking=True)
+        if self.quantize_bits > 0:
+            grad_to_head = dequantize(grad_to_head, server_bwd_output.scale, self.quantize_bits)
         head_activation = self.head_fwd_activation_dict[mb_idx]
         # real head model backward
         if mb_idx < self.client_args.offload_activation_mb_num:
@@ -499,7 +518,7 @@ class Client:
         head_activation.backward(grad_to_head)
         torch.cuda.current_stream().synchronize()
         self.profile_data[mb_idx].head_bwd_timestamp[1] = time.time()
-        # print(f'do backward for mb idx {mb_idx}')
+        print(mb_idx, self.profile_data[mb_idx].head_bwd_timestamp)
         if self.curr_step_idx > 0:
             self.head_bwd_time += self.profile_data[mb_idx].head_bwd_timestamp[1] - self.profile_data[mb_idx].head_bwd_timestamp[0]
         # remove not needed tensors to save memory
@@ -591,11 +610,12 @@ class Client:
             if isinstance(data, dict) and "profile" in data:
                 print(f"get profile data")
                 try:
-                    if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
-                        print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
+                    # if self.client_max_mem_alloc_mb is not None and self.client_max_mem_alloc_mb > self.client_args.max_client_mem_mb:
+                    # print(f"client max mem alloc {self.client_max_mem_alloc_mb} > {self.client_args.max_client_mem_mb}, exit")
                     # else:
                     # print(f'get profile data: {data},stop training')
                     # self._save_profile_res(data)
+                    time.sleep(3)
                     self.server_profile_res = data
                 except Exception as e:
                     print(f"error when save profile data: {e}")
@@ -679,10 +699,11 @@ class Client:
         fwd_send_time_client = []
         bwd_send_time_client = []
         # print(server_profile_gantt_data[0])
+        print(self.profile_data)
         for mb_idx, client_item in enumerate(self.profile_data, 0):
-            client_item.head_fwd_send_timestamp[1] = server_profile_gantt_data[0][mb_idx].server_fwd_recv_timestamp[1]
+            # client_item.head_fwd_send_timestamp[1] = server_profile_gantt_data[0][mb_idx].server_fwd_recv_timestamp[1]
             # server rank 0 recv activation end time
-            client_item.tail_bwd_send_timestamp[1] = server_profile_gantt_data[-1][mb_idx].server_bwd_recv_timestamp[1]
+            # client_item.tail_bwd_send_timestamp[1] = server_profile_gantt_data[-1][mb_idx].server_bwd_recv_timestamp[1]
             # server rank 0 recv gradient end time
             mb_head_fwd_times_client.append(client_item.head_fwd_timestamp[1] - client_item.head_fwd_timestamp[0])
             mb_head_bwd_times_client.append(client_item.head_bwd_timestamp[1] - client_item.head_bwd_timestamp[0])
@@ -741,10 +762,10 @@ class Client:
                 mb_bwd_times_curr_rank.append(server_item.server_bwd_timestamp[1] - server_item.server_bwd_timestamp[0])
                 # ignore the nccl transfer time,only consider the socket time between server and client
                 if rank == len(server_profile_gantt_data) - 1:
-                    server_item.server_fwd_send_timestamp[1] = self.profile_data[mb_idx].tail_fwd_recv_timestamp[1]
+                    # server_item.server_fwd_send_timestamp[1] = self.profile_data[mb_idx].tail_fwd_recv_timestamp[1]
                     fwd_send_time_curr_rank.append(server_item.server_fwd_send_timestamp[1] - server_item.server_fwd_send_timestamp[0])
                 if rank == 0:
-                    server_item.server_bwd_send_timestamp[1] = self.profile_data[mb_idx].head_bwd_recv_timestamp[1]
+                    # server_item.server_bwd_send_timestamp[1] = self.profile_data[mb_idx].head_bwd_recv_timestamp[1]
                     bwd_send_time_curr_rank.append(server_item.server_bwd_send_timestamp[1] - server_item.server_bwd_send_timestamp[0])
             rank_data_dict['mb_fwd_time_avg'] = avg_value(mb_fwd_times_curr_rank)
             rank_data_dict['mb_bwd_time_avg'] = avg_value(mb_bwd_times_curr_rank)

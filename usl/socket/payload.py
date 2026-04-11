@@ -14,6 +14,7 @@ class Payload:
     mb_total: int = 0
     attention_mask: torch.Tensor = None
     position_embeddings: Tuple[torch.Tensor, ...] = None
+    scale: Any = None
 
     def payload_nbytes(self) -> int:
         """计算 payload 中所有 tensor 的占用字节数（单位: Byte）"""
