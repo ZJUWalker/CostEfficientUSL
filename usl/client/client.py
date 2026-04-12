@@ -21,6 +21,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from usl.offload import (
     AsyncModelParamOffloadHandler,
     ModelParamOffload,
+    LayerwiseModelParamOffload,
     OptimizerStateOffload,
     CpuOffloadHookWithOffloadHandler,
     AsyncDoubleBufferGroupOffloadHandler,
@@ -189,9 +190,9 @@ class Client:
                 offload_stream=self.offload_stream,
                 # except_tensor_idx_list=except_tensor_idx_list,
             )
-            self.tail_model_manager = ModelParamOffload(
+            self.tail_model_manager = LayerwiseModelParamOffload(
                 self.tail_model,
-                # offload_layer_num=self.client_args.offload_model_state_sp_num,
+                offload_layer_num=self.client_args.offload_model_state_sp_num,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,

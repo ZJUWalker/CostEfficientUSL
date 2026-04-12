@@ -95,7 +95,7 @@ def main():
     parser.add_argument("--save_dir", type=str, default="log/profile")
     parser.add_argument('--max_client_mem_gb', type=int, default=24, help='The maximum memory allocation for the client.')
     parser.add_argument('--server_world_size', '-WS', type=int, default=4)
-    parser.add_argument('--qloracomm', action='store_true', default=False, help='Whether to use QLoRA compression for communication.')
+    parser.add_argument('--qloracomm','-Q', action='store_true', default=False, help='Whether to use QLoRA compression for communication.')
     args = parser.parse_args()
     profile = args.profile
     args = ClientArgs(

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional, Tuple
 import time
 import sys
 from typing_extensions import deprecated
@@ -260,3 +260,206 @@ class ModelParamOffload:
             # if cuda_count < 100 and param.device.type == 'cuda':
             #     print(f"CUDA: {name}")
         print(f"Total: {cuda_count} on CUDA, {cpu_count} on CPU")
+
+
+class LayerwiseModelParamOffload(ModelParamOffload):
+    """
+    基于层数的精细化参数卸载类，继承自 ModelParamOffload。
+    
+    核心改进：
+    - 支持通过参数名精确识别模型层数（支持 Llama/Qwen/ChatGLM 等常见结构）
+    - 提供 offload_start_layer/offload_end_layer 精确控制卸载范围
+    - 保持父类所有 offload/reload API 不变，最小入侵原有逻辑
+    """
+    
+    def __init__(
+        self,
+        base_model: nn.Module,
+        offload_threshold: int = 0,
+        offload_layer_num: int = 1000,      # 向后兼容：等价于 offload_end_layer
+        offload_start_layer: int = 0,       # 新增：起始层（包含）
+        offload_end_layer: Optional[int] = None,  # 新增：结束层（不包含），None 时使用 offload_layer_num
+        device="cuda",
+        load_stream=None,
+        offload_stream=None,
+        except_tensor_idx_list: List[int] = None,
+    ):
+        # 必须在 super().__init__ 前设置层范围，因为 _init_param_dict 会用到
+        self.offload_start_layer = offload_start_layer
+        self.offload_end_layer = offload_end_layer if offload_end_layer is not None else offload_layer_num+offload_start_layer
+        
+        # 记录层映射信息用于调试
+        self.param_name_to_layer_idx: Dict[str, int] = {}
+        self.layer_offload_map: Dict[int, bool] = {}  # layer_idx -> 是否卸载
+        
+        # 调用父类 __init__，它会触发我们重写的 _init_param_dict
+        super().__init__(
+            base_model=base_model,
+            offload_threshold=offload_threshold,
+            offload_layer_num=offload_layer_num,
+            device=device,
+            load_stream=load_stream,
+            offload_stream=offload_stream,
+            except_tensor_idx_list=except_tensor_idx_list or [],
+        )
+    
+    def _is_layer_root_module(self, module_name: str) -> bool:
+        """
+        判断给定模块名是否对应一个 Transformers 层的根模块（如 model.layers.0）。
+        支持标准命名：model.layers, transformer.h, model.decoder.layers 等。
+        """
+        if module_name in [
+            "",
+            "model",
+            "transformer",
+            "model.transformer",
+        ]:
+            return False
+        
+        layer_prefix = [
+            "model.layers",
+            "model.transformer.layers",
+            "transformer.layers",
+            "transformer.h",
+            "model.decoder.layers",
+        ]
+        for prefix in layer_prefix:
+            if module_name.startswith(prefix):
+                # 检查最后一段是否为数字（层索引）
+                last_part = module_name.split(".")[-1]
+                if last_part.isdigit():
+                    return True
+        return False
+    
+    def _get_layer_idx_from_param_name(self, param_name: str) -> int:
+        """
+        从参数全名（如 model.layers.0.self_attn.q_proj.weight）提取层索引。
+        返回 -1 表示该参数不属于任何识别的层（如 embedding, head, norm 等）。
+        """
+        layer_prefix = [
+            "model.layers",
+            "model.transformer.layers",
+            "transformer.layers",
+            "transformer.h",
+            "model.decoder.layers",
+        ]
+        
+        for prefix in layer_prefix:
+            if prefix in param_name:
+                # 提取前缀后的第一段数字作为层索引
+                # e.g., "model.layers.0.self_attn..." -> 分割后取 0
+                try:
+                    suffix = param_name.split(prefix + ".", 1)[1]
+                    layer_idx_str = suffix.split(".")[0]
+                    if layer_idx_str.isdigit():
+                        return int(layer_idx_str)
+                except (IndexError, ValueError):
+                    continue
+        return -1
+    
+    def _init_param_dict(self):
+        """
+        重写参数初始化逻辑，基于层范围 [offload_start_layer, offload_end_layer) 进行卸载决策。
+        Shape 标注遵循: [b,s,h] -> [b,s/n,h] 格式（参数视为 [h1,h2] 或 [h]）
+        """
+        # 清空状态（防止父类逻辑残留）
+        self.model_param_on_cpu: Dict[int, torch.Tensor] = {}
+        self.model_param_on_gpu: Dict[int, torch.Tensor] = {}
+        self.param_name_to_layer_idx = {}
+        self.layer_offload_map = {}
+        
+        total_offload_bytes = 0
+        total_offload_params = 0
+        
+        # 遍历所有参数，按层决策
+        for name, param in self.base_model.named_parameters():
+            p_id = id(param)
+            layer_idx = self._get_layer_idx_from_param_name(name)
+            self.param_name_to_layer_idx[name] = layer_idx
+            
+            # 决策逻辑：是否卸载当前参数
+            should_offload = True
+            
+            # 1. 检查例外列表（显式排除的 tensor）
+            if p_id in self.except_tensor_idx_list:
+                should_offload = False
+            
+            # 2. 检查大小阈值（小于阈值的参数留在 GPU，避免通信开销大于收益）
+            param_bytes = param.numel() * param.element_size()
+            if param_bytes < self.offload_threshold:
+                should_offload = False
+            
+            # 3. 检查层范围（核心逻辑）
+            # layer_idx == -1 表示非层参数（如 embedding, head, norm），默认保留在 GPU
+            if layer_idx == -1:
+                should_offload = False
+            elif not (self.offload_start_layer <= layer_idx < self.offload_end_layer):
+                should_offload = False
+            
+            # 记录层决策（用于调试）
+            if layer_idx >= 0:
+                self.layer_offload_map[layer_idx] = should_offload
+            
+            # 执行内存分配
+            if not should_offload:
+                print(f'not offload layer:{name}')
+                # 保留在 GPU：确保数据在 device 上
+                if not param.is_cuda:
+                    param.data = param.data.cuda(self.device, non_blocking=True)
+            else:
+                print(f'offload layer:{name}')
+                # 卸载到 CPU：分配 pinned memory 并拷贝
+                total_offload_params += param.numel()
+                total_offload_bytes += param_bytes
+                
+                # [h1, h2] 或 [h] -> 相同 shape 的 CPU pinned tensor
+                cpu_buffer = torch.empty(
+                    param.size(),
+                    dtype=param.dtype,
+                    layout=param.layout,
+                    device='cpu',
+                    pin_memory=True,  # 关键：启用页锁定内存加速 H2D/D2H
+                )
+                
+                # 同步拷贝初始化（后续 offload/reload 使用 async）
+                cpu_buffer.copy_(param.data, non_blocking=False)
+                
+                self.model_param_on_cpu[p_id] = cpu_buffer
+                self.model_param_on_gpu[p_id] = param  # 保持对原 GPU param 的引用
+        
+        # 向后兼容：设置 offload_until_param_id（标记卸载边界）
+        # 这里简化为最后一个被卸载的参数 id，父类可能不使用它，但保持兼容性
+        if self.model_param_on_gpu:
+            self.offload_until_param_id = list(self.model_param_on_gpu.keys())[-1]
+        
+        print(
+            f"[LayerwiseOffload] Initialized: Layers [{self.offload_start_layer}, {self.offload_end_layer}) | "
+            f"Params: {total_offload_params/1e6:.2f}M | "
+            f"Memory: {total_offload_bytes/1024**3:.2f}GB offloaded to CPU"
+        )
+    
+    def get_layer_offload_summary(self) -> Dict[int, bool]:
+        """
+        调试接口：返回每层是否被卸载的映射表。
+        可用于验证 layer 识别是否正确。
+        """
+        return dict(sorted(self.layer_offload_map.items()))
+    
+    def print_offload_layers(self):
+        """打印被卸载的层范围，用于快速验证"""
+        offloaded_layers = [idx for idx, offloaded in self.layer_offload_map.items() if offloaded]
+        if not offloaded_layers:
+            print("[LayerwiseOffload] No layers selected for offloading")
+            return
+        
+        # 压缩连续区间显示，如 [0,1,2,5,6] -> "0-2, 5-6"
+        ranges = []
+        start = prev = offloaded_layers[0]
+        for curr in offloaded_layers[1:] + [None]:
+            if curr != prev + 1:
+                ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+                start = curr
+            prev = curr
+        
+        print(f"[LayerwiseOffload] Offloaded layers: {', '.join(ranges)} "
+              f"(total: {len(offloaded_layers)} layers)")
