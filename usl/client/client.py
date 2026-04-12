@@ -22,6 +22,7 @@ from usl.offload import (
     AsyncModelParamOffloadHandler,
     ModelParamOffload,
     LayerwiseModelParamOffload,
+    LayerwiseAsyncModelParamOffloadHandler,
     OptimizerStateOffload,
     CpuOffloadHookWithOffloadHandler,
     AsyncDoubleBufferGroupOffloadHandler,
@@ -182,9 +183,9 @@ class Client:
             # do not offload embedding layer,because it will be used in both head and tail models (shared with lm_head)
             # embed_layer = self.head_model.get_input_embeddings()
             # except_tensor_idx_list = [id(p) for p in embed_layer.parameters()]
-            self.head_model_manager = AsyncModelParamOffloadHandler(
+            self.head_model_manager = LayerwiseAsyncModelParamOffloadHandler(
                 self.head_model,
-                # offload_layer_num=self.client_args.offload_model_state_sp_num,
+                offload_layer_num=self.client_args.offload_model_state_sp_num,
                 device=self.client_device,
                 load_stream=self.load_stream,
                 offload_stream=self.offload_stream,

@@ -1,5 +1,5 @@
 from .model_offload import ModelParamOffload,LayerwiseModelParamOffload
-from .model_offload_hook import AsyncModelParamOffloadHandler
+from .model_offload_hook import AsyncModelParamOffloadHandler,LayerwiseAsyncModelParamOffloadHandler
 from .optimizer_offload import OptimizerStateOffload
 from .activation_offload import (
     AsyncDoubleBufferGroupOffloadHandler,
@@ -20,5 +20,6 @@ __all__ = [
     'CpuOffloadSavedTensorHook',
     'OffloadHandler',
     'AsyncModelParamOffloadHandler',
+    'LayerwiseAsyncModelParamOffloadHandler',
     'HybridOffloadContext',
 ]

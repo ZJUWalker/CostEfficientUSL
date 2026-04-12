@@ -1,10 +1,9 @@
 import torch
 import torch.nn as nn
 from torch.autograd.graph import saved_tensors_hooks
-from typing import Any, List, Dict, Set, Union, Tuple
+from typing import Any, List, Dict, Optional, Set, Union, Tuple
 from collections import defaultdict
 import time
-
 import torch
 import torch.nn as nn
 from .activation_offload import CpuOffloadSavedTensorHook
@@ -248,3 +247,231 @@ class AsyncModelParamOffloadHandler(CpuOffloadSavedTensorHook):
 
     def update_param_ptr(self):
         self._init_model_info()
+
+
+
+class LayerwiseAsyncModelParamOffloadHandler(AsyncModelParamOffloadHandler):
+    """
+    基于层范围的异步参数卸载 Handler，继承自 AsyncModelParamOffloadHandler。
+    
+    核心改进：
+    - 支持通过参数名精确识别模型层数（Llama/Qwen/GPT 等结构）
+    - 仅卸载指定层范围 [offload_start_layer, offload_end_layer) 内的参数
+    - 支持参数大小阈值过滤（小参数保留 GPU，避免通信开销）
+    - 完全复用父类的 ParamState 管理、异步流控制和 saved_tensors_hooks 机制
+    
+    适用场景：
+    - Pipeline Parallelism 中仅卸载当前 stage 的后几层
+    - 大模型微调时仅卸载冻结层（frozen layers）
+    - 与 FSDP2 结合时，仅卸载特定 TP 组内的层
+    """
+    
+    def __init__(
+        self,
+        model: nn.Module,
+        device='cuda',
+        load_stream: torch.cuda.Stream = None,
+        offload_stream: torch.cuda.Stream = None,
+        offload_layer_num:int=0,
+        offload_start_layer: int = 0,
+        offload_end_layer: Optional[int] = None,
+        offload_threshold: int = 0,  # bytes, 小于此阈值的参数保留在 GPU
+    ) -> None:
+        # 必须先保存层配置，因为父类 __init__ 会调用 _init_model_info
+        self.offload_start_layer = offload_start_layer
+        self.offload_end_layer = offload_end_layer if offload_end_layer is not None else offload_start_layer+offload_layer_num
+        self.offload_threshold = offload_threshold
+        
+        # 层统计信息
+        self.ptr_to_layer_idx: Dict[int, int] = {}  # data_ptr -> layer_idx
+        self.offload_target_ptrs: Set[int] = set()  # 被选中卸载的参数指针集合
+        self.layer_stats: Dict[int, Dict[str, int]] = defaultdict(lambda: {"param_count": 0, "total_bytes": 0, "offloaded": False})
+        
+        # 调用父类 __init__，它会触发 _init_model_info
+        super().__init__(model, device, load_stream, offload_stream)
+        
+        # 父类初始化完成后，建立层映射并筛选目标参数
+        self._setup_layerwise_offload()
+    
+    def _is_layer_root_module(self, module_name: str) -> bool:
+        """
+        判断模块名是否对应 Transformer 层根模块（如 model.layers.0）。
+        支持标准命名：model.layers, transformer.h, model.decoder.layers 等。
+        """
+        if module_name in ["", "model", "transformer", "model.transformer"]:
+            return False
+        
+        layer_prefix = [
+            "model.layers",
+            "model.transformer.layers",
+            "transformer.layers",
+            "transformer.h",
+            "model.decoder.layers",
+        ]
+        for prefix in layer_prefix:
+            if module_name.startswith(prefix):
+                last_part = module_name.split(".")[-1]
+                if last_part.isdigit():
+                    return True
+        return False
+    
+    def _get_layer_idx_from_param_name(self, param_name: str) -> int:
+        """
+        从参数全名提取层索引。返回 -1 表示非层参数（embedding, head, norm 等）。
+        e.g., "model.layers.0.self_attn.q_proj.weight" -> 0
+              "model.embed_tokens.weight" -> -1
+        """
+        layer_prefix = [
+            "model.layers",
+            "model.transformer.layers",
+            "transformer.layers",
+            "transformer.h",
+            "model.decoder.layers",
+        ]
+        for prefix in layer_prefix:
+            if prefix in param_name:
+                try:
+                    suffix = param_name.split(prefix + ".", 1)[1]
+                    layer_idx_str = suffix.split(".")[0]
+                    if layer_idx_str.isdigit():
+                        return int(layer_idx_str)
+                except (IndexError, ValueError):
+                    continue
+        return -1
+    
+    def _init_model_info(self):
+        """
+        重写以扩展父类的参数指针映射。父类建立 ptr_to_param 和 param_name_ptr_dict，
+        我们在 _setup_layerwise_offload 中补充层信息。
+        """
+        # 调用父类实现，建立基础的 ptr_to_param 映射
+        super()._init_model_info()
+        # 注意：此时 self.model 已可用，self.ptr_to_param 已建立
+    
+    def _setup_layerwise_offload(self):
+        """
+        建立层到参数的映射，并根据层范围筛选需要卸载的参数指针。
+        仅在 __init__ 中调用一次。
+        """
+        total_offload_size = 0
+        total_offload_count = 0
+        
+        for name, param in self.model.named_parameters():
+            ptr = param.data_ptr()
+            layer_idx = self._get_layer_idx_from_param_name(name)
+            param_bytes = param.numel() * param.element_size()
+            
+            self.ptr_to_layer_idx[ptr] = layer_idx
+            self.layer_stats[layer_idx]["param_count"] += 1
+            self.layer_stats[layer_idx]["total_bytes"] += param_bytes
+            
+            # 决策：是否将该参数加入卸载目标集合
+            should_offload = True
+            
+            # 1. 层范围检查
+            if layer_idx == -1:
+                should_offload = False  # 非层参数（embedding, head, norm）保留
+            elif not (self.offload_start_layer <= layer_idx < self.offload_end_layer):
+                should_offload = False
+            
+            # 2. 大小阈值检查（避免卸载过小参数，通信开销 > 显存收益）
+            if param_bytes < self.offload_threshold:
+                should_offload = False
+            
+            if should_offload:
+                self.offload_target_ptrs.add(ptr)
+                self.layer_stats[layer_idx]["offloaded"] = True
+                total_offload_size += param_bytes
+                total_offload_count += param.numel()
+        
+        print(
+            f"[LayerwiseAsyncOffload] Config: Layers [{self.offload_start_layer}, {self.offload_end_layer}), "
+            f"Threshold {self.offload_threshold/1024**2:.2f} MB"
+        )
+        print(
+            f"[LayerwiseAsyncOffload] Target: {len(self.offload_target_ptrs)} params, "
+            f"{total_offload_count/1e6:.2f}M elements, "
+            f"{total_offload_size/1024**3:.2f} GB"
+        )
+    
+    def _tensor_need_offloading_checker(self, tensor: torch.Tensor) -> bool:
+        """
+        重写父类的卸载检查逻辑。只有满足以下条件的张量才会被 offload：
+        1. 属于模型参数（继承父类检查）
+        2. 在指定的层范围内
+        3. 大于大小阈值
+        """
+        ptr = tensor.data_ptr()
+        
+        # 快速路径：不在目标集合中直接返回 False
+        if ptr not in self.offload_target_ptrs:
+            return False
+        
+        # 调用父类检查（确认是模型参数且满足其他内部条件）
+        return super()._tensor_need_offloading_checker(tensor)
+    
+    def get_layer_offload_summary(self) -> Dict[int, Dict[str, Union[int, bool]]]:
+        """
+        获取每层参数的统计信息，用于调试层范围设置是否正确。
+        
+        Returns:
+            Dict[int, Dict]: 层索引 -> {param_count, total_bytes(MB), offloaded(bool)}
+        """
+        summary = {}
+        for layer_idx, stats in sorted(self.layer_stats.items()):
+            summary[layer_idx] = {
+                "param_count": stats["param_count"],
+                "total_mb": stats["total_bytes"] / 1024**2,
+                "offloaded": stats["offloaded"]
+            }
+        return summary
+    
+    def print_offload_layers(self, verbose: bool = False):
+        """
+        打印被卸载的层范围和非卸载层范围，用于快速验证配置。
+        
+        Args:
+            verbose: 如果为 True，打印每层详细信息
+        """
+        offloaded_layers = []
+        non_offloaded_layers = []
+        
+        for layer_idx in sorted(self.layer_stats.keys()):
+            if self.layer_stats[layer_idx]["offloaded"]:
+                offloaded_layers.append(layer_idx)
+            else:
+                non_offloaded_layers.append(layer_idx)
+        
+        # 压缩连续区间显示
+        def compress_ranges(indices: List[int]) -> str:
+            if not indices:
+                return "None"
+            ranges = []
+            start = prev = indices[0]
+            for curr in indices[1:] + [None]:
+                if curr != prev + 1:
+                    ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+                    start = curr
+                prev = curr
+            return ", ".join(ranges)
+        
+        print(f"[LayerwiseAsyncOffload] Offloaded layers: {compress_ranges(offloaded_layers)}")
+        print(f"[LayerwiseAsyncOffload] GPU-resident layers: {compress_ranges(non_offloaded_layers)}")
+        
+        if verbose:
+            print("\nDetailed layer info:")
+            for layer_idx in sorted(self.layer_stats.keys()):
+                stats = self.layer_stats[layer_idx]
+                status = "OFFLOAD" if stats["offloaded"] else "GPU"
+                print(f"  Layer {layer_idx:3d}: {stats['param_count']:3d} params, "
+                      f"{stats['total_bytes']/1024**2:8.2f} MB [{status}]")
+    
+    def update_param_ptr(self):
+        """
+        重写父类方法：在模型参数指针变化时（如 after backward 清理），
+        需要重建层映射。注意：这会重置 offload_target_ptrs，需谨慎调用。
+        """
+        # 先调用父类更新基础映射
+        super().update_param_ptr()
+        # 重建层映射
+        self._setup_layerwise_offload()
