@@ -52,7 +52,7 @@ def unpack_2bit_tensor(packed: torch.Tensor, q_shape, pad=0):
     if pad:
         q = q[:-pad]
     q = q.reshape(q_shape)
-    return q.float()
+    return q
 
 def pack_4bit_tensor(q: torch.Tensor):
     assert q.dtype == torch.uint8
@@ -82,7 +82,7 @@ def unpack_4bit_tensor(packed: torch.Tensor, q_shape, pad=0):
     q = q.view(-1)
     if pad:
         q = q[:-pad]
-    return q.reshape(q_shape).float()
+    return q.reshape(q_shape)
 
 
 # ==========================================
@@ -106,9 +106,21 @@ class QLoRACommQuantizer(nn.Module):
             raise ValueError(f"Unsupported bit width. Supported widths are: {supported_bits}")
             
         if self.act_bits < 8:
-            self.table = generate_nf_table(self.act_bits)
+            self.register_buffer("table", generate_nf_table(self.act_bits), persistent=False)
         else:
-            self.table = None
+            self.register_buffer("table", None, persistent=False)
+        self._table_cache = {}
+
+    def _get_nf_table(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if self.table is None:
+            raise RuntimeError("NF table is not initialized for 8-bit activation quantization.")
+
+        key = (device.type, device.index, dtype)
+        table = self._table_cache.get(key)
+        if table is None:
+            table = self.table.to(device=device, dtype=dtype, non_blocking=True)
+            self._table_cache[key] = table
+        return table
 
     def compress(self, x: torch.Tensor, mode: str = "activation"):
         assert mode in ["activation", "gradient"], f"Invalid mode: {mode}"
@@ -130,7 +142,8 @@ class QLoRACommQuantizer(nn.Module):
 
             if self.table is not None:
                 x_norm = 2 * (x_blocked - x_min) / (x_max - x_min + 1e-8) - 1
-                dist = torch.abs(x_norm.unsqueeze(-1) - self.table.to(x.device))
+                table = self._get_nf_table(x_norm.device, x_norm.dtype)
+                dist = torch.abs(x_norm.unsqueeze(-1) - table)
                 q_idx = torch.argmin(dist, dim=-1).to(torch.uint8)
             else:
                 # Fallback: 如果前向配置了 8-bit，则使用线性映射
@@ -184,6 +197,7 @@ class QLoRACommQuantizer(nn.Module):
             "s_max": s_max,
             "x_shape": x_shape,
             "original_shape": original_shape,
+            "original_dtype": x.dtype,
             **aux_specific
         }
 
@@ -197,14 +211,14 @@ class QLoRACommQuantizer(nn.Module):
         current_bits = self.act_bits if mode == "activation" else self.grad_bits
         
         if current_bits == 2:
-            q_idx = unpack_2bit_tensor(packed, q_shape, pad).to(packed.device)
+            q_idx = unpack_2bit_tensor(packed, q_shape, pad)
         elif current_bits == 4:
-            q_idx = unpack_4bit_tensor(packed, q_shape, pad).to(packed.device)
+            q_idx = unpack_4bit_tensor(packed, q_shape, pad)
         elif current_bits == 8:
             # ======= [新增 .view(q_shape) 作为安全屏障] =======
             # 这样如果 Server 错误地传来了 4-bit(1D Tensor)，这里会立刻抛出明确的维度报错
             # 而不会进入后续的矩阵乘法导致内存爆炸
-            q_idx = packed.to(packed.device).view(q_shape)
+            q_idx = packed.view(q_shape)
 
         scales_q, s_min, s_max = aux["scales_q"], aux["s_min"], aux["s_max"]
         if scales_q is not None:
@@ -218,7 +232,8 @@ class QLoRACommQuantizer(nn.Module):
         if mode == "activation":
             mins = aux["mins"]
             if self.table is not None:
-                w_block = self.table[q_idx.long()].to(dtype=scales.dtype, device=scales.device)
+                table = self._get_nf_table(q_idx.device, scales.dtype)
+                w_block = table[q_idx.long()]
                 w_block = (w_block + 1) / 2 * scales + mins
             else:
                 # 8-bit fallback
@@ -233,4 +248,7 @@ class QLoRACommQuantizer(nn.Module):
             w_block = x_q * step_size
             
         flatten_x = w_block.view(x_shape)
+        original_dtype = aux.get("original_dtype")
+        if original_dtype is not None and flatten_x.dtype != original_dtype:
+            flatten_x = flatten_x.to(original_dtype)
         return flatten_x.view(original_shape)
