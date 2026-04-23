@@ -12,32 +12,55 @@ from transformers import AutoTokenizer
 
 
 def run_pipeline(
-    rank: int, world_size: int, scheduler: ServerPipelineScheduleSingle, optimizer: torch.optim.Optimizer, mb_num: int, step: int = 5, profile=False
+    rank: int, world_size: int, scheduler: ServerPipelineScheduleSingle, optimizer: torch.optim.Optimizer, mb_num: int, epoch: int = 1, step: int = 5, profile=False
 ):
     stage = scheduler._stage
     # schedule = ServerScheduleGPipe(stage, mb_num)  # don't need loss_fn
     print(f"Rank {rank} start {scheduler.__class__.__name__} training...,num_microbatches={mb_num},is first={stage.is_first},is last={stage.is_last}")
     # Train the model
+    total_steps = epoch * step
     curr_step = 0
+    save_steps = 200
+    
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
-        on_trace_ready=(
-            torch.profiler.tensorboard_trace_handler("./log/trace", worker_name=f"gpipe_ws_{stage.group_size}") if rank == 0 and profile else None
-        ),  # 保存到 TensorBoard
-        # on_trace_ready=None,
+        # on_trace_ready=(
+        #     torch.profiler.tensorboard_trace_handler("./log/trace", worker_name=f"gpipe_ws_{stage.group_size}") if rank == 0 and profile else None
+        # ),  # 保存到 TensorBoard
+        on_trace_ready=None,
         record_shapes=True,
         profile_memory=True,
         with_stack=True,
         with_flops=True,
     ) as prof:
-        while curr_step < step:
+        while curr_step < total_steps:
             if rank == 0:
                 print(f"Server globle step {curr_step} start...")
             scheduler.step()
             optimizer.step()
             optimizer.zero_grad()
             curr_step += 1
+            
+            # ================= [新增：定期保存 Checkpoint] =================
+            # if curr_step % save_steps == 0 or curr_step == step:
+            #     # 注意等待当前 step 的多卡同步完成再保存
+            #     if world_size > 1:
+            #         dist.barrier()
+                    
+            #     ckpt_dir = os.path.join(f"data/save_models/server/trunk_rank_{rank}", f"checkpoint-{curr_step}")
+            #     os.makedirs(ckpt_dir, exist_ok=True)
+                
+            #     if rank == 0:
+            #         print(f"Server saving checkpoint at step {curr_step} to {ckpt_dir}...")
+                
+            #     model_to_save = stage.submod.module if hasattr(stage.submod, "module") else stage.submod
+            #     if hasattr(model_to_save, "save_pretrained"):
+            #         model_to_save.save_pretrained(ckpt_dir)
+            #     else:
+            #         torch.save(model_to_save.state_dict(), os.path.join(ckpt_dir, "pytorch_model.bin"))
+            # ===============================================================
+            
             if profile and rank == 0:
                 print(f"prof step")
                 prof.step()
@@ -52,8 +75,8 @@ def run(rank, world_size, server_args: ServerArgs):
     dist.init_process_group(rank=rank, world_size=world_size)
     model_dir = os.path.join("data/models", server_args.model)
     split_point = server_args.split_point
-    server_args.server_device = f'cuda:{rank}'
-    device = f'cuda:{rank}'
+    server_args.server_device = f'cuda:{rank+4}'
+    device = f'cuda:{rank+4}'
     torch.cuda.set_device(device)
     model_name = server_args.model
     max_seq_len = 512
@@ -78,6 +101,7 @@ def run(rank, world_size, server_args: ServerArgs):
         ),
         mbps_limit=server_args.rate_limit_mbps,
         port=server_args.port,
+        use_qlora_comm=server_args.use_qlora_comm,
     )
     stage._init_p2p_neighbors()  # check connection
     # print(f"Rank {rank} model: {stage.submod}")
@@ -90,7 +114,7 @@ def run(rank, world_size, server_args: ServerArgs):
         scheduler = ServerSchedule1F1B(stage, mb_num)  # don't need loss_fn
     else:
         raise NotImplementedError('other pipeline methods are not implemeneted yet')
-    run_pipeline(rank, world_size, scheduler, optimizer, mb_num, step=server_args.step, profile=server_args.prof)
+    run_pipeline(rank, world_size, scheduler, optimizer, mb_num, epoch=server_args.epoch, step=server_args.step, profile=server_args.prof)
     dist.destroy_process_group()
 
 
@@ -106,7 +130,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-P", "--port", type=int, default=8888, help="Port to listen")
-    parser.add_argument("-S", "--step", type=int, default=5, help="Number of steps to profile")
+    parser.add_argument("-S", "--step", type=int, default=20, help="Number of steps to profile")
+    parser.add_argument("--epoch", type=int, default=1, help="Number of epochs to profile")
     parser.add_argument("-L", "--lora", action="store_true", help="Use LoRA")
     parser.add_argument("-M", "--model", type=str, default="qwen/qwen3-1.7b", help="Model card")
     parser.add_argument("-SP", "--split_point", type=int, default=4)
@@ -121,10 +146,12 @@ if __name__ == "__main__":
     parser.add_argument("--prof", action="store_true")
     # parser.add_argument('--type', type=int, default=0)?
     parser.add_argument('--world_size', '-WS', type=int, default=4)
+    parser.add_argument('--qloracomm','-Q',action='store_true', default=False, help='Whether to use QLoRA compression for communication.')
     args = parser.parse_args()
     server_args = ServerArgs(
         port=args.port,
         step=args.step,
+        epoch=args.epoch,
         use_lora=args.lora,
         model=args.model,
         split_point=args.split_point,
@@ -138,6 +165,7 @@ if __name__ == "__main__":
         world_size=args.world_size,
         micro_batch_size=args.micro_batch_size,
         prof=args.prof,
+        use_qlora_comm=args.qloracomm,
     )
     os.environ['WORLD_SIZE'] = str(args.world_size)
     world_size = int(os.environ['WORLD_SIZE'])

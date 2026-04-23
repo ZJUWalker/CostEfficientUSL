@@ -5,22 +5,23 @@
 # 例如: SPLIT_POINTS=(4 8 16)
 
 SPLIT_POINTS=(4)
-BATCH_SIZES=(4)
-MODEL_NAMES=("qwen/qwen3-8b")
-WORLD_SIZES=(2 3 4)
+BATCH_SIZES=(8)
+MODEL_NAMES=("qwen/qwen3-1.7b")
+WORLD_SIZES=(1)
 
 # Offload 选项可能包含空格，建议用双引号括起来
 # 例如: CLIENT_OFFLOAD_OPTS=("" "-OA" "-OS" "-OA -OS")
-CLIENT_OFFLOAD_OPTS=("") 
-SERVER_OFFLOAD_OPTS=("")
+CLIENT_OFFLOAD_OPTS=("" "-OAM=4" "-OAM=8" "-OAM=4 -OSSP=4" "-OAM=8 -OSSP=4" "-OSSP=2" "-OSSP=3" ) 
+SERVER_OFFLOAD_OPTS=("" "-OAM=4" "-OAM=8")
 
 # ================= 固定参数 =================
 MBPS=230
-STEP=2
+STEP=5
 PMODE=pdwc
 PORT=9000 # 初始端口，如果并行跑可能需要动态调整，但在串行循环中固定即可
-PROFILE='' # '--prof' or ''
+PROFILE='--prof' # '--prof' or ''
 LORA='--lora'
+QUANTIZATION='-Q'
 
 # ================= 主循环逻辑 =================
 
@@ -56,11 +57,11 @@ for MODEL_NAME in "${MODEL_NAMES[@]}"; do
                 --step=$STEP \
                 --port=$PORT \
                 --world_size=$WORLD_SIZE \
-                $PROFILE $LORA $SERVER_OFFLOAD &
+                $PROFILE $LORA $SERVER_OFFLOAD $QUANTIZATION &
             
             SERVER_PID=$!
             echo "Server PID: $SERVER_PID started. Waiting 3s..."
-            sleep 3
+            sleep 5
 
             # 启动 Client (前台运行)
             python experiment/client_run.py \
@@ -73,7 +74,7 @@ for MODEL_NAME in "${MODEL_NAMES[@]}"; do
                 --step=$STEP \
                 --port=$PORT \
                 --server_world_size=$WORLD_SIZE \
-                $LORA $CLIENT_OFFLOAD
+                $LORA $CLIENT_OFFLOAD $QUANTIZATION
 
             # 实验结束后的清理工作
             echo "Client finished. Waiting for Server to exit..."
