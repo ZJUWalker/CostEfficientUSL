@@ -537,6 +537,12 @@ class _ServerPipelineStageBase(ABC):
     # TODO define detailed data
     def send_profile_res(self, appendix: Dict):
         profile_data = self.profile_data
+        # --- 新增代码：排空异步发送队列 ---
+        # 确保在这个点之前提交的所有异步发送任务（包括量化和网络传输）都已完成
+        if self.is_first or self.is_last:
+            flush_future = self._send_executor.submit(lambda: None)
+            flush_future.result()  # 阻塞主线程，直到异步队列清空
+        
         # process time
         if self.is_first:
             # 对第一个stage，由于多线程的发送，可能会导致发送梯度开始发送时间有偏差，这里需要对齐时间戳

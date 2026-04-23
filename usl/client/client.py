@@ -669,7 +669,7 @@ class Client:
                     except Exception as err:
                         print(f"error when save profile data: {err}")
                     finally:
-                        self.stop_event.set()
+                        # self.stop_event.set()
                         break
 
                 assert not data.is_activation, "rank n recv data should be gradient"
@@ -1054,7 +1054,7 @@ class Client:
                         print(f"client finished training and need reduce profile data")
                         # self.activation_to_server_queue.put({"stop": True})
                         break
-        # self.stop_event.set()
+        self.stop_event.set()
         # wait for send/recv to finish
         send_0_future.result()
         send_n_future.result()
