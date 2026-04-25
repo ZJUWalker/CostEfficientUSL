@@ -455,16 +455,16 @@ class LayerwiseAsyncModelParamOffloadHandler(AsyncModelParamOffloadHandler):
                 prev = curr
             return ", ".join(ranges)
         
-        print(f"[LayerwiseAsyncOffload] Offloaded layers: {compress_ranges(offloaded_layers)}")
-        print(f"[LayerwiseAsyncOffload] GPU-resident layers: {compress_ranges(non_offloaded_layers)}")
+        # print(f"[LayerwiseAsyncOffload] Offloaded layers: {compress_ranges(offloaded_layers)}")
+        # print(f"[LayerwiseAsyncOffload] GPU-resident layers: {compress_ranges(non_offloaded_layers)}")
         
-        if verbose:
-            print("\nDetailed layer info:")
-            for layer_idx in sorted(self.layer_stats.keys()):
-                stats = self.layer_stats[layer_idx]
-                status = "OFFLOAD" if stats["offloaded"] else "GPU"
-                print(f"  Layer {layer_idx:3d}: {stats['param_count']:3d} params, "
-                      f"{stats['total_bytes']/1024**2:8.2f} MB [{status}]")
+        # if verbose:
+        #     print("\nDetailed layer info:")
+        #     for layer_idx in sorted(self.layer_stats.keys()):
+        #         stats = self.layer_stats[layer_idx]
+        #         status = "OFFLOAD" if stats["offloaded"] else "GPU"
+        #         print(f"  Layer {layer_idx:3d}: {stats['param_count']:3d} params, "
+        #               f"{stats['total_bytes']/1024**2:8.2f} MB [{status}]")
     
     def update_param_ptr(self):
         """

@@ -320,6 +320,7 @@ class Client:
         
         attn_cpu = attn_gpu.detach().cpu() if attn_gpu is not None else None
         pos_cpu = tuple([t.cpu() for t in pos_gpu]) if pos_gpu is not None else None
+        del act_tensor, attn_gpu, pos_gpu
         
         payload = Payload(
             tensor=act_cpu,
@@ -468,6 +469,7 @@ class Client:
                 self.head_fwd_time += self.profile_data[mb_idx].head_fwd_timestamp[1] - self.profile_data[mb_idx].head_fwd_timestamp[0]
             if mb_idx < self.client_args.offload_activation_mb_num:
                 self.activation_offload_handler.on_minibatch_commit_forward()
+            del head_outs
         return payload
 
     def _tail_fwd_micro(self, server_forward_output: Payload) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -499,6 +501,7 @@ class Client:
         # 可选：按 accum 步数归一化，保证与“单大 batch 一次性训练”的梯度数值一致
         loss = output.loss / mb_total if self.normalize_loss else output.loss
         self.losses.append(loss.item())
+        del output, activation_cpu
         return activation_to_tail, loss
 
     def _tail_bwd_micro(
@@ -526,6 +529,7 @@ class Client:
         self.profile_data[mb_idx].tail_bwd_timestamp[1] = time.time()
         if self.curr_step_idx > 0:
             self.tail_bwd_time += self.profile_data[mb_idx].tail_bwd_timestamp[1] - self.profile_data[mb_idx].tail_bwd_timestamp[0]
+        del activation_to_tail, loss
         return grad_payload
 
     def _head_bwd_micro(self, server_bwd_output: Payload):
@@ -555,6 +559,7 @@ class Client:
         # print(f'do backward for mb idx {mb_idx}')
         if self.curr_step_idx > 0:
             self.head_bwd_time += self.profile_data[mb_idx].head_bwd_timestamp[1] - self.profile_data[mb_idx].head_bwd_timestamp[0]
+        del grad_cpu, grad_to_head, head_activation
         # remove not needed tensors to save memory
         del (
             self.head_fwd_activation_dict[mb_idx],
@@ -669,7 +674,7 @@ class Client:
                     except Exception as err:
                         print(f"error when save profile data: {err}")
                     finally:
-                        self.stop_event.set()
+                        # self.stop_event.set()
                         break
 
                 assert not data.is_activation, "rank n recv data should be gradient"
@@ -970,6 +975,7 @@ class Client:
             micro_inputs = self._split_micro(input_ids, micro_bs)
             micro_masks = self._split_micro(attention_mask, micro_bs)
             micro_labels = self._split_micro(labels_full, micro_bs)
+        del input_ids, attention_mask, labels_full
 
         # 全局的 group_id（server 用它来做整批 step）
         group_id = uuid.uuid4().hex
@@ -1054,7 +1060,7 @@ class Client:
                         print(f"client finished training and need reduce profile data")
                         # self.activation_to_server_queue.put({"stop": True})
                         break
-        # self.stop_event.set()
+        self.stop_event.set()
         # wait for send/recv to finish
         send_0_future.result()
         send_n_future.result()

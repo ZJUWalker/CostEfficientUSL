@@ -105,6 +105,7 @@ class SplitMindClientTrainer(Client):
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
         self.is_head_fwd_done.set(True)
+        del micro_inputs, micro_masks, micro_labels
         # self._check_mem_usage('after head fwd')
         # do offload and reload
         if self.offload_model_state:
@@ -145,6 +146,7 @@ class SplitMindClientTrainer(Client):
                             mb_total=grad_accum_steps,
                         )
                         self.gradient_to_server_queue.put(grad_payload)
+                        del server_activation_payload, activation_to_tail, loss, grad_payload
                 except Empty:
                     pass
             else:
@@ -180,6 +182,7 @@ class SplitMindClientTrainer(Client):
                         mb_idx = server_grad_payload.mb_idx
                         no_head_bwd_mb_list[mb_idx] = True
                         self._head_bwd_micro(server_grad_payload)
+                        del server_grad_payload
                 except Empty:
                     continue
             else:
@@ -228,6 +231,7 @@ class PipeDreamWCEagerClientTrainer(Client):
             payload = self._head_fwd_micro(group_id, mb_idx, grad_accum_steps, micro_inputs[mb_idx], micro_masks[mb_idx], micro_labels[mb_idx])
             self.labels_dict[mb_idx] = micro_labels[mb_idx]
             self.activation_to_server_queue.put(payload)
+        del micro_inputs, micro_masks, micro_labels
         batch_loss = 0
         no_tail_fwd_bwd_mb_list = [False] * grad_accum_steps
         no_head_bwd_mb_list = [False] * grad_accum_steps
@@ -250,6 +254,7 @@ class PipeDreamWCEagerClientTrainer(Client):
                             mb_total=grad_accum_steps,
                         )
                         self.gradient_to_server_queue.put(grad_payload)
+                        del server_activation_payload, activation_to_tail, loss, grad_payload
                 except Empty:
                     pass
 
@@ -260,6 +265,7 @@ class PipeDreamWCEagerClientTrainer(Client):
                         mb_idx = server_grad_payload.mb_idx
                         no_head_bwd_mb_list[mb_idx] = True
                         self._head_bwd_micro(server_grad_payload)
+                        del server_grad_payload
                 except Empty:
                     continue
             else:

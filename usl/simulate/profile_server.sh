@@ -1,9 +1,9 @@
 #!/bin/bash
 
 MBPS=230
-MODEL_NAME=qwen/qwen3-8b #qwen/qwen3-1.7b | meta-llama/llama3.2-1b
+MODEL_NAME=qwen/qwen3-1.7b #qwen/qwen3-1.7b | meta-llama/llama3.2-1b
 LORA="--lora" # --lora
-MAX_SP=18 # 模型的层数//2
+MAX_SP=14 # 模型的层数//2
 BS=8
 SP_LIST=(2 3)
 STEP=5

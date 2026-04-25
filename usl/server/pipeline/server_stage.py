@@ -537,6 +537,12 @@ class _ServerPipelineStageBase(ABC):
     # TODO define detailed data
     def send_profile_res(self, appendix: Dict):
         profile_data = self.profile_data
+        # --- 新增代码：排空异步发送队列 ---
+        # 确保在这个点之前提交的所有异步发送任务（包括量化和网络传输）都已完成
+        if self.is_first or self.is_last:
+            flush_future = self._send_executor.submit(lambda: None)
+            flush_future.result()  # 阻塞主线程，直到异步队列清空
+        
         # process time
         if self.is_first:
             # 对第一个stage，由于多线程的发送，可能会导致发送梯度开始发送时间有偏差，这里需要对齐时间戳
@@ -790,6 +796,7 @@ class _ServerPipelineStageBase(ABC):
             if act_payload.attention_mask is not None:
                 assert act_payload.attention_mask.is_cuda, 'Received attention mask is not on GPU'
             composite_args = (act_payload.tensor, act_payload.attention_mask)
+            del act_payload
         else:
             # Receive activations for this chunk
             # Activations only come in args form
@@ -832,6 +839,7 @@ class _ServerPipelineStageBase(ABC):
             map_debug_info(output),
         )
         self._validate_fwd_outputs(output_tuple)
+        del output_tuple, flat_args, flat_kwargs, flatten_input_tensors
         self.max_cuda_memory_allocated = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated)
         torch.cuda.reset_peak_memory_stats()
         # We return the original user-provied output, not normalized to tuple.
@@ -871,13 +879,12 @@ class _ServerPipelineStageBase(ABC):
             assert bwd_chunk_id == grad_payload.mb_idx, 'Received grad for wrong chunk'
             if grad_payload.tensor.is_cpu:
                 grad_payload.tensor = grad_payload.tensor.to(self.device)
-            # next stage
-            # print(f"Rank {self.group_rank} try to backward for chunk {bwd_chunk_id}")
             bwd_kwargs = {
                 "stage_output": stage_output,
                 "output_grads": (grad_payload.tensor,),
                 "input_values": input_values,
             }
+            del grad_payload
         else:
             # Otherwise, receive gradients from next stage
             grads_output = self._retrieve_recv_grads(bwd_chunk_id)
@@ -890,6 +897,7 @@ class _ServerPipelineStageBase(ABC):
                 "output_grads": grads_output,
                 "input_values": input_values,
             }
+            del grads_output
 
         grads_input: Tuple[Optional[torch.Tensor], ...] = ()
 
@@ -928,6 +936,7 @@ class _ServerPipelineStageBase(ABC):
                 self.dw_runner[bwd_chunk_id] = lambda: None
 
         self.bwd_cache[bwd_chunk_id] = grads_input
+        del bwd_kwargs
 
         if self.is_last and not self.is_first:
             # Autograd dependencies:
@@ -937,6 +946,7 @@ class _ServerPipelineStageBase(ABC):
             # this should be detached to release autograd graph context and free memory earlier
             for t in stage_output:
                 t.detach_()
+        del stage_output, input_values
         self.max_cuda_memory_allocated = max(torch.cuda.max_memory_allocated(self.device), self.max_cuda_memory_allocated)
         torch.cuda.reset_peak_memory_stats()
         logger.debug("%s Backwarded chunk %s", self.log_prefix, bwd_chunk_id)

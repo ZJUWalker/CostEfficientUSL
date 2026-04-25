@@ -1,14 +1,14 @@
 SPLIT_POINT=4
 MBPS=230
 BATCH_SIZE=8
-STEP=5
+STEP=6
 PMODE=pdwc
 MODEL_NAME=qwen/qwen3-1.7b
 PORT=9000
 WORLD_SIZE=1
 PROFILE='' #   '--prof' or '' 
 LORA='--lora' # '--lora' or ''
-CLIENT_OFFLOAD='-OSSP=2' # '--client_offload' or ''
+CLIENT_OFFLOAD='' # '--client_offload' or ''
 SERVER_OFFLOAD='' # '--server_offload' or ''
 QUANTIZTION='' # '-Q' or ''
 

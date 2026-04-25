@@ -24,11 +24,11 @@ def run_pipeline(
     
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-        schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
-        # on_trace_ready=(
-        #     torch.profiler.tensorboard_trace_handler("./log/trace", worker_name=f"gpipe_ws_{stage.group_size}") if rank == 0 and profile else None
-        # ),  # 保存到 TensorBoard
-        on_trace_ready=None,
+        schedule=torch.profiler.schedule(wait=1, warmup=2, active=max(step - 3, 1), repeat=0),  # 前 1 step 不采集  # 预热 1 step  # 采集 2 step
+        on_trace_ready=(
+            torch.profiler.tensorboard_trace_handler("./log/trace", worker_name=f"gpipe_ws_{stage.group_size}") if rank == 0 and profile else None
+        ),  # 保存到 TensorBoard
+        # on_trace_ready=None,
         record_shapes=True,
         profile_memory=True,
         with_stack=True,

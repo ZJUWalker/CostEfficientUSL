@@ -402,12 +402,12 @@ class LayerwiseModelParamOffload(ModelParamOffload):
             
             # 执行内存分配
             if not should_offload:
-                print(f'not offload layer:{name}')
+                # print(f'not offload layer:{name}')
                 # 保留在 GPU：确保数据在 device 上
                 if not param.is_cuda:
                     param.data = param.data.cuda(self.device, non_blocking=True)
             else:
-                print(f'offload layer:{name}')
+                # print(f'offload layer:{name}')
                 # 卸载到 CPU：分配 pinned memory 并拷贝
                 total_offload_params += param.numel()
                 total_offload_bytes += param_bytes

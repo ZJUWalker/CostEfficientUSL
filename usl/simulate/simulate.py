@@ -655,7 +655,7 @@ def parse_arguments():
 
     # Defining the command-line arguments
     # meta-llama/llama3.2-1b qwen/qwen3-1.7b qwen/qwen3-4b qwen/qwen3-8b qwen/qwen3-14b
-    parser.add_argument('--model', type=str, default='qwen/qwen3-8b', help='The model name.')
+    parser.add_argument('--model', type=str, default='qwen/qwen3-1.7b', help='The model name.')
     parser.add_argument('--max_client_mem_gb', type=int, default=48, help='The maximum memory allocation for the client.')
     # parser.add_argument('--max_split_point', '-MSP', type=int, default=7, help='The maximum split point for the model.')
     parser.add_argument('--max_sequence_len', '-L', type=int, default=512, help='The sample nums of dataset')
@@ -696,25 +696,31 @@ if __name__ == "__main__":
     for key, value in time_res.__dict__.items():
         print(key, value)
     all_data = []
-    for sp in [2, 4, 8]:  # 按照模型层数的一半去设
-        for bs in [4, 8]:
-            var = MainVariable(
-                total_sample_count=10000,
-                batch_size=bs,
-                split_point=sp,
-                client_offload_mb_num=bs,
-                server_offload_mb_num=bs,
-                client_offload_model_state_sp_num=sp,
-                lora=lora,
-            )
-            sim_res = simulate(var, time_res, mem_res, save_gantt=True, save_time_res=False)
-            all_data.append(
-                {
-                    'split_point': var.split_point,
-                    'batch_size': var.batch_size,
-                    **sim_res.objective.__dict__,
-                }
-            )
+    for sp in [3,4]:  # 按照模型层数的一半去设
+        for bs in [8]:
+            for coa in [1,2,4,6,8]:
+                for cossp in [1,sp]:
+                    soa=coa
+                    var = MainVariable(
+                        total_sample_count=10000,
+                        batch_size=bs,
+                        split_point=sp,
+                        client_offload_mb_num=soa,
+                        server_offload_mb_num=coa,
+                        client_offload_model_state_sp_num=cossp,
+                        lora=lora,
+                    )
+                    sim_res = simulate(var, time_res, mem_res, save_gantt=False, save_time_res=False)
+                    all_data.append(
+                        {
+                            'sp': var.split_point,
+                            'bs': var.batch_size,
+                            'cossp':cossp,
+                            'coa':coa,
+                            'soa':soa,
+                            **sim_res.objective.__dict__,
+                        }
+                    )
     df = pd.DataFrame(all_data)
     df = (
         df.where(df['client_peak_mem_alloc'] <= max_client_mem_mb * 0.95).sort_values(
