@@ -11,6 +11,124 @@ from usl.simulate import *
 from usl.simulate.profile_separate_nodes import run_profile
 import pandas as pd
 from dataclasses import dataclass
+from usl.simulate.base import RealComparison
+
+
+def _build_profile_filename(main_var: MainVariable, mem_const: MemoryConstant, time_const: TimeConstant) -> str:
+    """根据模拟配置构造对应的profile JSON文件名（不含路径）"""
+    sp = main_var.split_point
+    bs = main_var.batch_size
+    mb = mem_const.micro_batch_size
+    s = mem_const.max_seq_len
+    mbps = int(time_const.rate_mbps)
+    coa = main_var.client_offload_mb_num
+    cos_sp = main_var.client_offload_model_state_sp_num
+    soa = main_var.server_offload_mb_num
+
+    parts = [f"sp_{sp}_b_{bs}_mb_{mb}_s_{s}_ws_1_mbps_{mbps}_pipedream_wc_lora"]
+    if coa > 0:
+        parts.append(f"coa_{coa}")
+    if cos_sp > 0:
+        parts.append(f"cos_{cos_sp}")
+    if soa > 0:
+        parts.append(f"soa_{soa}")
+    return "_".join(parts) + ".json"
+
+
+def _find_real_profile(
+    model_name: str,
+    main_var: MainVariable,
+    mem_const: MemoryConstant,
+    time_const: TimeConstant,
+    profile_base_dir: str = None,
+) -> tuple[dict, str]:
+    """
+    根据模拟配置去log目录查找对应的真实profile结果。
+    
+    返回: (real_data_dict, profile_path) 或 (None, "") 如果未找到
+    """
+    # 推断profile目录
+    if profile_base_dir is None:
+        # 从 model_name 推断，例如 qwen/qwen3-1.7b -> log/profile/qwen/qwen3-1.7b
+        profile_base_dir = os.path.join("log/profile", model_name)
+
+    if not os.path.exists(profile_base_dir):
+        return None, ""
+
+    filename = _build_profile_filename(main_var, mem_const, time_const)
+    filepath = os.path.join(profile_base_dir, filename)
+
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f), filepath
+
+    # 如果没找到精确匹配，尝试用glob模糊匹配（处理可能的命名差异）
+    import glob
+    pattern = os.path.join(profile_base_dir, f"sp_{main_var.split_point}_b_{main_var.batch_size}_*.json")
+    candidates = glob.glob(pattern)
+    # 排除 qloracomm 文件
+    candidates = [c for c in candidates if "qloracomm" not in os.path.basename(c).lower()]
+
+    for cand in candidates:
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # 检查关键字段是否匹配
+            if (
+                data.get("split_point") == main_var.split_point
+                and data.get("batch_size") == main_var.batch_size
+                and data.get("offload_model_state_sp_num") == main_var.client_offload_model_state_sp_num
+                and data.get("client_offload_activation_mb_num") == main_var.client_offload_mb_num
+                and data.get("server_offload_activation_mb_num") == main_var.server_offload_mb_num
+            ):
+                return data, cand
+        except Exception:
+            continue
+
+    return None, ""
+
+
+def _compare_with_real(sim_result: SimulateResult, real_data: dict, profile_path: str):
+    """
+    将模拟结果与真实profile结果对比，填充 sim_result.comparison
+    """
+    sim_obj = sim_result.objective
+
+    real_client_mem = real_data.get("client_max_mem_alloc_mb", 0.0)
+    real_server_mem = real_data.get("server_max_mem_alloc_mb", 0.0)
+    real_batch_time = real_data.get("batch_train_time_ms", 0.0)
+
+    sim_client_mem = round(sim_obj.client_peak_mem_alloc, 4)
+    sim_server_mem = round(sim_obj.server_peak_mem_alloc, 4)
+    sim_batch_time = round(sim_obj.batch_train_time, 4)
+
+    client_err = sim_client_mem - real_client_mem
+    server_err = sim_server_mem - real_server_mem
+    time_err = sim_batch_time - real_batch_time
+
+    client_err_rate = (client_err / real_client_mem * 100) if real_client_mem > 0 else 0
+    server_err_rate = (server_err / real_server_mem * 100) if real_server_mem > 0 else 0
+    time_err_rate = (time_err / real_batch_time * 100) if real_batch_time > 0 else 0
+
+    sim_result.comparison = RealComparison(
+        found=True,
+        profile_path=profile_path,
+        real_client_mem_mb=real_client_mem,
+        real_server_mem_mb=real_server_mem,
+        real_batch_train_time_ms=real_batch_time,
+        sim_client_mem_mb=sim_client_mem,
+        sim_server_mem_mb=sim_server_mem,
+        sim_batch_train_time_ms=sim_batch_time,
+        client_mem_error_mb=round(client_err, 4),
+        server_mem_error_mb=round(server_err, 4),
+        batch_time_error_ms=round(time_err, 4),
+        client_mem_error_rate=round(client_err_rate, 2),
+        server_mem_error_rate=round(server_err_rate, 2),
+        batch_time_error_rate=round(time_err_rate, 2),
+    )
+
+    # 对比结果已存入 sim_result.comparison，不再逐条打印
+    # 调用方可通过 sim_result.comparison 获取完整误差数据
 
 
 def _simulate_train_time(
@@ -459,7 +577,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         + (batch_size - base_mb_num) * split_point * memory_const.mem_increment_per_sp_mb_client
         # 因为模型切分层和batch size增加，激活量引起的显存开销
         - (split_point * (max(0, client_offload_mb_num - 1)) * memory_const.mem_increment_per_sp_mb_client)  # 因激活量卸载，显存开销减少
-        + client_offload_mb_num * memory_const.mem_increment_per_mb_client_if_oa
+        # + client_offload_mb_num * memory_const.mem_increment_per_mb_client_if_oa
         # + (client_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_client_if_oa # 12/5
     )
     if os_offload_sp_num > 0:
@@ -474,7 +592,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
         - (max_split_point - split_point)
         * (max(0, server_offload_mb_num - (2 if main_var.lora else 3)))
         * memory_const.mem_increment_per_sp_mb_server
-        + server_offload_mb_num * memory_const.mem_increment_per_mb_server_if_oa
+        # + server_offload_mb_num * memory_const.mem_increment_per_mb_server_if_oa
         # + (server_offload_mb_num - base_mb_num) * memory_const.mem_increment_per_mb_server_if_oa
     )
 
@@ -517,7 +635,14 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
 
 
 def simulate(
-    main_var: MainVariable, time_const: TimeConstant, mem_const: MemoryConstant, save_gantt: bool = False, save_time_res: bool = False
+    main_var: MainVariable,
+    time_const: TimeConstant,
+    mem_const: MemoryConstant,
+    save_gantt: bool = False,
+    save_time_res: bool = False,
+    compare_with_real: bool = False,
+    profile_base_dir: str = None,
+    model_name: str = None,
 ) -> SimulateResult:
     simulate_mem_result = _simulate_peak_mem_alloc(main_var, mem_const)
     simulate_result = _simulate_train_time(main_var, time_const, mem_const, simulate_mem_result.objective, save_gantt, save_time_res)
@@ -527,6 +652,16 @@ def simulate(
     # simulate_result.objective.server_cost_per_epoch = round(
     #     simulate_result.objective.server_peak_mem_alloc * simulate_result.objective.epoch_train_time / 10**6, 2
     # )
+
+    # 如果启用真实结果对比
+    if compare_with_real and model_name:
+        real_data, profile_path = _find_real_profile(model_name, main_var, mem_const, time_const, profile_base_dir)
+        if real_data is not None:
+            _compare_with_real(simulate_result, real_data, profile_path)
+        else:
+            # 未找到真实profile结果，静默处理（对比数据留空）
+            pass
+
     return simulate_result
 
 
@@ -698,87 +833,49 @@ if __name__ == "__main__":
     all_data = []
     for sp in [3,4]:  # 按照模型层数的一半去设
         for bs in [8]:
-            for coa in [1,2,4,6,8]:
-                for cossp in [1,sp]:
-                    soa=coa
-                    var = MainVariable(
-                        total_sample_count=10000,
-                        batch_size=bs,
-                        split_point=sp,
-                        client_offload_mb_num=soa,
-                        server_offload_mb_num=coa,
-                        client_offload_model_state_sp_num=cossp,
-                        lora=lora,
-                    )
-                    sim_res = simulate(var, time_res, mem_res, save_gantt=False, save_time_res=False)
-                    all_data.append(
-                        {
+            for coa in [0,1,2,4,6,8]:
+                for soa in [0,1,2,4,6,8]:
+                    for cossp in range(0,1):
+                        # soa=coa
+                        var = MainVariable(
+                            total_sample_count=10000,
+                            batch_size=bs,
+                            split_point=sp,
+                            client_offload_mb_num=coa,
+                            server_offload_mb_num=soa,
+                            client_offload_model_state_sp_num=cossp,
+                            lora=lora,
+                        )
+                        sim_res = simulate(
+                            var, time_res, mem_res,
+                            save_gantt=False, save_time_res=False,
+                            compare_with_real=True,
+                            model_name=model_name,
+                        )
+                        row = {
                             'sp': var.split_point,
                             'bs': var.batch_size,
-                            'cossp':cossp,
-                            'coa':coa,
-                            'soa':soa,
+                            'cossp': cossp,
+                            'coa': coa,
+                            'soa': soa,
                             **sim_res.objective.__dict__,
                         }
-                    )
+                        # 如果有真实对比结果，也加入DataFrame
+                        comp = sim_res.comparison
+                        if comp.found:
+                            row.update({
+                                'client_mem_err':comp.client_mem_error_mb,
+                                'server_mem_err':comp.server_mem_error_mb,
+                                'client_mem_err_rate': comp.client_mem_error_rate,
+                                'server_mem_err_rate': comp.server_mem_error_rate,
+                                'batch_time_err_rate': comp.batch_time_error_rate,
+                            })
+                            all_data.append(row)
     df = pd.DataFrame(all_data)
     df = (
         df.where(df['client_peak_mem_alloc'] <= max_client_mem_mb * 0.95).sort_values(
             by=['client_peak_mem_alloc', 'server_cost_per_epoch'], ascending=[False, True]
         )
-    ).round(2)
+    ).sort_index(axis=0).round(2)
     df.to_csv(f'tmp_{model_name.split("/")[-1]}.csv', index=False)
-    # print(time_res)
-    # do_optimize(model_name, dataset_size, max_split_point, max_batch_size, time_res, mem_res, max_client_mem_mb, lora)
-    # do
-    # real_data = pd.read_csv(f'log/extracted_optim/{model_name.split("/")[-1]}{f'_lora' if lora else '' }.csv')
-    # # all_data = []
-    # sim_client_mem = []
-    # sim_server_mem = []
-    # sim_batch_time = []
-    # '''
-    # batch_size,split_point,offload_mb_num,offload_ms_sp_num,client_mem,server_mem,batch_time
-    # 8,1,8,1,7589.69,36199.55,7706.2
-    # 16,1,16,1,7857.76,36339.55,14582.88
-    # 24,1,24,1,8125.82,36479.55,21728.18
-    # '''
-    # for bs, sp, oam, osr in zip(
-    #     real_data['batch_size'].values, real_data['split_point'].values, real_data['offload_mb_num'].values, real_data['offload_ms_sp_num'].values
-    # ):
-    #     # for bs in real_data['batch_size'].values:
-    #     #     for sp in real_data['split_point'].values:
-    #     #         # osr = sp
-    #     #         # oam = bs
-    #     #         for oam in real_data['offload_mb_num'].values:
-    #     #             for osr in real_data['offload_ms_sp_num'].values:
-    #     var = MainVariable(
-    #         total_batch_num=1000,
-    #         batch_size=bs,
-    #         split_point=sp,
-    #         client_offload_mb_num=oam,
-    #         server_offload_mb_num=oam,
-    #         client_offload_model_state_sp_num=osr,
-    #         lora=lora,
-    #     )
-    #     sim_res = simulate(var, time_res, mem_res, save_gantt=False)
-    #     sim_client_mem.append(sim_res.objective.client_peak_mem_alloc)
-    #     sim_server_mem.append(sim_res.objective.server_peak_mem_alloc)
-    #     sim_batch_time.append(sim_res.objective.batch_train_time)
-    #     # all_data.append(
-    #     #     {
-    #     #         'batch_size': var.batch_size,
-    #     #         'split_point': var.split_point,
-    #     #         'offload_mb_num': var.client_offload_mb_num,
-    #     #         'offload_ms_sp_num': var.client_offload_model_state_sp_num,
-    #     #         'client_mem': round(sim_res.objective.client_peak_mem_alloc, 2),
-    #     #         'server_mem': round(sim_res.objective.server_peak_mem_alloc, 2),
-    #     #         'batch_time': round(sim_res.objective.batch_train_time, 2),
-    #     #     }
-    #     # )
-    # # print(round(sim_res.objective.server_peak_mem_alloc, 2))
-    # real_data['sim_client_mem'] = sim_client_mem
-    # real_data['sim_server_mem'] = sim_server_mem
-    # real_data['sim_batch_time'] = sim_batch_time
-    # df = pd.DataFrame(real_data)
-    # df = df.round(2)
-    # df.to_csv(f'log/simulate_results_{model_name.split("/")[-1]}{'_lora' if lora else ''}.csv', index=False)
+    print(f"\n结果已保存: tmp_{model_name.split('/')[-1]}.csv")

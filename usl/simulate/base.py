@@ -112,6 +112,27 @@ class Objective:
 
 
 @dataclass
+class RealComparison:
+    """
+    模拟结果与真实profile结果的对比数据
+    """
+    found: bool = False
+    profile_path: str = ""
+    real_client_mem_mb: float = 0.0
+    real_server_mem_mb: float = 0.0
+    real_batch_train_time_ms: float = 0.0
+    sim_client_mem_mb: float = 0.0
+    sim_server_mem_mb: float = 0.0
+    sim_batch_train_time_ms: float = 0.0
+    client_mem_error_mb: float = 0.0
+    server_mem_error_mb: float = 0.0
+    batch_time_error_ms: float = 0.0
+    client_mem_error_rate: float = 0.0
+    server_mem_error_rate: float = 0.0
+    batch_time_error_rate: float = 0.0
+
+
+@dataclass
 class SimulateResult:
     """
     SimulateResult contains the result of the simulation.
@@ -122,6 +143,7 @@ class SimulateResult:
     time_const: TimeConstant = field(default_factory=lambda: TimeConstant())
     memory_const: MemoryConstant = field(default_factory=lambda: MemoryConstant())
     objective: Objective = field(default_factory=lambda: Objective())
+    comparison: RealComparison = field(default_factory=lambda: RealComparison())
 
     def to_dict(self):
         return {
