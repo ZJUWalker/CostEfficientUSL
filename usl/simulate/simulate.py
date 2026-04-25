@@ -598,7 +598,7 @@ def _simulate_peak_mem_alloc(main_var: MainVariable, memory_const: MemoryConstan
 
     # calculate min_gpu_num_required and mem_alloc_per_gpu
     safe_factor = 0.95  # 安全系数，防止超配
-    for i in range(1, 9):
+    for i in range(1, 30):
         min_gpu_num_required = i
         # add nccl buffer
         server_peak_mem_alloc_tmp = server_peak_mem_alloc + (
@@ -722,7 +722,9 @@ def do_optimize(
     EPS_TIME_RATIO = 0.005
     # 遍历所有可能的配置
     time_start = time.time()
+    # --------modify batch size----------------
     for bs in range(8, max_batch_size + 1, 2):
+        # for bs in [8]:
         print(f'searching batch size {bs},time stacked: {time.time() - time_start:.4f}s')
         skip_curr_bs = False
         for sp in range(1, max_split_point + 1):
@@ -874,7 +876,7 @@ if __name__ == "__main__":
     df = pd.DataFrame(all_data)
     df = (
         df.where(df['client_peak_mem_alloc'] <= max_client_mem_mb * 0.95).sort_values(
-            by=['client_peak_mem_alloc', 'server_cost_per_epoch'], ascending=[False, True]
+            by=['server_cost_per_epoch', 'client_peak_mem_alloc'], ascending=[True, False]
         )
     ).sort_index(axis=0).round(2)
     df.to_csv(f'tmp_{model_name.split("/")[-1]}.csv', index=False)
