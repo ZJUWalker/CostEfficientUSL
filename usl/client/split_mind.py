@@ -42,7 +42,8 @@ class SplitMindClientTrainer(Client):
                 if self.is_head_fwd_done.get() and self.activation_to_server_queue.empty():
                     time.sleep(0.001)
                     continue
-                payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
+                send_item = self.activation_to_server_queue.get(timeout=0.001)
+                payload: Optional[Payload | Dict] = self._materialize_send_item(send_item)
                 if payload is not None:  # 可能是 None（队列空）
                     start_send = time.time()
                     self.communicator_rank_0.send(payload)
@@ -74,7 +75,8 @@ class SplitMindClientTrainer(Client):
                 time.sleep(0.001)
                 continue
             try:
-                payload = self.gradient_to_server_queue.get(timeout=0.001)
+                send_item = self.gradient_to_server_queue.get(timeout=0.001)
+                payload = self._materialize_send_item(send_item)
                 # print(f'rank n send payload: {payload.mb_idx}, {payload.is_activation}')
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')

@@ -29,7 +29,7 @@ from usl.offload import (
     HybridOffloadContext,
 )
 from usl.server.single_server import PipelineMode
-from usl.socket import SocketCommunicator, Payload
+from usl.socket import SocketCommunicator, Payload, StagedPayload, stage_payload_for_transfer
 from usl.utils.usl_gantt_plot import GanttChartData, save_gantt_chart_data, plot_gantt_per_batch, plot_grouped_gantt
 from usl.utils.tensor_utils import pad_inputs
 from transformers import PreTrainedModel
@@ -178,6 +178,7 @@ class Client:
         torch.cuda.set_stream(torch.cuda.Stream(self.client_device))  # set cuda compute stream
         self.load_stream = torch.cuda.Stream(self.client_device)  # set cuda load stream
         self.offload_stream = torch.cuda.Stream(self.client_device)  # set cuda offload stream
+        self.comm_stream = torch.cuda.Stream(self.client_device)  # set cuda comm staging stream
 
         # ----Parameter Efficient Offloading
         if self.client_args.offload_model_state:
@@ -248,9 +249,9 @@ class Client:
             self.quantizer = QLoRACommQuantizer(activation_bits=4, gradient_bits=8, block_size=64, use_double_quant=True)
 
         # ---- Queues and Locks(compute pipeline)
-        self.activation_to_server_queue: Queue[Payload] = Queue()  # used for serve fwd
+        self.activation_to_server_queue: Queue[Any] = Queue()  # used for serve fwd
         self.activation_from_server_queue: Queue[Payload] = Queue()  # used for tail fwd
-        self.gradient_to_server_queue: Queue[Payload] = Queue()  # used for server bwd
+        self.gradient_to_server_queue: Queue[Any] = Queue()  # used for server bwd
         self.gradient_from_server_queue: Queue[Payload] = Queue()  # used for head bwd
 
         # -----Other args used to save tensors
@@ -281,6 +282,23 @@ class Client:
     def _check_mem_usage(self, info: str = "") -> None:
         return _check_mem_usage(info, self.client_device)
 
+    def _get_socket_copy_wait_event(self, mb_idx: int, is_activation: bool) -> Optional[torch.cuda.Event]:
+        if not is_activation or self.client_args.offload_activation_mb_num <= 0 or mb_idx <= 0:
+            return None
+
+        prev_mb_idx = mb_idx - 1
+        if prev_mb_idx >= self.client_args.offload_activation_mb_num:
+            return None
+
+        return self.activation_offload_handler.d2h_finish_events[prev_mb_idx]
+
+    def _materialize_send_item(self, item: Any) -> Any:
+        if isinstance(item, StagedPayload):
+            if item.ready_event is not None:
+                item.ready_event.synchronize()
+            return item.payload
+        return item
+
     @torch.no_grad()
     def _to_cpu_payload(
         self,
@@ -292,7 +310,7 @@ class Client:
         mb_total: int,
         is_activation: bool,  # activation or gradient
         phase: str = "FWD",  # 'FWD' or 'BWD'
-    ) -> Dict:
+    ) -> StagedPayload:
         # save essential tensors to dict for tail and bwd phase to use
         attn_gpu = output[1] if (len(output) > 1 and output[1] is not None) else None
         if attn_gpu is not None:
@@ -310,22 +328,17 @@ class Client:
         if self.client_args.use_qlora_comm:
             compress_mode = "activation" if is_activation else "gradient"
             payload_data, aux_data = self.quantizer.compress(act_tensor, mode=compress_mode)
-            # 立即将字典内的 tensor 全部 offload 到 CPU，防止 socket 发送阻塞 GPU
-            act_cpu = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in payload_data.items()}
-            aux_cpu = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in aux_data.items()}
+            act_to_send = payload_data
+            aux_to_send = aux_data
             is_compressed = True
         else:
-            act_cpu = act_tensor.clone().detach().cpu()
-            aux_cpu = None
+            act_to_send = act_tensor
+            aux_to_send = None
             is_compressed = False
-        
-        attn_cpu = attn_gpu.detach().cpu() if attn_gpu is not None else None
-        pos_cpu = tuple([t.cpu() for t in pos_gpu]) if pos_gpu is not None else None
-        del act_tensor, attn_gpu, pos_gpu
-        
+
         payload = Payload(
-            tensor=act_cpu,
-            aux=aux_cpu,
+            tensor=act_to_send,
+            aux=aux_to_send,
             is_compressed=is_compressed,
             is_activation=is_activation,
             phase=phase,
@@ -334,10 +347,13 @@ class Client:
             group_id=group_id,
             mb_idx=mb_idx,
             mb_total=mb_total,
-            attention_mask=attn_cpu,
-            position_embeddings=pos_cpu,
+            attention_mask=attn_gpu,
+            position_embeddings=pos_gpu,
         )
-        return payload
+        wait_event = self._get_socket_copy_wait_event(mb_idx, is_activation)
+        staged_payload = stage_payload_for_transfer(payload, copy_stream=self.comm_stream, wait_event=wait_event)
+        del act_tensor, attn_gpu, pos_gpu, payload
+        return staged_payload
 
     def _split_micro(self, tensor: torch.Tensor, micro_bs: int) -> List[torch.Tensor]:
         # 假设 dim=0 为 batch 维
@@ -581,7 +597,8 @@ class Client:
         self._check_comm(self.communicator_rank_0)
         while not self.stop_event.is_set():
             try:
-                payload: Optional[Payload | Dict] = self.activation_to_server_queue.get(timeout=0.001)
+                send_item = self.activation_to_server_queue.get(timeout=0.001)
+                payload: Optional[Payload | Dict] = self._materialize_send_item(send_item)
                 if payload is not None:  # 可能是 None（队列空）
                     start_send = time.time()
                     self.communicator_rank_0.send(payload)
@@ -620,7 +637,8 @@ class Client:
                     if not self.activation_to_server_queue.empty():
                         time.sleep(0.001)  # 发送给服务器的等待队列中有数据，避免频繁发送
                         continue
-                payload = self.gradient_to_server_queue.get(timeout=0.001)
+                send_item = self.gradient_to_server_queue.get(timeout=0.001)
+                payload = self._materialize_send_item(send_item)
                 # print(f'rank n send payload: {payload.mb_idx}, {payload.is_activation}')
                 if payload is not None:  # 可能是 None（队列空）
                     # print(f'send gradient payload')

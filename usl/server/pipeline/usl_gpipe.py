@@ -49,6 +49,7 @@ class ServerScheduleGPipe(ServerPipelineScheduleSingle):
                 offload_stream=self.offload_stream,
             )
             self.activation_offload_ctx = CpuOffloadHookWithOffloadHandler(self.activation_offload_handler)
+            self._stage.activation_offload_handler = self.activation_offload_handler
 
     @property
     def offload_activation(self):

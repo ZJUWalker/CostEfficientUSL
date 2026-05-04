@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from typing import Any, Tuple, Literal, Dict, Optional, Union
 import torch
 
@@ -107,3 +108,62 @@ class Payload:
         self.position_embeddings = _pin(self.position_embeddings)
         
         return self
+
+
+@dataclass
+class StagedPayload:
+    payload: Payload
+    ready_event: Optional[torch.cuda.Event] = None
+    hold_refs: Tuple[Any, ...] = field(default_factory=tuple)
+
+
+def _stage_obj_to_cpu(obj: Any, hold_refs: list[Any]) -> Any:
+    if isinstance(obj, torch.Tensor):
+        tensor = obj.detach()
+        if tensor.is_cuda:
+            cpu_tensor = torch.empty_like(tensor, device="cpu", pin_memory=True)
+            cpu_tensor.copy_(tensor, non_blocking=True)
+            hold_refs.append(tensor)
+            return cpu_tensor
+        return tensor
+    if isinstance(obj, dict):
+        return {k: _stage_obj_to_cpu(v, hold_refs) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_stage_obj_to_cpu(v, hold_refs) for v in obj)
+    return obj
+
+
+def stage_payload_for_transfer(
+    payload: Payload,
+    *,
+    copy_stream: Optional[torch.cuda.Stream] = None,
+    wait_event: Optional[torch.cuda.Event] = None,
+) -> StagedPayload:
+    hold_refs: list[Any] = []
+    active_stream = copy_stream
+    copy_ctx = torch.cuda.stream(active_stream) if active_stream is not None else nullcontext()
+
+    with copy_ctx:
+        if wait_event is not None and active_stream is not None:
+            active_stream.wait_event(wait_event)
+
+        staged_payload = Payload(
+            tensor=_stage_obj_to_cpu(payload.tensor, hold_refs),
+            aux=_stage_obj_to_cpu(payload.aux, hold_refs) if payload.aux is not None else None,
+            is_compressed=payload.is_compressed,
+            is_activation=payload.is_activation,
+            phase=payload.phase,
+            token=payload.token,
+            group_id=payload.group_id,
+            mb_idx=payload.mb_idx,
+            mb_total=payload.mb_total,
+            attention_mask=_stage_obj_to_cpu(payload.attention_mask, hold_refs),
+            position_embeddings=_stage_obj_to_cpu(payload.position_embeddings, hold_refs),
+        )
+
+        ready_event = None
+        if hold_refs and active_stream is not None:
+            ready_event = torch.cuda.Event()
+            active_stream.record_event(ready_event)
+
+    return StagedPayload(payload=staged_payload, ready_event=ready_event, hold_refs=tuple(hold_refs))

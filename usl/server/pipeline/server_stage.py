@@ -24,7 +24,7 @@ from torch.distributed.pipelining._backward import stage_backward, stage_backwar
 from torch.distributed.pipelining._debug import map_debug_info
 from torch.distributed.pipelining._utils import flatten_args, PipeInfo, validate_tensors_metadata
 from torch.distributed.pipelining.stage import _RecvInfo, _RootArgPlaceholder, InputInfo, _make_tensor_from_meta, _normalize_model_output_as_tuple
-from usl.socket import SocketCommunicator, Payload
+from usl.socket import SocketCommunicator, Payload, StagedPayload, stage_payload_for_transfer
 from usl.utils.usl_gantt_plot import GanttChartData
 from typing_extensions import deprecated
 
@@ -142,9 +142,11 @@ class _ServerPipelineStageBase(ABC):
             self.grad_from_client: Queue[Payload] = Queue()
         self._send_executor = ThreadPoolExecutor(max_workers=1)
         self._recv_executor = ThreadPoolExecutor(max_workers=1)
+        self.comm_stream = torch.cuda.Stream(self.device)
         # ----- Profile and Metrics ----
         self.profile_data: List[GanttChartData] = None  # init along with self.chunks later
         self.max_cuda_memory_allocated = 0
+        self.activation_offload_handler = None
 
         self.use_qlora_comm = use_qlora_comm
         if self.use_qlora_comm and (self.is_first or self.is_last):
@@ -473,6 +475,23 @@ class _ServerPipelineStageBase(ABC):
         grads = self._map_tensor_from_recv_info(recv_infos)
         return grads
 
+    def _get_socket_copy_wait_event(self, mb_idx: int, is_activation: bool) -> Optional[torch.cuda.Event]:
+        handler = getattr(self, "activation_offload_handler", None)
+        if handler is None:
+            return None
+
+        if self.is_last and is_activation and mb_idx < handler.num_minibatch:
+            return handler.d2h_finish_events[mb_idx]
+
+        return None
+
+    def _materialize_send_item(self, item: StagedPayload | Payload) -> Payload:
+        if isinstance(item, StagedPayload):
+            if item.ready_event is not None:
+                item.ready_event.synchronize()
+            return item.payload
+        return item
+
     @torch.no_grad()
     def _send_socket_msg(self, is_activation: bool, mb_idx: int, tensor: torch.Tensor, async_op=False) -> Optional[Future]:
         """
@@ -491,19 +510,18 @@ class _ServerPipelineStageBase(ABC):
         if should_compress:
             compress_mode = "activation" if is_activation else "gradient"
             payload_data, aux_data = self.quantizer.compress(tensor, mode=compress_mode)
-            # 立即卸载到 CPU 防止阻塞 GPU 流水线
-            cpu_tensor = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in payload_data.items()}
-            aux_cpu = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in aux_data.items()}
+            tensor_to_send = payload_data
+            aux_to_send = aux_data
             is_compressed = True
         else:
-            cpu_tensor = tensor.cpu().pin_memory() if tensor.is_cuda else tensor
-            aux_cpu = None
+            tensor_to_send = tensor
+            aux_to_send = None
             is_compressed = False
         
         # send CPU payload to client
         payload = Payload(
-            tensor=cpu_tensor,
-            aux=aux_cpu, 
+            tensor=tensor_to_send,
+            aux=aux_to_send, 
             is_compressed=is_compressed,
             is_activation=is_activation,
             phase='FWD' if is_activation else 'BWD',
@@ -513,8 +531,11 @@ class _ServerPipelineStageBase(ABC):
             position_embeddings=None,
             # TODO solve token and group_id in Payload
         )
+        wait_event = self._get_socket_copy_wait_event(mb_idx, is_activation)
+        staged_payload = stage_payload_for_transfer(payload, copy_stream=self.comm_stream, wait_event=wait_event)
 
-        def send_payload(payload: Payload):
+        def send_payload(item: StagedPayload):
+            payload = self._materialize_send_item(item)
             if payload.is_activation:
                 self.communicator_rank_n.send(payload)
             else:
@@ -528,10 +549,10 @@ class _ServerPipelineStageBase(ABC):
                 self.profile_data[mb_idx].server_bwd_send_timestamp[1] = end_time
 
         if async_op:
-            fut = self._send_executor.submit(send_payload, payload)
+            fut = self._send_executor.submit(send_payload, staged_payload)
             return fut
         else:
-            send_payload(payload)
+            send_payload(staged_payload)
         pass
 
     # TODO define detailed data
