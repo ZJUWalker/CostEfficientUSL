@@ -1,0 +1,10 @@
+base: ../defaults.yaml
+run: {name: qwen3-1.7b}
+model:
+  path: data/models/qwen/qwen3-1.7b
+  architecture: qwen3
+  num_hidden_layers: 28
+  hidden_size: 2048
+  vocab_size: 151936
+  lora: {enabled: true}
+split: {split_point: 4}

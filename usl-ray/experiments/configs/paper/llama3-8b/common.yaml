@@ -1,0 +1,10 @@
+base: ../../defaults.yaml
+run: {name: llama3-8b}
+model:
+  path: data/models/meta-llama/Meta-Llama-3-8B
+  architecture: llama
+  num_hidden_layers: 32
+  hidden_size: 4096
+  vocab_size: 128256
+  lora: {enabled: true}
+split: {split_point: 4}

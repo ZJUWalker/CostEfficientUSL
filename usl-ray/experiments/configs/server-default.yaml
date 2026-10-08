@@ -1,0 +1,5 @@
+server:
+  world_size: 1
+  backend: nccl
+  activation_offload_mb: 0
+  wait_client_s: 600

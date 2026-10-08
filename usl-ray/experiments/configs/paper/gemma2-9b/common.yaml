@@ -1,0 +1,10 @@
+base: ../../defaults.yaml
+run: {name: gemma2-9b}
+model:
+  path: data/models/google/gemma-2-9b
+  architecture: gemma2
+  num_hidden_layers: 42
+  hidden_size: 3584
+  vocab_size: 256000
+  lora: {enabled: true}
+split: {split_point: 4}

@@ -1,0 +1,3 @@
+base: [common.yaml, ../server-default.yaml]
+server:
+  world_size: 2

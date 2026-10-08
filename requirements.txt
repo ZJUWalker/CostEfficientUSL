@@ -1,17 +1,20 @@
-accelerate==1.10.1
-aiohttp==3.12.15
-huggingface-hub==0.35.0
-matplotlib==3.10.6
-ninja==1.13.0
-numpy==2.3.3
-pandas==2.3.2
-peft==0.14.0
-pillow==11.3.0
-pyarrow==21.0.0
-safetensors==0.6.2
-setuptools==78.1.1
-tokenizers==0.21.4
-torch==2.6.0
-transformers==4.51.1
-datasets==3.2.0
-trl==0.15.0
+# Runtime dependencies for usl-ray. The legacy usl package is not guaranteed
+# to remain compatible with these versions.
+accelerate==1.14.0
+datasets==4.0.0
+huggingface-hub==1.3.7
+matplotlib==3.10.8
+numpy==2.3.5
+packaging==24.2
+pandas==2.3.3
+peft==0.20.0
+psutil==6.0.0
+protobuf==3.20.3
+pyarrow==17.0.0
+PyYAML==6.0.3
+ray==2.58.0
+safetensors==0.8.0
+setuptools==75.8.2
+tokenizers==0.22.2
+torch==2.9.1
+transformers==5.0.0

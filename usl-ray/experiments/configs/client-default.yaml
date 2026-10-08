@@ -1,0 +1,12 @@
+client:
+  data:
+    dataset: synthetic
+    path: ""
+    sample_count: 10000
+    shrink_frac: 1.0
+    sort: none
+    loss_on: all
+    shuffle: false
+  activation_offload_mb: 0
+  model_state_offload_layers: 0
+  wait_server_s: 600

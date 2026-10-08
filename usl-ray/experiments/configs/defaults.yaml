@@ -1,0 +1,45 @@
+run:
+  name: default
+  output_dir: runs
+  seed: 0
+model:
+  path: ""
+  init: pretrained
+  architecture: qwen3
+  num_hidden_layers: 0
+  hidden_size: 0
+  vocab_size: 0
+  dtype: float32
+  attn_implementation: sdpa
+  lora:
+    enabled: false
+    r: 8
+    alpha: 32
+    dropout: 0.1
+    target_modules: [q_proj, k_proj, v_proj]
+split:
+  split_point: 2
+batch:
+  batch_size: 8
+  micro_batch_size: 1
+  max_seq_len: 512
+  mask_kind: causal
+  padding_side: right
+  position_kind: arange
+train:
+  steps: 20
+  epochs: 1
+  learning_rate: 0.0005
+  max_grad_norm: 0.5
+pipeline:
+  mode: splitmind
+network:
+  mbps: 230
+  delay_ms: 10
+  compression: none
+  timeout_s: 600
+profile:
+  enabled: true
+  warmup_steps: 1
+  probe_link: false
+  torch_profiler: false

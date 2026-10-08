@@ -1,0 +1,14 @@
+base: ../defaults.yaml
+run: {name: smoke-qwen3-0.6b}
+model:
+  path: experiments/configs/smoke-qwen3-0.6b/model
+  init: random
+  architecture: qwen3
+  num_hidden_layers: 28
+  hidden_size: 1024
+  vocab_size: 151936
+  dtype: bfloat16
+split: {split_point: 1}
+batch: {batch_size: 2, micro_batch_size: 1, max_seq_len: 32}
+train: {steps: 3}
+profile: {warmup_steps: 1}
