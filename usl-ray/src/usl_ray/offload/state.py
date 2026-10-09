@@ -49,7 +49,10 @@ class ModelStateSwapper:
         selected_layers = sorted(groups)[:layer_count]
         excluded = excluded_parameter_ids or set()
         self.parameters = [
-            parameter for layer in selected_layers for parameter in groups[layer] if id(parameter) not in excluded
+            parameter
+            for layer in selected_layers
+            for parameter in groups[layer]
+            if id(parameter) not in excluded
         ]
         self.optimizer = optimizer
         self.device = device

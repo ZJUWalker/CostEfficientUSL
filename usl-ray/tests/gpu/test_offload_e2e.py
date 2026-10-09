@@ -73,6 +73,8 @@ def test_activation_offload_preserves_gradients() -> None:
     offloader = AsyncActivationOffloader(torch.device("cuda"))
     with offloader.context(offload_activations=True):
         actual(actual_input, sequence).square().mean().backward()
+    offloader.flush()
+    assert offloader.pending_count == 0
     offloader.close()
     for actual_parameter, expected_parameter in zip(actual.parameters(), reference.parameters(), strict=True):
         torch.testing.assert_close(actual_parameter.grad, expected_parameter.grad, atol=1e-5, rtol=1e-5)

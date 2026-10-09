@@ -339,11 +339,7 @@ class ClientActor:
         torch.manual_seed(self.config.run.seed)
         head, tail = load_client_partitions(self.config)
         self.head, self.tail = head, tail
-        tokenizer = (
-            None
-            if self.config.client is None or self.config.client.data.dataset == "synthetic"
-            else load_tokenizer(self.config)
-        )
+        tokenizer = None if self.config.client is None or self.config.client.data.dataset == "synthetic" else load_tokenizer(self.config)
         loader = create_dataloader(self.config, tokenizer)
         if not self._configured.wait(timeout=self.config.client.wait_server_s):
             raise TimeoutError("Client timed out waiting for server handshake")

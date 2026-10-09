@@ -299,13 +299,7 @@ class StageActor:
     def run(self) -> StageResult:
         """Run exactly the configured global steps and then release resources."""
         server = self.config.server
-        if (
-            server is None
-            or self.stage is None
-            or self.schedule is None
-            or self.optimizer is None
-            or self.outbox is None
-        ):
+        if server is None or self.stage is None or self.schedule is None or self.optimizer is None or self.outbox is None:
             raise RuntimeError("StageActor.setup must complete before run")
         if not self._attached.wait(timeout=server.wait_client_s):
             raise TimeoutError(f"Stage {self.rank} timed out waiting for client attach")
@@ -315,9 +309,7 @@ class StageActor:
                 self.stage.current_step = step
                 specs = self._step_future(step).result(timeout=self.config.network.timeout_s)
                 if len(specs) != self.config.batch.num_microbatches:
-                    raise ValueError(
-                        f"Step {step} expected {self.config.batch.num_microbatches} specs, got {len(specs)}"
-                    )
+                    raise ValueError(f"Step {step} expected {self.config.batch.num_microbatches} specs, got {len(specs)}")
                 args: list[tuple[torch.Tensor, ...]]
                 if self.rank == 0:
                     args = ClientInputs(len(specs), self._receive_activation, self._send_gradient)
@@ -334,7 +326,9 @@ class StageActor:
                 self.outbox.flush()
                 with self._step_lock:
                     self._step_specs.pop(step, None)
-            max_memory = torch.cuda.max_memory_allocated(self.device) / 1024**2 if self.device.type == "cuda" else 0.0
+            max_memory = (
+                torch.cuda.max_memory_allocated(self.device) / 1024**2 if self.device.type == "cuda" else 0.0
+            )
             return StageResult(self.rank, max_memory, self.recorder.timelines())
         except BaseException as error:
             if self.client is not None:

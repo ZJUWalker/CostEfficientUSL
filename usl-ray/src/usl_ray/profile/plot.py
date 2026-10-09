@@ -10,7 +10,12 @@ import matplotlib.pyplot as plt
 from usl_ray.profile.timeline import StepTimeline, timeline_from_dict
 
 
-def plot_timelines(timelines: tuple[StepTimeline, ...], destination: str | Path) -> Path:
+def plot_timelines(
+    timelines: tuple[StepTimeline, ...],
+    destination: str | Path,
+    *,
+    title: str | None = None,
+) -> Path:
     """Write a compact lane-oriented Gantt chart."""
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,6 +38,8 @@ def plot_timelines(timelines: tuple[StepTimeline, ...], destination: str | Path)
             )
     axis.set_yticks(range(len(lanes)), lanes)
     axis.set_xlabel("Time (ms)")
+    if title:
+        axis.set_title(title)
     handles, labels = axis.get_legend_handles_labels()
     unique = dict(zip(labels, handles, strict=False))
     if unique:
@@ -43,9 +50,30 @@ def plot_timelines(timelines: tuple[StepTimeline, ...], destination: str | Path)
     return path
 
 
-def plot_profile(profile_path: str | Path, destination: str | Path | None = None) -> Path:
-    """Load profile JSON and render its timelines."""
+def plot_profile(
+    profile_path: str | Path,
+    destination: str | Path | None = None,
+    *,
+    all_measured: bool = False,
+    include_warmup: bool = False,
+) -> Path:
+    """Render the last stable step, excluding warmup by default."""
     source = Path(profile_path)
     payload = json.loads(source.read_text(encoding="utf-8"))
     timelines = tuple(timeline_from_dict(item) for item in payload["timelines"])
-    return plot_timelines(timelines, destination or source.with_name("gantt.png"))
+    warmup_steps = int(payload["config"]["profile"]["warmup_steps"])
+    measured = timelines if include_warmup else timelines[warmup_steps:]
+    if not measured:
+        raise ValueError(
+            f"Profile has {len(timelines)} timeline(s) and {warmup_steps} warmup step(s); no measured step remains"
+        )
+    selected = measured if all_measured else measured[-1:]
+    if all_measured:
+        title = f"Measured steps {selected[0].step}-{selected[-1].step}"
+    else:
+        title = f"Step {selected[-1].step} after {warmup_steps} warmup steps"
+    return plot_timelines(
+        selected,
+        destination or source.with_name("gantt.png"),
+        title=title,
+    )

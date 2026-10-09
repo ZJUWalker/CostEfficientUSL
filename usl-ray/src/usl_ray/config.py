@@ -348,10 +348,7 @@ def validate_config(config: ExperimentConfig, role: Literal["server", "client", 
             raise ConfigError("client.model_state_offload_layers cannot exceed split.split_point")
         if config.client.model_state_offload_layers and config.pipeline.mode not in ("splitmind", "gpipe"):
             raise ConfigError("model-state offload is supported only by splitmind and gpipe")
-        if (
-            config.client.data.sample_count * config.client.data.shrink_frac
-            < config.batch.batch_size * config.train.steps
-        ):
+        if config.client.data.sample_count * config.client.data.shrink_frac < config.batch.batch_size * config.train.steps:
             raise ConfigError("the client dataset does not contain enough complete batches for train.steps")
 
 

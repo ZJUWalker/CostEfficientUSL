@@ -14,7 +14,7 @@ import torch
 
 @dataclass
 class _OffloadedTensor:
-    cpu: torch.Tensor
+    cpu: torch.Tensor | None
     device: torch.device
     ready: torch.cuda.Event
     source: torch.Tensor | None
@@ -105,15 +105,35 @@ class AsyncActivationOffloader:
         if isinstance(state, torch.Tensor):
             return state
         state.ready.synchronize()
+        if state.cpu is None:
+            raise RuntimeError("Saved tensor CPU backup was already released")
         with torch.cuda.stream(self.h2d_stream):
             restored = state.cpu.to(state.device, non_blocking=True)
             ready = torch.cuda.Event()
             self.h2d_stream.record_event(ready)
         torch.cuda.current_stream(state.device).wait_event(ready)
+        self.executor.submit(self._release_cpu_backup, state, ready)
         return restored
+
+    def _release_cpu_backup(self, state: _OffloadedTensor, ready: torch.cuda.Event) -> None:
+        ready.synchronize()
+        state.cpu = None
+        with self._lock:
+            self._states = [item for item in self._states if item is not state]
 
     def close(self) -> None:
         """Finish outstanding copies and release CPU backups."""
+        self.flush()
         self.executor.shutdown(wait=True)
         with self._lock:
             self._states.clear()
+
+    def flush(self) -> None:
+        """Wait until queued source and backup releases complete."""
+        self.executor.submit(lambda: None).result()
+
+    @property
+    def pending_count(self) -> int:
+        """Return retained saved-tensor states for diagnostics and tests."""
+        with self._lock:
+            return len(self._states)
