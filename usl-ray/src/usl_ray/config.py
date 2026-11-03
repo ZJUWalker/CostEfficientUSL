@@ -25,6 +25,7 @@ class RunConfig:
 
     name: str = "default"
     output_dir: str = "runs"
+    mode: Literal["local", "remote", "simulate"] = "local"
     seed: int = 0
 
 
@@ -348,7 +349,10 @@ def validate_config(config: ExperimentConfig, role: Literal["server", "client", 
             raise ConfigError("client.model_state_offload_layers cannot exceed split.split_point")
         if config.client.model_state_offload_layers and config.pipeline.mode not in ("splitmind", "gpipe"):
             raise ConfigError("model-state offload is supported only by splitmind and gpipe")
-        if config.client.data.sample_count * config.client.data.shrink_frac < config.batch.batch_size * config.train.steps:
+        if (
+            config.client.data.sample_count * config.client.data.shrink_frac
+            < config.batch.batch_size * config.train.steps
+        ):
             raise ConfigError("the client dataset does not contain enough complete batches for train.steps")
 
 
@@ -417,6 +421,11 @@ def run_tag(config: ExperimentConfig) -> str:
         )
     )
     return "_".join(parts)
+
+
+def result_dir(config: ExperimentConfig) -> Path:
+    """Return the deterministic result directory for one experiment."""
+    return Path(config.run.output_dir) / config.run.mode / config.run.name / run_tag(config)
 
 
 def dump_config(config: ExperimentConfig, destination: str | Path) -> None:

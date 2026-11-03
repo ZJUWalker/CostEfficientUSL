@@ -54,6 +54,7 @@ for split in "${SPLITS[@]}"; do
             RUN_NAME="${GRID_RUN_PREFIX}-sp${split}-b${batch}-ws${world}-coa${client_activation}-cos${client_model}-soa${server_activation}"
             COMMON_ARGS=(
               --set "run.name=$RUN_NAME"
+              --set run.mode=remote
               --set "split.split_point=$split"
               --set "batch.batch_size=$batch"
             )

@@ -1,6 +1,7 @@
 run:
   name: default
   output_dir: runs
+  mode: local
   seed: 0
 model:
   path: ""

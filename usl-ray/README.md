@@ -68,7 +68,7 @@ usl-ray server \
 
 解析后的配置不可变，并与每份 profile 一起保存。
 
-## 实验脚本
+## Examples
 
 脚本按职责分为四组：
 
@@ -81,19 +81,16 @@ usl-ray server \
 `SAVE_PROFILE=0` 同时关闭两者，或通过 `SAVE_GANTT=0` 只保留 profile。
 `GANTT_OUTPUT` 可以覆盖图片路径。
 
-### 基础入口
+实验结果按模式隔离：
 
-Ray 已经启动时，可以直接调用：
+- 本地执行写入 `runs/local/<run.name>/<run-tag>/`；
+- 双机协同写入 client 的 `runs/remote/<run.name>/<run-tag>/`；
+- 模拟写入 `runs/simulate/<run.name>/<run-tag>/`。
 
-```bash
-RAY_ADDRESS=<HEAD_IP>:26379 \
-  experiments/base/server.sh experiments/configs/qwen3-1.7b/server.yaml
+相同模式、配置和 run tag 再次成功执行时，会先删除旧结果目录，再写入本次
+结果，不累积带时间戳的重复目录。
 
-RAY_ADDRESS=<HEAD_IP>:26379 \
-  experiments/base/client.sh experiments/configs/qwen3-1.7b/client.yaml
-```
-
-### 本地测试和正式实验
+### 1. 纯单机测试
 
 Qwen3-0.6B smoke 测试：
 
@@ -121,7 +118,7 @@ SPLIT_POINTS="2 4" BATCH_SIZES="4 8" WORLD_SIZES="1 2" \
 本地模式使用单个 raylet，Ray ObjectRef 走共享内存，因此不能用于验证 WAN
 带宽。Client 和 Server 的物理 GPU 必须互不重叠。
 
-### 双机测试和正式实验
+### 2. 双机协同
 
 默认 server 为 `10.124.0.24`，client 为 `10.124.40.62`，Ray Head 始终在
 server。先在 server 执行：
@@ -154,7 +151,10 @@ Server 默认使用 GPU 0；`SERVER_WORLD_SIZE=N` 使用 GPU 0 到 N-1。
 双机 timeline 使用最小 RTT 样本估计 monotonic clock offset，适合调度
 可视化，但不等价于硬件级时钟同步。
 
-### Client 侧模拟
+### 3. 双机模拟
+
+先通过双机协同实验得到 profile 并拟合 `cost_model.json`，随后在 client
+机器离线运行模拟；模拟阶段不需要保持 server 或 Ray 集群运行：
 
 ```bash
 experiments/remote_simulate/run.sh \
@@ -181,7 +181,8 @@ ray start --head \
 
 sudo experiments/tc/shape.sh apply <BOND_IFACE> <CLIENT_IP> 230 10
 export RAY_ADDRESS=<SERVER_IP>:26379
-experiments/base/server.sh experiments/configs/qwen3-1.7b/server.yaml
+experiments/base/server.sh experiments/configs/qwen3-1.7b/server.yaml \
+  --set run.mode=remote
 ```
 
 在 client 机器上：
@@ -196,7 +197,8 @@ ray start \
 
 sudo experiments/tc/shape.sh apply <BOND_IFACE> <SERVER_IP> 230 10
 export RAY_ADDRESS=<SERVER_IP>:26379
-experiments/base/client.sh experiments/configs/qwen3-1.7b/client.yaml
+experiments/base/client.sh experiments/configs/qwen3-1.7b/client.yaml \
+  --set run.mode=remote
 ```
 
 `shape.sh` 使用 HTB 和 netem，并按对端 IP 过滤，因此本机 NCCL 和无关流量
@@ -250,9 +252,10 @@ mask。GPT-2 被有意排除，不提供支持。
 当 `profile.enabled` 为 true 时，client 写入：
 
 ```text
-runs/<run.name>/<run_tag>/
+runs/<mode>/<run.name>/<run_tag>/
 ├── config.yaml
-└── profile.json
+├── profile.json
+└── gantt.png
 ```
 
 `profile.json` 包含解析后的配置、版本信息、client/server 显存、计算操作与
@@ -292,13 +295,16 @@ usl-ray calibrate <seven profile.json paths> \
 ```bash
 usl-ray simulate \
   --config experiments/configs/qwen3-1.7b/client.yaml \
-  --cost-model runs/cost_model.json \
-  --output runs/simulation.json
+  --cost-model runs/cost_model.json
 
 usl-ray compare \
-  --profile runs/.../profile.json \
+  --profile runs/remote/.../profile.json \
   --cost-model runs/cost_model.json
 ```
+
+未显式传入 `--output` 时，模拟结果写入
+`runs/simulate/<run.name>/<run-tag>/simulation.json`，并在同目录覆盖生成
+`simulation.png`。
 
 Pareto 搜索：
 

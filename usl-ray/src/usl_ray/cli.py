@@ -5,14 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Literal
 
 import ray
 
 from usl_ray.client.launcher import run_client
-from usl_ray.config import ExperimentConfig, load_config
+from usl_ray.config import ExperimentConfig, load_config, result_dir
 from usl_ray.profile.plot import plot_profile, plot_timelines
 from usl_ray.server.launcher import RAY_NAMESPACE, run_server
 from usl_ray.simulate.cost_model import CostModel, MainVariable, fit_from_profiles
@@ -94,9 +94,10 @@ def _variables(config: ExperimentConfig) -> MainVariable:
 
 def _simulate(args: argparse.Namespace) -> int:
     config = load_config(args.config, args.set, role="any")
+    config = replace(config, run=replace(config.run, mode="simulate"))
     model = CostModel.load(args.cost_model)
     result = simulate_splitmind(_variables(config), model.time, model.memory)
-    output = Path(args.output)
+    output = Path(args.output) if args.output else result_dir(config) / "simulation.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps({"variables": asdict(result.variables), "objective": asdict(result.objective)}, indent=2),
@@ -172,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     simulate = commands.add_parser("simulate", help="Simulate one YAML configuration")
     simulate.add_argument("--config", required=True)
     simulate.add_argument("--cost-model", required=True)
-    simulate.add_argument("--output", default="runs/simulation.json")
+    simulate.add_argument("--output")
     simulate.add_argument("--set", action="append", default=[])
     simulate.set_defaults(handler=_simulate)
     compare = commands.add_parser("compare", help="Compare one profile with simulation")

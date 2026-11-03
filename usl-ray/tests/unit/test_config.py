@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from usl_ray.config import ConfigError, diff_shared_config, load_config, same_experiment
+from usl_ray.config import ConfigError, diff_shared_config, load_config, result_dir, same_experiment
 
 CONFIGS = Path(__file__).parents[2] / "experiments" / "configs"
 
@@ -20,7 +20,7 @@ def test_client_and_server_share_one_common_config() -> None:
     assert not diff_shared_config(server, client)
     assert server.server is not None
     assert client.client is not None
-    assert server.batch.num_microbatches == 2
+    assert server.batch.num_microbatches == 8
     with pytest.raises(FrozenInstanceError):
         server.batch.batch_size = 4  # type: ignore[misc]
 
@@ -35,6 +35,17 @@ def test_typed_cli_overrides() -> None:
     assert config.batch.batch_size == 4
     assert config.server is not None and config.server.world_size == 2
     assert config.profile.enabled is False
+
+
+def test_result_directory_includes_execution_mode() -> None:
+    """Local, remote, and simulation artifacts occupy separate namespaces."""
+    config = load_config(
+        CONFIGS / "smoke-qwen3-0.6b" / "client.yaml",
+        ["run.mode=remote"],
+        role="client",
+    )
+    path = result_dir(config)
+    assert path.parts[:3] == ("runs", "remote", "smoke-qwen3-0.6b")
 
 
 @pytest.mark.parametrize(

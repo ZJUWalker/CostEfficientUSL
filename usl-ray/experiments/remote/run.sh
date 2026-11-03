@@ -38,6 +38,7 @@ case "$ROLE" in
     publish_remote_contract "$CONTRACT"
     if ! "$EXPERIMENTS_DIR/base/server.sh" "$EXPERIMENT/server.yaml" \
       "$@" \
+      --set run.mode=remote \
       --set "server.world_size=$SERVER_WORLD_SIZE"; then
       ray stop --force >/dev/null 2>&1 || true
       exit 1
@@ -53,7 +54,9 @@ case "$ROLE" in
       fi
     }
     trap cleanup_client EXIT INT TERM
-    "$EXPERIMENTS_DIR/base/client.sh" "$EXPERIMENT/client.yaml" "$@"
+    "$EXPERIMENTS_DIR/base/client.sh" "$EXPERIMENT/client.yaml" \
+      "$@" \
+      --set run.mode=remote
     ;;
   *)
     echo "ROLE must be server or client, got: $ROLE" >&2

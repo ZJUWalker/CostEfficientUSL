@@ -8,12 +8,10 @@ COST_MODEL=${2:-${COST_MODEL:-"$EXPERIMENTS_DIR/../runs/cost_model.json"}}
 
 read -r -a SPLITS <<< "${SPLIT_POINTS:-4}"
 read -r -a BATCHES <<< "${BATCH_SIZES:-8}"
-OUTPUT_DIR=${SIMULATION_OUTPUT_DIR:-"$EXPERIMENTS_DIR/../runs/remote_simulations"}
 
 for split in "${SPLITS[@]}"; do
   for batch in "${BATCHES[@]}"; do
-    SIMULATION_OUTPUT="$OUTPUT_DIR/sp${split}_b${batch}.json" \
-      "$SCRIPT_DIR/run.sh" "$EXPERIMENT" "$COST_MODEL" \
+    "$SCRIPT_DIR/run.sh" "$EXPERIMENT" "$COST_MODEL" \
       --set "split.split_point=$split" \
       --set "batch.batch_size=$batch"
   done

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import shutil
 import threading
 from dataclasses import replace
-from pathlib import Path
 
 import ray
 
 from usl_ray.client.trainer import ClientActor, ClientResult
-from usl_ray.config import ExperimentConfig, dump_config, run_tag
+from usl_ray.config import ExperimentConfig, dump_config, result_dir
 from usl_ray.profile.recorder import write_profile
 from usl_ray.server.launcher import RAY_NAMESPACE, stage_zero_name
 
@@ -46,7 +46,9 @@ def run_client(config: ExperimentConfig, *, num_gpus: float = 1) -> ClientResult
         ray.get(client.configure.remote(server_info))
         result = ray.get(client.train.remote())
         merged = replace(config, server=server_info.server_config)
-        output = Path(merged.run.output_dir) / merged.run.name / run_tag(merged)
+        output = result_dir(merged)
+        if output.exists():
+            shutil.rmtree(output)
         dump_config(merged, output / "config.yaml")
         if merged.profile.enabled:
             write_profile(

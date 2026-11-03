@@ -105,10 +105,13 @@ echo "Client physical GPU:   $CLIENT_VISIBLE_DEVICE"
 
 "$EXPERIMENTS_DIR/base/server.sh" "$EXPERIMENT/server.yaml" \
   "${SERVER_ARGS[@]}" \
+  --set run.mode=local \
   --set "server.world_size=$SERVER_WORLD_SIZE" &
 SERVER_PID=$!
 
-"$EXPERIMENTS_DIR/base/client.sh" "$EXPERIMENT/client.yaml" "${CLIENT_ARGS[@]}" &
+"$EXPERIMENTS_DIR/base/client.sh" "$EXPERIMENT/client.yaml" \
+  "${CLIENT_ARGS[@]}" \
+  --set run.mode=local &
 CLIENT_PID=$!
 
 if ! wait -n "$SERVER_PID" "$CLIENT_PID"; then
