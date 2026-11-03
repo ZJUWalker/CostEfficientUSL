@@ -227,6 +227,9 @@ class ClientTrainer:
         ray.get(self.server_stage_zero.begin_step.remote(step, [item.sequence for item in microbatches]))
         loss = SCHEDULES[self.config.pipeline.mode](self, microbatches)
         self.outbox.flush()
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        ray.get(self.server_stage_zero.finish_step.remote(step))
         self._receive_futures.clear()
         return loss
 
@@ -320,6 +323,11 @@ class ClientActor:
         return clock_ms()
 
     @ray.method(concurrency_group="io")
+    def node_id(self) -> str:
+        """Return the Ray node identifier hosting the client."""
+        return ray.get_runtime_context().get_node_id()
+
+    @ray.method(concurrency_group="io")
     def parameter_state(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         """Return CPU snapshots for numerical integration tests."""
         if self.head is None or self.tail is None:
@@ -339,7 +347,11 @@ class ClientActor:
         torch.manual_seed(self.config.run.seed)
         head, tail = load_client_partitions(self.config)
         self.head, self.tail = head, tail
-        tokenizer = None if self.config.client is None or self.config.client.data.dataset == "synthetic" else load_tokenizer(self.config)
+        tokenizer = (
+            None
+            if self.config.client is None or self.config.client.data.dataset == "synthetic"
+            else load_tokenizer(self.config)
+        )
         loader = create_dataloader(self.config, tokenizer)
         if not self._configured.wait(timeout=self.config.client.wait_server_s):
             raise TimeoutError("Client timed out waiting for server handshake")

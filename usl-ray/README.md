@@ -13,6 +13,8 @@
   只携带标量元数据，每个 partition 根据本地模型配置重建这些张量。
 - 客户端调度使用有界 `for` 循环和 Future，不使用轮询线程、`while True`
   或应用层网络 sleep。
+- 每个 global step 结束时执行 client/server 屏障；客户端和所有 server
+  stage 完成 backward、optimizer step 与待发送消息后，才开始下一个 step。
 - 真实测量与模拟运行共用 `Span`、`StepTimeline`、`StepMetrics`、
   `LinkModel` 以及同一个层划分函数。
 
@@ -121,6 +123,24 @@ experiments/run_profile_gantt.sh experiments/configs/qwen3-1.7b \
 ## 双机 WAN 实验
 
 Ray 对象传输必须跨越两个 raylet，`tc` 才会生效。
+
+不启用 `tc` 时，可以使用专用的 Qwen3-0.6B 双机脚本。先在
+`10.124.0.24` 上启动 server：
+
+```bash
+experiments/run_two_node_qwen3_0_6b_server.sh
+```
+
+再在 `10.124.40.62` 上启动 client；client 完成后会写入 `profile.json`
+并生成 `gantt.png`：
+
+```bash
+experiments/run_two_node_qwen3_0_6b_client_gantt.sh
+```
+
+脚本默认各使用 GPU 0，可分别通过 `SERVER_GPU` 和 `CLIENT_GPU` 覆盖。
+双机 timeline 使用最小 RTT 样本估计 monotonic clock offset；它适合调度
+可视化，但不等价于硬件级时钟同步。
 
 在 server 机器上：
 

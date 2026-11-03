@@ -25,7 +25,7 @@ from usl_ray.config import (
 )
 from usl_ray.models.sequence import SequenceSpec
 from usl_ray.server.launcher import create_stage_actors
-from usl_ray.transport import Mailbox, MessageKey, TensorBlob
+from usl_ray.transport import Mailbox, MessageKey, TensorBlob, clock_ms
 
 
 @ray.remote(max_concurrency=8)
@@ -61,7 +61,7 @@ def _config(model_path: Path) -> ExperimentConfig:
         split=SplitConfig(split_point=1),
         batch=BatchConfig(batch_size=2, micro_batch_size=1, max_seq_len=4),
         train=TrainConfig(steps=1),
-        profile=ProfileConfig(enabled=False, warmup_steps=0),
+        profile=ProfileConfig(enabled=True, warmup_steps=0),
         server=ServerConfig(world_size=2, backend="gloo", wait_client_s=30),
     )
 
@@ -121,9 +121,20 @@ def test_two_stage_stock_pipeline_crosses_ray_boundaries(tmp_path: Path, mode: s
         gradients = [
             ray.get(client.get.remote(MessageKey(0, microbatch, "grad_down"))).to_tensor() for microbatch in range(2)
         ]
+        ray.get(stages[0].finish_step.remote(0))
+        barrier_returned_ms = clock_ms()
         results = ray.get(run_refs)
         assert [tuple(item.shape) for item in gradients] == [(1, 4, 16), (1, 4, 16)]
         assert [item.rank for item in results] == [0, 1]
+        server_step_ends = [
+            span.end_ms
+            for result in results
+            for timeline in result.timelines
+            for span in timeline.spans
+            if span.operation == "server_step"
+        ]
+        assert len(server_step_ends) == 2
+        assert max(server_step_ends) <= barrier_returned_ms
     finally:
         for stage in stages:
             ray.kill(stage, no_restart=True)

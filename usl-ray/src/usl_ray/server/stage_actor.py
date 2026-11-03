@@ -19,7 +19,7 @@ from usl_ray.models.partition import SplitPlan
 from usl_ray.models.sequence import SequenceSpec
 from usl_ray.offload import AsyncActivationOffloader
 from usl_ray.profile.recorder import Recorder
-from usl_ray.profile.timeline import StepTimeline
+from usl_ray.profile.timeline import StepTimeline, shift_timelines
 from usl_ray.server.boundary import ClientGradients, ClientInputs, ClientLoss, USLPipelineStage, microbatch_kwargs
 from usl_ray.transport import Mailbox, MessageKey, Outbox, TensorBlob, clock_ms
 
@@ -60,7 +60,9 @@ class StageActor:
         self._attached = threading.Event()
         self._ready = threading.Event()
         self._step_specs: dict[int, Future[list[SequenceSpec]]] = {}
+        self._completed_steps: dict[int, Future[None]] = {}
         self._step_lock = threading.Lock()
+        self._abort_reason: str | None = None
         self.device = torch.device("cpu")
         self.model: torch.nn.Module | None = None
         self.stage: USLPipelineStage | None = None
@@ -122,7 +124,8 @@ class StageActor:
         """Unblock this actor after a peer failure."""
         self.mailbox.abort(reason)
         with self._step_lock:
-            futures = list(self._step_specs.values())
+            self._abort_reason = reason
+            futures = [*self._step_specs.values(), *self._completed_steps.values()]
         for future in futures:
             if not future.done():
                 future.set_exception(RuntimeError(reason))
@@ -142,7 +145,26 @@ class StageActor:
     def publish_profile(self, results: list[StageResult]) -> None:
         """Deliver aggregated stage results before either driver exits."""
         client = self._require_client()
-        ray.get(client.set_server_results.remote(results))
+        offset_ms = 0.0
+        if ray.get(client.node_id.remote()) != self.node_id():
+            offset_ms = self._estimate_client_clock_offset(client)
+        aligned = [
+            StageResult(result.rank, result.max_memory_mib, shift_timelines(result.timelines, offset_ms))
+            for result in results
+        ]
+        ray.get(client.set_server_results.remote(aligned))
+
+    def _estimate_client_clock_offset(self, client: ray.actor.ActorHandle) -> float:
+        """Estimate the offset that maps the server clock onto the client clock."""
+        samples: list[tuple[float, float]] = []
+        for _ in range(7):
+            started = clock_ms()
+            client_clock = float(ray.get(client.clock.remote()))
+            finished = clock_ms()
+            round_trip_ms = finished - started
+            offset_ms = client_clock - (started + finished) / 2
+            samples.append((round_trip_ms, offset_ms))
+        return min(samples, key=lambda item: item[0])[1]
 
     @ray.method(concurrency_group="io")
     def attach(self, client: ray.actor.ActorHandle, client_config: ExperimentConfig) -> ServerInfo:
@@ -170,7 +192,46 @@ class StageActor:
 
     def _step_future(self, step: int) -> Future[list[SequenceSpec]]:
         with self._step_lock:
-            return self._step_specs.setdefault(step, Future())
+            future = self._step_specs.get(step)
+            if future is None:
+                future = Future()
+                if self._abort_reason is not None:
+                    future.set_exception(RuntimeError(self._abort_reason))
+                self._step_specs[step] = future
+            return future
+
+    def _completion_future(self, step: int) -> Future[None]:
+        with self._step_lock:
+            future = self._completed_steps.get(step)
+            if future is None:
+                future = Future()
+                if self._abort_reason is not None:
+                    future.set_exception(RuntimeError(self._abort_reason))
+                self._completed_steps[step] = future
+            return future
+
+    def _mark_step_complete(self, step: int) -> None:
+        future = self._completion_future(step)
+        if not future.done():
+            future.set_result(None)
+
+    @ray.method(concurrency_group="io")
+    def wait_step_complete(self, step: int, timeout_s: float) -> None:
+        """Wait until this stage has fully completed one global step."""
+        if step < 0 or step >= self.config.train.steps:
+            raise ValueError(f"Step {step} is outside configured range")
+        self._completion_future(step).result(timeout=timeout_s)
+
+    @ray.method(concurrency_group="io")
+    def finish_step(self, step: int) -> None:
+        """Barrier until every server stage has completed one global step."""
+        if self.rank != 0:
+            raise RuntimeError("Client must finish a step through stage 0")
+        timeout_s = self.config.network.timeout_s
+        refs = [peer.wait_step_complete.remote(step, timeout_s) for index, peer in enumerate(self.peers) if index != 0]
+        self.wait_step_complete(step, timeout_s)
+        if refs:
+            ray.get(refs)
 
     @ray.method(concurrency_group="io")
     def _set_step(self, step: int, specs: list[SequenceSpec]) -> None:
@@ -299,7 +360,13 @@ class StageActor:
     def run(self) -> StageResult:
         """Run exactly the configured global steps and then release resources."""
         server = self.config.server
-        if server is None or self.stage is None or self.schedule is None or self.optimizer is None or self.outbox is None:
+        if (
+            server is None
+            or self.stage is None
+            or self.schedule is None
+            or self.optimizer is None
+            or self.outbox is None
+        ):
             raise RuntimeError("StageActor.setup must complete before run")
         if not self._attached.wait(timeout=server.wait_client_s):
             raise TimeoutError(f"Stage {self.rank} timed out waiting for client attach")
@@ -309,7 +376,9 @@ class StageActor:
                 self.stage.current_step = step
                 specs = self._step_future(step).result(timeout=self.config.network.timeout_s)
                 if len(specs) != self.config.batch.num_microbatches:
-                    raise ValueError(f"Step {step} expected {self.config.batch.num_microbatches} specs, got {len(specs)}")
+                    raise ValueError(
+                        f"Step {step} expected {self.config.batch.num_microbatches} specs, got {len(specs)}"
+                    )
                 args: list[tuple[torch.Tensor, ...]]
                 if self.rank == 0:
                     args = ClientInputs(len(specs), self._receive_activation, self._send_gradient)
@@ -324,11 +393,12 @@ class StageActor:
                     self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
                 self.outbox.flush()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                self._mark_step_complete(step)
                 with self._step_lock:
                     self._step_specs.pop(step, None)
-            max_memory = (
-                torch.cuda.max_memory_allocated(self.device) / 1024**2 if self.device.type == "cuda" else 0.0
-            )
+            max_memory = torch.cuda.max_memory_allocated(self.device) / 1024**2 if self.device.type == "cuda" else 0.0
             return StageResult(self.rank, max_memory, self.recorder.timelines())
         except BaseException as error:
             if self.client is not None:

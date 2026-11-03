@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from usl_ray.profile.link import LinkModel, fit_link_model
-from usl_ray.profile.timeline import Span, StepTimeline, summarize, trimmed_mean
+from usl_ray.profile.timeline import Span, StepTimeline, shift_timelines, summarize, trimmed_mean
 
 
 def test_trimmed_mean_matches_legacy_aggregation() -> None:
@@ -35,6 +35,14 @@ def test_summary_uses_all_lanes_and_protects_zero_division() -> None:
     assert metrics.downlink_bytes == 200
     assert metrics.operation_mean_ms["head_forward"] == 10
     assert summarize([]).batch_train_time_ms == 0
+
+
+def test_shift_timelines_preserves_durations_and_metadata() -> None:
+    """Clock-domain alignment translates timestamps without changing spans."""
+    timeline = StepTimeline(3, (Span("server/0", "server_forward", 3, 2, 10.0, 15.5, 128),))
+    shifted = shift_timelines((timeline,), -4.0)
+    assert shifted == (StepTimeline(3, (Span("server/0", "server_forward", 3, 2, 6.0, 11.5, 128),)),)
+    assert shifted[0].spans[0].duration_ms == timeline.spans[0].duration_ms
 
 
 def test_link_model_uses_tc_si_units() -> None:

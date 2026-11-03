@@ -50,6 +50,36 @@ class StepMetrics:
     downlink_time_ms: float
 
 
+def shift_timelines(timelines: tuple[StepTimeline, ...], offset_ms: float) -> tuple[StepTimeline, ...]:
+    """Translate timeline timestamps into another monotonic clock domain.
+
+    Args:
+        timelines: Timelines measured in the source clock domain.
+        offset_ms: Value added to every start and end timestamp.
+
+    Returns:
+        Timelines expressed in the destination clock domain.
+    """
+    return tuple(
+        StepTimeline(
+            timeline.step,
+            tuple(
+                Span(
+                    span.lane,
+                    span.operation,
+                    span.step,
+                    span.microbatch,
+                    span.start_ms + offset_ms,
+                    span.end_ms + offset_ms,
+                    span.nbytes,
+                )
+                for span in timeline.spans
+            ),
+        )
+        for timeline in timelines
+    )
+
+
 def trimmed_mean(values: list[float]) -> float:
     """Match the legacy profile aggregation: trim extremes when possible."""
     if not values:
