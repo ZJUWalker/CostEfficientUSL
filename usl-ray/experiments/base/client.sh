@@ -2,38 +2,37 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
-CONFIG="$SCRIPT_DIR/configs/smoke-qwen3-0.6b/client.yaml"
+source "$SCRIPT_DIR/common.sh"
 
-SERVER_IP=${SERVER_IP:-10.124.0.24}
-CLIENT_IP=${CLIENT_IP:-10.124.40.62}
-RAY_PORT=${RAY_PORT:-26379}
-CLIENT_GPU=${CLIENT_GPU:-0}
+CONFIG=${1:?usage: client.sh <client.yaml> [--set key=value ...]}
+shift
+CONFIG=$(resolve_file "$CONFIG")
+: "${RAY_ADDRESS:?Set RAY_ADDRESS to the Ray head address}"
+
+PROFILE_ENABLED=$(bool_value "${SAVE_PROFILE:-1}")
+GANTT_ENABLED=$(bool_value "${SAVE_GANTT:-$PROFILE_ENABLED}")
+if [[ $PROFILE_ENABLED == false && $GANTT_ENABLED == true ]]; then
+  echo "SAVE_GANTT requires SAVE_PROFILE." >&2
+  exit 2
+fi
 
 cd "$PROJECT_DIR"
-ray stop --force >/dev/null 2>&1 || true
+STARTED_NS=$("$PYTHON_BIN" -c "import time; print(time.time_ns())")
+RUN_ARGS=("$@" --set "profile.enabled=$PROFILE_ENABLED")
+DRY_RUN=false
+for argument in "$@"; do
+  if [[ $argument == "--dry-run" ]]; then
+    DRY_RUN=true
+  fi
+done
+usl_cli client --config "$CONFIG" "${RUN_ARGS[@]}"
 
-cleanup() {
-  ray stop --force >/dev/null 2>&1 || true
-}
-trap cleanup EXIT INT TERM
-
-export CUDA_VISIBLE_DEVICES="$CLIENT_GPU"
-ray start \
-  --address="$SERVER_IP:$RAY_PORT" \
-  --node-ip-address="$CLIENT_IP" \
-  --num-gpus=1 \
-  --resources='{"usl_client": 1}' \
-  --disable-usage-stats
-
-export RAY_ADDRESS="$SERVER_IP:$RAY_PORT"
-STARTED_NS=$(python -c "import time; print(time.time_ns())")
-RUN_ARGS=(--set profile.enabled=true "$@")
-
-"$SCRIPT_DIR/run_client.sh" "$CONFIG" "${RUN_ARGS[@]}"
+if [[ $DRY_RUN == true || $PROFILE_ENABLED == false ]]; then
+  exit 0
+fi
 
 PROFILE=$(
-  python - "$PROJECT_DIR" "$CONFIG" "$STARTED_NS" "${RUN_ARGS[@]}" <<'PY'
+  "$PYTHON_BIN" - "$PROJECT_DIR" "$CONFIG" "$STARTED_NS" "${RUN_ARGS[@]}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -67,9 +66,9 @@ print(max(profiles, key=lambda path: path.stat().st_mtime_ns))
 PY
 )
 
-GANTT=${GANTT_OUTPUT:-"$(dirname -- "$PROFILE")/gantt.png"}
-usl-ray plot "$PROFILE" --output "$GANTT"
-
-echo
 echo "Profile: $PROFILE"
-echo "Gantt:   $GANTT"
+if [[ $GANTT_ENABLED == true ]]; then
+  GANTT=${GANTT_OUTPUT:-"$(dirname -- "$PROFILE")/gantt.png"}
+  usl_cli plot "$PROFILE" --output "$GANTT"
+  echo "Gantt:   $GANTT"
+fi

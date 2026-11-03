@@ -21,7 +21,7 @@ COMBINATIONS=(
 STARTED=$(date +%s)
 for combination in "${COMBINATIONS[@]}"; do
   read -r split batch client_activation client_model server_activation <<<"$combination"
-  "$SCRIPT_DIR/run_single.sh" "$EXPERIMENT" \
+  "$SCRIPT_DIR/local/run.sh" "$EXPERIMENT" \
     --set "split.split_point=$split" \
     --set "batch.batch_size=$batch" \
     --server-set "server.world_size=$WORLD_SIZE" \

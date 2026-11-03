@@ -68,79 +68,106 @@ usl-ray server \
 
 解析后的配置不可变，并与每份 profile 一起保存。
 
-## 单机实验
+## 实验脚本
 
-该功能测试拓扑只使用一个 raylet。Ray 传输仍走共享内存，因此流量控制不会
-对其生效：
+脚本按职责分为四组：
 
-```bash
-TOPO=same-node experiments/run_single.sh \
-  experiments/configs/smoke-qwen3-0.6b
-```
+- `experiments/base/`：已启动 Ray 集群上的通用 client/server 入口；
+- `experiments/local/`：单机生命周期、smoke 测试和本地网格；
+- `experiments/remote/`：双机生命周期、smoke 测试和双机网格；
+- `experiments/remote_simulate/`：在 client 侧运行模拟和模拟网格。
 
-脚本遵循原始实验生命周期：
+所有真实训练默认由 client 写入 `profile.json` 并生成 `gantt.png`。可通过
+`SAVE_PROFILE=0` 同时关闭两者，或通过 `SAVE_GANTT=0` 只保留 profile。
+`GANTT_OUTPUT` 可以覆盖图片路径。
 
-1. 启动 Ray；
-2. 在后台启动 server；
-3. 在前台启动 client；
-4. 等待 server；
-5. 正常退出或失败时停止 Ray。
+### 基础入口
 
-使用 `--server-set` 和 `--client-set` 覆盖角色专属配置：
+Ray 已经启动时，可以直接调用：
 
 ```bash
-experiments/run_single.sh experiments/configs/smoke-qwen3-0.6b \
-  --set train.steps=2 \
-  --server-set server.activation_offload_mb=2 \
-  --client-set client.activation_offload_mb=2 \
-  --client-set client.model_state_offload_layers=1
+RAY_ADDRESS=<HEAD_IP>:26379 \
+  experiments/base/server.sh experiments/configs/qwen3-1.7b/server.yaml
+
+RAY_ADDRESS=<HEAD_IP>:26379 \
+  experiments/base/client.sh experiments/configs/qwen3-1.7b/client.yaml
 ```
 
-### 性能分析与甘特图检查
+### 本地测试和正式实验
 
-运行默认的随机权重、合成数据 smoke 实验，并绘制最后一个非 warmup step：
+Qwen3-0.6B smoke 测试：
 
 ```bash
-experiments/run_profile_gantt.sh
+experiments/local/test.sh
 ```
 
-脚本会输出生成的 `profile.json` 和 `gantt.png` 路径。它也接受实验目录，
-并支持与 `run_single.sh` 相同的 `--set`、`--server-set` 和
-`--client-set`：
+正式配置：
 
 ```bash
-experiments/run_profile_gantt.sh experiments/configs/qwen3-1.7b \
-  --set train.steps=3 \
-  --set profile.warmup_steps=1 \
-  --server-set server.world_size=2
+SERVER_WORLD_SIZE=4 \
+SERVER_VISIBLE_DEVICES=0,1,2,3 \
+CLIENT_VISIBLE_DEVICE=7 \
+experiments/local/run.sh experiments/configs/qwen3-1.7b \
+  --set train.steps=3
 ```
 
-甘特图始终只包含 warmup 之后最后一个 steady global step，避免跨 step
-重叠或首次优化器初始化干扰时间线。默认的 `TOPO=same-node` 运行可以验证
-时间线结构，但 Ray 在同一个 raylet 内使用共享内存，因此其传输 Span
-不代表 WAN 性能。
+本地网格：
 
-## 双机 WAN 实验
+```bash
+SPLIT_POINTS="2 4" BATCH_SIZES="4 8" WORLD_SIZES="1 2" \
+  experiments/local/grid.sh experiments/configs/qwen3-1.7b
+```
+
+本地模式使用单个 raylet，Ray ObjectRef 走共享内存，因此不能用于验证 WAN
+带宽。Client 和 Server 的物理 GPU 必须互不重叠。
+
+### 双机测试和正式实验
+
+默认 server 为 `10.124.0.24`，client 为 `10.124.40.62`，Ray Head 始终在
+server。先在 server 执行：
+
+```bash
+ROLE=server SERVER_WORLD_SIZE=1 experiments/remote/test.sh
+```
+
+再在 client 执行：
+
+```bash
+ROLE=client CLIENT_VISIBLE_DEVICE=0 experiments/remote/test.sh
+```
+
+正式实验将 `test.sh` 换成 `run.sh <experiment-directory>`。双机网格需要两端
+使用相同的网格变量和配置，并分别设置 `ROLE`：
+
+```bash
+ROLE=server SPLIT_POINTS="2 4" WORLD_SIZES="1 2" \
+  experiments/remote/grid.sh experiments/configs/qwen3-1.7b
+
+ROLE=client SPLIT_POINTS="2 4" WORLD_SIZES="1 2" \
+  experiments/remote/grid.sh experiments/configs/qwen3-1.7b
+```
+
+双机两端必须使用相同的 `SAVE_PROFILE`；`SAVE_GANTT` 只在 client 生效。
+启动时会通过 Ray contract actor 校验运行模式、profile 开关及完整网格，
+不一致会在训练前直接失败。
+Server 默认使用 GPU 0；`SERVER_WORLD_SIZE=N` 使用 GPU 0 到 N-1。
+双机 timeline 使用最小 RTT 样本估计 monotonic clock offset，适合调度
+可视化，但不等价于硬件级时钟同步。
+
+### Client 侧模拟
+
+```bash
+experiments/remote_simulate/run.sh \
+  experiments/configs/qwen3-1.7b \
+  runs/cost_model.json
+```
+
+模拟网格使用 `experiments/remote_simulate/grid.sh`，通过 `SPLIT_POINTS` 和
+`BATCH_SIZES` 指定搜索点。
+
+## 双机 WAN 限速
 
 Ray 对象传输必须跨越两个 raylet，`tc` 才会生效。
-
-不启用 `tc` 时，可以使用专用的 Qwen3-0.6B 双机脚本。先在
-`10.124.0.24` 上启动 server：
-
-```bash
-experiments/run_two_node_qwen3_0_6b_server.sh
-```
-
-再在 `10.124.40.62` 上启动 client；client 完成后会写入 `profile.json`
-并生成 `gantt.png`：
-
-```bash
-experiments/run_two_node_qwen3_0_6b_client_gantt.sh
-```
-
-脚本默认各使用 GPU 0，可分别通过 `SERVER_GPU` 和 `CLIENT_GPU` 覆盖。
-双机 timeline 使用最小 RTT 样本估计 monotonic clock offset；它适合调度
-可视化，但不等价于硬件级时钟同步。
 
 在 server 机器上：
 
@@ -154,7 +181,7 @@ ray start --head \
 
 sudo experiments/tc/shape.sh apply <BOND_IFACE> <CLIENT_IP> 230 10
 export RAY_ADDRESS=<SERVER_IP>:26379
-experiments/run_server.sh experiments/configs/qwen3-1.7b/server.yaml
+experiments/base/server.sh experiments/configs/qwen3-1.7b/server.yaml
 ```
 
 在 client 机器上：
@@ -169,7 +196,7 @@ ray start \
 
 sudo experiments/tc/shape.sh apply <BOND_IFACE> <SERVER_IP> 230 10
 export RAY_ADDRESS=<SERVER_IP>:26379
-experiments/run_client.sh experiments/configs/qwen3-1.7b/client.yaml
+experiments/base/client.sh experiments/configs/qwen3-1.7b/client.yaml
 ```
 
 `shape.sh` 使用 HTB 和 netem，并按对端 IP 过滤，因此本机 NCCL 和无关流量
@@ -187,8 +214,8 @@ python experiments/bench_link.py --expected-mbps 230
 
 ### 网络命名空间拓扑
 
-`experiments/tc/netns.sh` 和 `TOPO=netns` 会创建两个通过 veth 对连接的本地
-raylet。该操作需要 `CAP_SYS_ADMIN`。开发容器不具备此 capability
+`experiments/tc/netns.sh` 可以创建通过 veth 对连接的本地 namespace，
+供手工启动两个 raylet。该操作需要 `CAP_SYS_ADMIN`。开发容器不具备此 capability
 （`mount --make-shared /run/netns` 被拒绝），因此尚未在这里运行该拓扑。
 请在具备相应 capability 的宿主机上运行，或使用上面的双机拓扑。
 
