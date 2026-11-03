@@ -155,14 +155,7 @@ def _calibrate(args: argparse.Namespace) -> int:
 
 
 def _plot(args: argparse.Namespace) -> int:
-    print(
-        plot_profile(
-            args.profile,
-            args.output,
-            all_measured=args.all_measured,
-            include_warmup=args.include_warmup,
-        )
-    )
+    print(plot_profile(args.profile, args.output))
     return 0
 
 
@@ -207,8 +200,6 @@ def build_parser() -> argparse.ArgumentParser:
     plot = commands.add_parser("plot", help="Plot one runtime profile")
     plot.add_argument("profile")
     plot.add_argument("--output")
-    plot.add_argument("--all-measured", action="store_true", help="Plot every measured step instead of only the last")
-    plot.add_argument("--include-warmup", action="store_true", help="Include warmup timelines")
     plot.set_defaults(handler=_plot)
     return parser
 

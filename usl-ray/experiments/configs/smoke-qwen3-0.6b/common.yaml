@@ -9,6 +9,6 @@ model:
   vocab_size: 151936
   dtype: bfloat16
 split: {split_point: 1}
-batch: {batch_size: 2, micro_batch_size: 1, max_seq_len: 32}
-train: {steps: 3}
-profile: {warmup_steps: 1}
+batch: {batch_size: 8, micro_batch_size: 1, max_seq_len: 4096}
+train: {steps: 10}
+profile: {warmup_steps: 4}
